@@ -17,13 +17,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/pingcap/tidb-operator/pkg/label"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
 	apps "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 type workerScaler struct {
@@ -46,7 +46,7 @@ func (s *workerScaler) Scale(meta metav1.Object, oldSet *apps.StatefulSet, newSe
 	} else if scaling < 0 {
 		return s.ScaleIn(meta, oldSet, newSet)
 	}
-	return s.SyncAutoScalerAnn(meta, oldSet)
+	return nil
 }
 
 func (s *workerScaler) ScaleOut(meta metav1.Object, oldSet *apps.StatefulSet, newSet *apps.StatefulSet) error {
@@ -96,11 +96,6 @@ func (s *workerScaler) ScaleIn(meta metav1.Object, oldSet *apps.StatefulSet, new
 
 	klog.Infof("scaling in dm-worker statefulset %s/%s, ordinal: %d (replicas: %d, delete slots: %v)", oldSet.Namespace, oldSet.Name, ordinal, replicas, deleteSlots.List())
 
-	//if controller.PodWebhookEnabled {
-	//	setReplicasAndDeleteSlots(newSet, replicas, deleteSlots)
-	//	return nil
-	//}
-
 	pvcName := ordinalPVCName(v1alpha1.DMWorkerMemberType, setName, ordinal)
 	pvc, err := s.deps.PVCLister.PersistentVolumeClaims(ns).Get(pvcName)
 	if err != nil {
@@ -123,10 +118,6 @@ func (s *workerScaler) ScaleIn(meta metav1.Object, oldSet *apps.StatefulSet, new
 		ns, pvcName, label.AnnPVCDeferDeleting, now)
 
 	setReplicasAndDeleteSlots(newSet, replicas, deleteSlots)
-	return nil
-}
-
-func (s *workerScaler) SyncAutoScalerAnn(meta metav1.Object, oldSet *apps.StatefulSet) error {
 	return nil
 }
 
@@ -153,9 +144,5 @@ func (s *fakeWorkerScaler) ScaleOut(_ metav1.Object, oldSet *apps.StatefulSet, n
 
 func (s *fakeWorkerScaler) ScaleIn(_ metav1.Object, oldSet *apps.StatefulSet, newSet *apps.StatefulSet) error {
 	setReplicasAndDeleteSlots(newSet, *oldSet.Spec.Replicas-1, nil)
-	return nil
-}
-
-func (s *fakeWorkerScaler) SyncAutoScalerAnn(dc metav1.Object, actual *apps.StatefulSet) error {
 	return nil
 }

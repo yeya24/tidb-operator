@@ -14,12 +14,15 @@
 package controller
 
 import (
+	"context"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
-	"github.com/pingcap/tidb-operator/pkg/label"
 	"github.com/pingcap/tidb-operator/pkg/pdapi"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,7 +34,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // PodControlInterface manages Pods used in TidbCluster
@@ -39,6 +42,7 @@ type PodControlInterface interface {
 	// TODO change this to UpdatePod
 	UpdateMetaInfo(*v1alpha1.TidbCluster, *corev1.Pod) (*corev1.Pod, error)
 	DeletePod(runtime.Object, *corev1.Pod) error
+	ForceDeletePod(runtime.Object, *corev1.Pod) error
 	UpdatePod(runtime.Object, *corev1.Pod) (*corev1.Pod, error)
 }
 
@@ -81,7 +85,7 @@ func (c *realPodControl) UpdatePod(controller runtime.Object, pod *corev1.Pod) (
 	// don't wait due to limited number of clients, but backoff after the default number of steps
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var updateErr error
-		updatePod, updateErr = c.kubeCli.CoreV1().Pods(namespace).Update(pod)
+		updatePod, updateErr = c.kubeCli.CoreV1().Pods(namespace).Update(context.TODO(), pod, metav1.UpdateOptions{})
 		if updateErr == nil {
 			klog.Infof("Pod: [%s/%s] updated successfully, %s: [%s/%s]", namespace, podName, kind, namespace, name)
 			return nil
@@ -106,6 +110,14 @@ func (c *realPodControl) UpdateMetaInfo(tc *v1alpha1.TidbCluster, pod *corev1.Po
 	ns := pod.GetNamespace()
 	podName := pod.GetName()
 	labels := pod.GetLabels()
+	annotations := pod.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	originalAnnotations := map[string]string{}
+	for k, v := range annotations {
+		originalAnnotations[k] = v
+	}
 	tcName := tc.GetName()
 	if labels == nil {
 		return pod, fmt.Errorf("pod %s/%s has empty labels, TidbCluster: %s", ns, podName, tcName)
@@ -118,12 +130,7 @@ func (c *realPodControl) UpdateMetaInfo(tc *v1alpha1.TidbCluster, pod *corev1.Po
 	memberID := labels[label.MemberIDLabelKey]
 	storeID := labels[label.StoreIDLabelKey]
 
-	var pdClient pdapi.PDClient
-	if tc.IsHeterogeneous() {
-		pdClient = c.pdControl.GetPDClient(pdapi.Namespace(tc.GetNamespace()), tc.Spec.Cluster.Name, tc.IsTLSClusterEnabled())
-	} else {
-		pdClient = c.pdControl.GetPDClient(pdapi.Namespace(tc.GetNamespace()), tcName, tc.IsTLSClusterEnabled())
-	}
+	pdClient := GetPDClient(c.pdControl, tc)
 
 	if labels[label.ClusterIDLabelKey] == "" {
 		cluster, err := pdClient.GetCluster()
@@ -136,24 +143,41 @@ func (c *realPodControl) UpdateMetaInfo(tc *v1alpha1.TidbCluster, pod *corev1.Po
 	component := labels[label.ComponentLabelKey]
 	switch component {
 	case label.PDLabelVal:
-		if labels[label.MemberIDLabelKey] == "" {
-			// get member id
-			for _, member := range tc.Status.PD.Members {
-				name := strings.Split(member.Name, ".")[0]
-				if podName == name {
-					memberID = member.ID
-					break
-				}
+		memberIDFromStatus := ""
+		// get member id
+		for _, member := range tc.Status.PD.Members {
+			name := strings.Split(member.Name, ".")[0]
+			if podName == name {
+				memberIDFromStatus = member.ID
+				break
 			}
 		}
+		if labels[label.MemberIDLabelKey] == "" {
+			memberID = memberIDFromStatus
+		} else if memberID != memberIDFromStatus {
+			klog.Errorf("Mismatched Pd member id for %s/%s, tc.Status.PD.Members has %s vs pod label has %s", ns, podName, memberIDFromStatus, memberID)
+		}
 	case label.TiKVLabelVal:
+		storeIDFromStatus := ""
+		// get store id
+		for _, store := range tc.Status.TiKV.Stores {
+			if store.PodName == podName {
+				storeIDFromStatus = store.ID
+				break
+			}
+		}
 		if labels[label.StoreIDLabelKey] == "" {
-			// get store id
-			for _, store := range tc.Status.TiKV.Stores {
-				if store.PodName == podName {
-					storeID = store.ID
-					break
-				}
+			storeID = storeIDFromStatus
+		} else if storeID != storeIDFromStatus {
+			klog.Errorf("Mismatched TiKV store id for %s/%s, tc.Status.TiKV.Stores has %s vs pod label has %s", ns, podName, storeIDFromStatus, storeID)
+		}
+
+		if storeIDFromStatus != "" {
+			delete(annotations, label.AnnTiKVNoActiveStoreSince)
+		} else if labels[label.StoreIDLabelKey] != "" {
+			// Apply annotation if pod has store label, but not listed as active store in status and not already added.
+			if _, exists := annotations[label.AnnTiKVNoActiveStoreSince]; !exists {
+				annotations[label.AnnTiKVNoActiveStoreSince] = time.Now().Format(time.RFC3339)
 			}
 		}
 	case label.TiFlashLabelVal:
@@ -169,7 +193,8 @@ func (c *realPodControl) UpdateMetaInfo(tc *v1alpha1.TidbCluster, pod *corev1.Po
 	}
 	if labels[label.ClusterIDLabelKey] == clusterID &&
 		labels[label.MemberIDLabelKey] == memberID &&
-		labels[label.StoreIDLabelKey] == storeID {
+		labels[label.StoreIDLabelKey] == storeID &&
+		reflect.DeepEqual(originalAnnotations, annotations) {
 		klog.V(4).Infof("pod %s/%s already has cluster labels set, skipping. TidbCluster: %s", ns, podName, tcName)
 		return pod, nil
 	}
@@ -177,11 +202,12 @@ func (c *realPodControl) UpdateMetaInfo(tc *v1alpha1.TidbCluster, pod *corev1.Po
 	setIfNotEmpty(labels, label.ClusterIDLabelKey, clusterID)
 	setIfNotEmpty(labels, label.MemberIDLabelKey, memberID)
 	setIfNotEmpty(labels, label.StoreIDLabelKey, storeID)
+	// annotations is already a pointer and was updated so pod.Annotations is updated.
 
 	var updatePod *corev1.Pod
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		var updateErr error
-		updatePod, updateErr = c.kubeCli.CoreV1().Pods(ns).Update(pod)
+		updatePod, updateErr = c.kubeCli.CoreV1().Pods(ns).Update(context.TODO(), pod, metav1.UpdateOptions{})
 		if updateErr == nil {
 			klog.V(4).Infof("update pod %s/%s with cluster labels %v successfully, TidbCluster: %s", ns, podName, labels, tcName)
 			return nil
@@ -192,6 +218,7 @@ func (c *realPodControl) UpdateMetaInfo(tc *v1alpha1.TidbCluster, pod *corev1.Po
 			// make a copy so we don't mutate the shared cache
 			pod = updated.DeepCopy()
 			pod.Labels = labels
+			pod.Annotations = annotations
 		} else {
 			utilruntime.HandleError(fmt.Errorf("error getting updated Pod %s/%s from lister: %v", ns, podName, err))
 		}
@@ -202,6 +229,15 @@ func (c *realPodControl) UpdateMetaInfo(tc *v1alpha1.TidbCluster, pod *corev1.Po
 }
 
 func (c *realPodControl) DeletePod(controller runtime.Object, pod *corev1.Pod) error {
+	return c.deletePod(controller, pod, false)
+}
+
+func (c *realPodControl) ForceDeletePod(controller runtime.Object, pod *corev1.Pod) error {
+	return c.deletePod(controller, pod, true)
+}
+
+// deletePod takes an extra nonGraceful boolean which determines whether to remove the grace period in delete command
+func (c *realPodControl) deletePod(controller runtime.Object, pod *corev1.Pod, nonGraceful bool) error {
 	controllerMo, ok := controller.(metav1.Object)
 	if !ok {
 		return fmt.Errorf("%T is not a metav1.Object, cannot call setControllerReference", controller)
@@ -213,7 +249,15 @@ func (c *realPodControl) DeletePod(controller runtime.Object, pod *corev1.Pod) e
 	podName := pod.GetName()
 	preconditions := metav1.Preconditions{UID: &pod.UID, ResourceVersion: &pod.ResourceVersion}
 	deleteOptions := metav1.DeleteOptions{Preconditions: &preconditions}
-	err := c.kubeCli.CoreV1().Pods(namespace).Delete(podName, &deleteOptions)
+	// If nonGraceful is false, then use default grace period
+	// If nonGraceful is true, then use zero grace period and use "Background" propagation policy
+	if nonGraceful {
+		gracePeriod := int64(0)
+		propagationPolicy := metav1.DeletePropagationBackground
+		deleteOptions.GracePeriodSeconds = &gracePeriod
+		deleteOptions.PropagationPolicy = &propagationPolicy
+	}
+	err := c.kubeCli.CoreV1().Pods(namespace).Delete(context.TODO(), podName, deleteOptions)
 	if err != nil {
 		klog.Errorf("failed to delete Pod: [%s/%s], %s: %s, %v", namespace, podName, kind, namespace, err)
 	} else {
@@ -340,6 +384,10 @@ func (c *FakePodControl) DeletePod(_ runtime.Object, pod *corev1.Pod) error {
 	}
 
 	return c.PodIndexer.Delete(pod)
+}
+
+func (c *FakePodControl) ForceDeletePod(rObj runtime.Object, pod *corev1.Pod) error {
+	return c.DeletePod(rObj, pod)
 }
 
 func (c *FakePodControl) UpdatePod(_ runtime.Object, pod *corev1.Pod) (*corev1.Pod, error) {

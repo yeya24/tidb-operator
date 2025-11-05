@@ -14,6 +14,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -27,7 +28,9 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 )
 
 // ExternalTrafficPolicy denotes if this Service desires to route external traffic to node-local or cluster-wide endpoints.
@@ -38,6 +41,7 @@ type ServiceControlInterface interface {
 	CreateService(runtime.Object, *corev1.Service) error
 	UpdateService(runtime.Object, *corev1.Service) (*corev1.Service, error)
 	DeleteService(runtime.Object, *corev1.Service) error
+	SyncComponentService(tc runtime.Object, newSvc *corev1.Service, oldService *corev1.Service, setClusterIP bool) (*corev1.Service, error)
 }
 
 type realServiceControl struct {
@@ -63,7 +67,7 @@ func (c *realServiceControl) CreateService(controller runtime.Object, svc *corev
 	kind := controller.GetObjectKind().GroupVersionKind().Kind
 	name := controllerMo.GetName()
 	namespace := controllerMo.GetNamespace()
-	_, err := c.kubeCli.CoreV1().Services(namespace).Create(svc)
+	_, err := c.kubeCli.CoreV1().Services(namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
 	c.recordServiceEvent("create", name, kind, controller, svc, err)
 	return err
 }
@@ -82,7 +86,7 @@ func (c *realServiceControl) UpdateService(controller runtime.Object, svc *corev
 	var updateSvc *corev1.Service
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		var updateErr error
-		updateSvc, updateErr = c.kubeCli.CoreV1().Services(namespace).Update(svc)
+		updateSvc, updateErr = c.kubeCli.CoreV1().Services(namespace).Update(context.TODO(), svc, metav1.UpdateOptions{})
 		if updateErr == nil {
 			klog.Infof("update Service: [%s/%s] successfully, kind: %s, name: %s", namespace, svcName, kind, name)
 			return nil
@@ -109,7 +113,7 @@ func (c *realServiceControl) DeleteService(controller runtime.Object, svc *corev
 	name := controllerMo.GetName()
 	namespace := controllerMo.GetNamespace()
 
-	err := c.kubeCli.CoreV1().Services(namespace).Delete(svc.Name, nil)
+	err := c.kubeCli.CoreV1().Services(namespace).Delete(context.TODO(), svc.Name, metav1.DeleteOptions{})
 	c.recordServiceEvent("delete", name, kind, controller, svc, err)
 	return err
 }
@@ -127,6 +131,53 @@ func (c *realServiceControl) recordServiceEvent(verb, name, kind string, object 
 			strings.ToLower(verb), svcName, kind, name, err)
 		c.recorder.Event(object, corev1.EventTypeWarning, reason, msg)
 	}
+}
+
+func (c *realServiceControl) SyncComponentService(tc runtime.Object, newSvc, oldSvc *corev1.Service, setClusterIP bool) (*corev1.Service, error) {
+	equal, err := ServiceEqual(newSvc, oldSvc)
+	if err != nil {
+		return nil, err
+	}
+
+	if newSvc == nil || oldSvc == nil {
+		return nil, fmt.Errorf("ServiceAnnLabelEqual: newservice or oldService is nil")
+	}
+	if newSvc.Annotations == nil {
+		newSvc.Annotations = map[string]string{}
+	}
+	if oldSvc.Annotations == nil {
+		oldSvc.Annotations = map[string]string{}
+	}
+	if newSvc.Labels == nil {
+		newSvc.Labels = map[string]string{}
+	}
+	if oldSvc.Labels == nil {
+		oldSvc.Labels = map[string]string{}
+	}
+	delete(oldSvc.Annotations, LastAppliedConfigAnnotation)
+	annoEqual := apiequality.Semantic.DeepEqual(newSvc.Annotations, oldSvc.Annotations)
+	labelEqual := apiequality.Semantic.DeepEqual(newSvc.Labels, oldSvc.Labels)
+
+	if !equal || !annoEqual || !labelEqual {
+		svc := *oldSvc
+		svc.Spec = newSvc.Spec
+		err = SetServiceLastAppliedConfigAnnotation(&svc)
+		if err != nil {
+			return nil, err
+		}
+
+		if setClusterIP {
+			svc.Spec.ClusterIP = oldSvc.Spec.ClusterIP
+		}
+		for k, v := range newSvc.Annotations {
+			svc.Annotations[k] = v
+		}
+		for k, v := range newSvc.Labels {
+			svc.Labels[k] = v
+		}
+		return c.UpdateService(tc, &svc)
+	}
+	return nil, nil
 }
 
 var _ ServiceControlInterface = &realServiceControl{}
@@ -214,6 +265,10 @@ func (c *FakeServiceControl) UpdateService(_ runtime.Object, svc *corev1.Service
 		}
 	}
 	return svc, c.SvcIndexer.Update(svc)
+}
+
+func (c *FakeServiceControl) SyncComponentService(tc runtime.Object, svc *corev1.Service, _ *corev1.Service, _ bool) (*corev1.Service, error) {
+	return c.UpdateService(tc, svc)
 }
 
 // DeleteService deletes the service of SvcIndexer

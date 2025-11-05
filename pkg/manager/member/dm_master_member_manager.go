@@ -19,11 +19,17 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
 	"github.com/pingcap/tidb-operator/pkg/manager"
+	startscriptv1 "github.com/pingcap/tidb-operator/pkg/manager/member/startscript/v1"
+	v1 "github.com/pingcap/tidb-operator/pkg/manager/member/startscript/v1"
+	"github.com/pingcap/tidb-operator/pkg/manager/suspender"
+	mngerutils "github.com/pingcap/tidb-operator/pkg/manager/utils"
+	"github.com/pingcap/tidb-operator/pkg/third_party/k8s"
 	"github.com/pingcap/tidb-operator/pkg/util"
+
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -31,8 +37,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/klog"
-	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/pointer"
 )
 
@@ -46,22 +51,36 @@ const (
 )
 
 type masterMemberManager struct {
-	deps     *controller.Dependencies
-	scaler   Scaler
-	upgrader DMUpgrader
-	failover DMFailover
+	deps      *controller.Dependencies
+	scaler    Scaler
+	upgrader  DMUpgrader
+	failover  DMFailover
+	suspender suspender.Suspender
 }
 
 // NewMasterMemberManager returns a *masterMemberManager
-func NewMasterMemberManager(deps *controller.Dependencies, masterScaler Scaler, masterUpgrader DMUpgrader, masterFailover DMFailover) manager.DMManager {
+func NewMasterMemberManager(deps *controller.Dependencies, masterScaler Scaler, masterUpgrader DMUpgrader, masterFailover DMFailover, spder suspender.Suspender) manager.DMManager {
 	return &masterMemberManager{
-		deps:     deps,
-		scaler:   masterScaler,
-		upgrader: masterUpgrader,
-		failover: masterFailover}
+		deps:      deps,
+		scaler:    masterScaler,
+		upgrader:  masterUpgrader,
+		failover:  masterFailover,
+		suspender: spder,
+	}
 }
 
 func (m *masterMemberManager) SyncDM(dc *v1alpha1.DMCluster) error {
+	// skip sync if dm master is suspended
+	component := v1alpha1.DMMasterMemberType
+	needSuspend, err := m.suspender.SuspendComponent(dc, component)
+	if err != nil {
+		return fmt.Errorf("suspend %s failed: %v", component, err)
+	}
+	if needSuspend {
+		klog.Infof("component %s for cluster %s/%s is suspended, skip syncing", component, dc.GetNamespace(), dc.GetName())
+		return nil
+	}
+
 	// Sync dm-master Service
 	if err := m.syncMasterServiceForDMCluster(dc); err != nil {
 		return err
@@ -99,24 +118,16 @@ func (m *masterMemberManager) syncMasterServiceForDMCluster(dc *v1alpha1.DMClust
 	}
 
 	oldSvc := oldSvcTmp.DeepCopy()
+
 	util.RetainManagedFields(newSvc, oldSvc)
 
-	equal, err := controller.ServiceEqual(newSvc, oldSvc)
+	_, err = m.deps.ServiceControl.SyncComponentService(
+		dc,
+		newSvc,
+		oldSvc,
+		true)
+
 	if err != nil {
-		return err
-	}
-	if !equal {
-		svc := *oldSvc
-		svc.Spec = newSvc.Spec
-		err = controller.SetServiceLastAppliedConfigAnnotation(&svc)
-		if err != nil {
-			return err
-		}
-		svc.Spec.ClusterIP = oldSvc.Spec.ClusterIP
-		for k, v := range newSvc.Annotations {
-			svc.Annotations[k] = v
-		}
-		_, err = m.deps.ServiceControl.UpdateService(dc, &svc)
 		return err
 	}
 
@@ -145,18 +156,13 @@ func (m *masterMemberManager) syncMasterHeadlessServiceForDMCluster(dc *v1alpha1
 		return fmt.Errorf("syncMasterHeadlessServiceForDMCluster: failed to get svc %s for cluster %s/%s, error: %s", controller.DMMasterPeerMemberName(dcName), ns, dcName, err)
 	}
 
-	equal, err := controller.ServiceEqual(newSvc, oldSvc)
+	_, err = m.deps.ServiceControl.SyncComponentService(
+		dc,
+		newSvc,
+		oldSvc,
+		false)
+
 	if err != nil {
-		return err
-	}
-	if !equal {
-		svc := *oldSvc
-		svc.Spec = newSvc.Spec
-		err = controller.SetServiceLastAppliedConfigAnnotation(&svc)
-		if err != nil {
-			return err
-		}
-		_, err = m.deps.ServiceControl.UpdateService(dc, &svc)
 		return err
 	}
 
@@ -193,7 +199,7 @@ func (m *masterMemberManager) syncMasterStatefulSetForDMCluster(dc *v1alpha1.DMC
 		return err
 	}
 	if setNotExist {
-		err = SetStatefulSetLastAppliedConfigAnnotation(newMasterSet)
+		err = mngerutils.SetStatefulSetLastAppliedConfigAnnotation(newMasterSet)
 		if err != nil {
 			return err
 		}
@@ -207,8 +213,8 @@ func (m *masterMemberManager) syncMasterStatefulSetForDMCluster(dc *v1alpha1.DMC
 	// Force update takes precedence over scaling because force upgrade won't take effect when cluster gets stuck at scaling
 	if !dc.Status.Master.Synced && NeedForceUpgrade(dc.Annotations) {
 		dc.Status.Master.Phase = v1alpha1.UpgradePhase
-		setUpgradePartition(newMasterSet, 0)
-		errSTS := UpdateStatefulSet(m.deps.StatefulSetControl, dc, newMasterSet, oldMasterSet)
+		mngerutils.SetUpgradePartition(newMasterSet, 0)
+		errSTS := mngerutils.UpdateStatefulSet(m.deps.StatefulSetControl, dc, newMasterSet, oldMasterSet)
 		return controller.RequeueErrorf("dmcluster: [%s/%s]'s dm-master needs force upgrade, %v", ns, dcName, errSTS)
 	}
 
@@ -240,7 +246,7 @@ func (m *masterMemberManager) syncMasterStatefulSetForDMCluster(dc *v1alpha1.DMC
 		}
 	}
 
-	return UpdateStatefulSet(m.deps.StatefulSetControl, dc, newMasterSet, oldMasterSet)
+	return mngerutils.UpdateStatefulSet(m.deps.StatefulSetControl, dc, newMasterSet, oldMasterSet)
 }
 
 // shouldRecover checks whether we should perform recovery operation.
@@ -259,7 +265,7 @@ func (m *masterMemberManager) shouldRecover(dc *v1alpha1.DMCluster) bool {
 			klog.Errorf("pod %s/%s does not exist: %v", dc.Namespace, name, err)
 			return false
 		}
-		if !podutil.IsPodReady(pod) {
+		if !k8s.IsPodReady(pod) {
 			return false
 		}
 		status, ok := dc.Status.Master.Members[pod.Name]
@@ -371,6 +377,18 @@ func (m *masterMemberManager) syncMasterConfigMap(dc *v1alpha1.DMCluster, set *a
 	if err != nil {
 		return nil, err
 	}
+
+	var inUseName string
+	if set != nil {
+		inUseName = mngerutils.FindConfigMapVolume(&set.Spec.Template.Spec, func(name string) bool {
+			return strings.HasPrefix(name, controller.DMMasterMemberName(dc.Name))
+		})
+	}
+
+	err = mngerutils.UpdateConfigMapIfNeed(m.deps.ConfigMapLister, dc.BaseMasterSpec().ConfigUpdateStrategy(), inUseName, newCm)
+	if err != nil {
+		return nil, err
+	}
 	return m.deps.TypedControl.CreateOrUpdateConfigMap(dc, newCm)
 }
 
@@ -403,12 +421,15 @@ func (m *masterMemberManager) getNewMasterServiceForDMCluster(dc *v1alpha1.DMClu
 			Selector: masterSelector.Labels(),
 		},
 	}
+
+	// override fields with user-defined ServiceSpec
 	svcSpec := dc.Spec.Master.Service
 	if svcSpec != nil {
 		if svcSpec.Type != "" {
 			masterSvc.Spec.Type = svcSpec.Type
 		}
-		masterSvc.ObjectMeta.Annotations = CopyAnnotations(svcSpec.Annotations)
+		masterSvc.ObjectMeta.Annotations = util.CopyStringMap(svcSpec.Annotations)
+		masterSvc.ObjectMeta.Labels = util.CombineStringMap(masterSvc.ObjectMeta.Labels, svcSpec.Labels)
 		masterSvc.Spec.Ports[0].NodePort = svcSpec.GetMasterNodePort()
 		if svcSpec.Type == corev1.ServiceTypeLoadBalancer {
 			if svcSpec.LoadBalancerIP != nil {
@@ -416,6 +437,9 @@ func (m *masterMemberManager) getNewMasterServiceForDMCluster(dc *v1alpha1.DMClu
 			}
 			if svcSpec.LoadBalancerSourceRanges != nil {
 				masterSvc.Spec.LoadBalancerSourceRanges = svcSpec.LoadBalancerSourceRanges
+			}
+			if svcSpec.LoadBalancerClass != nil {
+				masterSvc.Spec.LoadBalancerClass = svcSpec.LoadBalancerClass
 			}
 		}
 		if svcSpec.ExternalTrafficPolicy != nil {
@@ -428,6 +452,11 @@ func (m *masterMemberManager) getNewMasterServiceForDMCluster(dc *v1alpha1.DMClu
 			masterSvc.Spec.Ports[0].Name = *svcSpec.PortName
 		}
 	}
+
+	if dc.Spec.PreferIPv6 {
+		SetServiceWhenPreferIPv6(masterSvc)
+	}
+
 	return masterSvc
 }
 
@@ -439,7 +468,7 @@ func getNewMasterHeadlessServiceForDMCluster(dc *v1alpha1.DMCluster) *corev1.Ser
 	masterSelector := label.NewDM().Instance(instanceName).DMMaster()
 	masterLabels := masterSelector.Copy().UsedByPeer().Labels()
 
-	return &corev1.Service{
+	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            svcName,
 			Namespace:       ns,
@@ -460,10 +489,16 @@ func getNewMasterHeadlessServiceForDMCluster(dc *v1alpha1.DMCluster) *corev1.Ser
 			PublishNotReadyAddresses: true,
 		},
 	}
+
+	if dc.Spec.PreferIPv6 {
+		SetServiceWhenPreferIPv6(svc)
+	}
+
+	return svc
 }
 
 func (m *masterMemberManager) masterStatefulSetIsUpgrading(set *apps.StatefulSet, dc *v1alpha1.DMCluster) (bool, error) {
-	if statefulSetIsUpgrading(set) {
+	if mngerutils.StatefulSetIsUpgrading(set) {
 		return true, nil
 	}
 	instanceName := dc.GetInstanceName()
@@ -511,11 +546,12 @@ func getNewMasterSetForDMCluster(dc *v1alpha1.DMCluster, cm *corev1.ConfigMap) (
 	masterConfigMap := cm.Name
 
 	annoMount, annoVolume := annotationsMountVolume()
+	dataVolumeName := string(v1alpha1.GetStorageVolumeName("", v1alpha1.DMMasterMemberType))
 	volMounts := []corev1.VolumeMount{
 		annoMount,
 		{Name: "config", ReadOnly: true, MountPath: "/etc/dm-master"},
 		{Name: "startup-script", ReadOnly: true, MountPath: "/usr/local/bin"},
-		{Name: v1alpha1.DMMasterMemberType.String(), MountPath: dmMasterDataVolumeMountPath},
+		{Name: dataVolumeName, MountPath: dmMasterDataVolumeMountPath},
 	}
 	volMounts = append(volMounts, dc.Spec.Master.AdditionalVolumeMounts...)
 
@@ -585,10 +621,11 @@ func getNewMasterSetForDMCluster(dc *v1alpha1.DMCluster, cm *corev1.ConfigMap) (
 		},
 	}
 
-	masterLabel := label.NewDM().Instance(instanceName).DMMaster()
 	setName := controller.DMMasterMemberName(dcName)
-	podAnnotations := CombineAnnotations(controller.AnnProm(8261), baseMasterSpec.Annotations())
+	stsLabels := label.NewDM().Instance(instanceName).DMMaster()
+	podLabels := util.CombineStringMap(stsLabels, baseMasterSpec.Labels())
 	stsAnnotations := getStsAnnotations(dc.Annotations, label.DMMasterLabelVal)
+	podAnnotations := util.CombineStringMap(baseMasterSpec.Annotations(), controller.AnnProm(8261, "/metrics"))
 	failureReplicas := getDMMasterFailureReplicas(dc)
 
 	deleteSlotsNumber, err := util.GetDeleteSlotsNumber(stsAnnotations)
@@ -613,8 +650,9 @@ func getNewMasterSetForDMCluster(dc *v1alpha1.DMCluster, cm *corev1.ConfigMap) (
 				Protocol:      corev1.ProtocolTCP,
 			},
 		},
-		VolumeMounts: volMounts,
-		Resources:    controller.ContainerResource(dc.Spec.Master.ResourceRequirements),
+		VolumeMounts:    volMounts,
+		Resources:       controller.ContainerResource(dc.Spec.Master.ResourceRequirements),
+		SecurityContext: baseMasterSpec.SecurityContext(),
 	}
 	env := []corev1.EnvVar{
 		{
@@ -645,7 +683,6 @@ func getNewMasterSetForDMCluster(dc *v1alpha1.DMCluster, cm *corev1.ConfigMap) (
 
 	podSpec := baseMasterSpec.BuildPodSpec()
 	if baseMasterSpec.HostNetwork() {
-		podSpec.DNSPolicy = corev1.DNSClusterFirstWithHostNet
 		env = append(env, corev1.EnvVar{
 			Name: "POD_NAME",
 			ValueFrom: &corev1.EnvVarSource{
@@ -656,23 +693,41 @@ func getNewMasterSetForDMCluster(dc *v1alpha1.DMCluster, cm *corev1.ConfigMap) (
 		})
 	}
 	masterContainer.Env = util.AppendEnv(env, baseMasterSpec.Env())
+	masterContainer.EnvFrom = baseMasterSpec.EnvFrom()
 	podSpec.Volumes = append(vols, baseMasterSpec.AdditionalVolumes()...)
-	podSpec.Containers = append([]corev1.Container{masterContainer}, baseMasterSpec.AdditionalContainers()...)
+
+	podSpec.Containers, err = MergePatchContainers([]corev1.Container{masterContainer}, baseMasterSpec.AdditionalContainers())
+	if err != nil {
+		return nil, fmt.Errorf("failed to merge containers spec for DC [%s/%s], error: %v", dc.Namespace, dc.Name, err)
+	}
+
+	var initContainers []corev1.Container // no default initContainers now
+	podSpec.InitContainers = append(initContainers, baseMasterSpec.InitContainers()...)
+
+	updateStrategy := apps.StatefulSetUpdateStrategy{}
+	if baseMasterSpec.StatefulSetUpdateStrategy() == apps.OnDeleteStatefulSetStrategyType {
+		updateStrategy.Type = apps.OnDeleteStatefulSetStrategyType
+	} else {
+		updateStrategy.Type = apps.RollingUpdateStatefulSetStrategyType
+		updateStrategy.RollingUpdate = &apps.RollingUpdateStatefulSetStrategy{
+			Partition: pointer.Int32Ptr(dc.Spec.Master.Replicas + int32(failureReplicas) + deleteSlotsNumber),
+		}
+	}
 
 	masterSet := &apps.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            setName,
 			Namespace:       ns,
-			Labels:          masterLabel.Labels(),
+			Labels:          stsLabels,
 			Annotations:     stsAnnotations,
 			OwnerReferences: []metav1.OwnerReference{controller.GetDMOwnerRef(dc)},
 		},
 		Spec: apps.StatefulSetSpec{
 			Replicas: pointer.Int32Ptr(dc.Spec.Master.Replicas + int32(failureReplicas)),
-			Selector: masterLabel.LabelSelector(),
+			Selector: stsLabels.LabelSelector(),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels:      masterLabel.Labels(),
+					Labels:      podLabels,
 					Annotations: podAnnotations,
 				},
 				Spec: podSpec,
@@ -680,7 +735,7 @@ func getNewMasterSetForDMCluster(dc *v1alpha1.DMCluster, cm *corev1.ConfigMap) (
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
 				{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: v1alpha1.DMMasterMemberType.String(),
+						Name: dataVolumeName,
 					},
 					Spec: corev1.PersistentVolumeClaimSpec{
 						AccessModes: []corev1.PersistentVolumeAccessMode{
@@ -692,12 +747,8 @@ func getNewMasterSetForDMCluster(dc *v1alpha1.DMCluster, cm *corev1.ConfigMap) (
 				},
 			},
 			ServiceName:         controller.DMMasterPeerMemberName(dcName),
-			PodManagementPolicy: apps.ParallelPodManagement,
-			UpdateStrategy: apps.StatefulSetUpdateStrategy{
-				Type: apps.RollingUpdateStatefulSetStrategyType,
-				RollingUpdate: &apps.RollingUpdateStatefulSetStrategy{
-					Partition: pointer.Int32Ptr(dc.Spec.Master.Replicas + int32(failureReplicas) + deleteSlotsNumber),
-				}},
+			PodManagementPolicy: baseMasterSpec.PodManagementPolicy(),
+			UpdateStrategy:      updateStrategy,
 		},
 	}
 
@@ -705,27 +756,31 @@ func getNewMasterSetForDMCluster(dc *v1alpha1.DMCluster, cm *corev1.ConfigMap) (
 }
 
 func getMasterConfigMap(dc *v1alpha1.DMCluster) (*corev1.ConfigMap, error) {
-	config := dc.Spec.Master.Config
-	if config == nil {
-		config = &v1alpha1.MasterConfig{}
+	config := v1alpha1.NewMasterConfig()
+	if dc.Spec.Master.Config != nil {
+		config = dc.Spec.Master.Config.DeepCopy()
 	}
 
 	// override CA if tls enabled
 	if dc.IsTLSClusterEnabled() {
-		config.SSLCA = pointer.StringPtr(path.Join(dmMasterClusterCertPath, tlsSecretRootCAKey))
-		config.SSLCert = pointer.StringPtr(path.Join(dmMasterClusterCertPath, corev1.TLSCertKey))
-		config.SSLKey = pointer.StringPtr(path.Join(dmMasterClusterCertPath, corev1.TLSPrivateKeyKey))
+		config.Set("ssl-ca", path.Join(dmMasterClusterCertPath, tlsSecretRootCAKey))
+		config.Set("ssl-cert", path.Join(dmMasterClusterCertPath, corev1.TLSCertKey))
+		config.Set("ssl-key", path.Join(dmMasterClusterCertPath, corev1.TLSPrivateKeyKey))
 	}
 
-	confText, err := MarshalTOML(config)
+	confText, err := config.MarshalTOML()
 	if err != nil {
 		return nil, err
 	}
 
-	startScript, err := RenderDMMasterStartScript(&DMMasterStartScriptModel{
+	model := &startscriptv1.DMMasterStartScriptModel{
 		Scheme:  dc.Scheme(),
 		DataDir: filepath.Join(dmMasterDataVolumeMountPath, dc.Spec.Master.DataSubDir),
-	})
+	}
+	if dc.Spec.Master.StartUpScriptVersion == "v1" {
+		model.CheckDomainScript = v1.DMMasterCheckDNSV1
+	}
+	startScript, err := startscriptv1.RenderDMMasterStartScript(model)
 	if err != nil {
 		return nil, err
 	}
@@ -743,10 +798,6 @@ func getMasterConfigMap(dc *v1alpha1.DMCluster) (*corev1.ConfigMap, error) {
 			"config-file":    string(confText),
 			"startup-script": startScript,
 		},
-	}
-
-	if err := AddConfigMapDigestSuffix(cm); err != nil {
-		return nil, err
 	}
 	return cm, nil
 }
@@ -777,9 +828,9 @@ func (m *masterMemberManager) collectUnjoinedMembers(dc *v1alpha1.DMCluster, set
 			if err != nil {
 				return fmt.Errorf("collectUnjoinedMembers: failed to get pvcs for pod %s/%s, error: %s", ns, pod.Name, err)
 			}
-			pvcUIDSet := make(map[types.UID]struct{})
+			pvcUIDSet := make(map[types.UID]v1alpha1.EmptyStruct)
 			for _, pvc := range pvcs {
-				pvcUIDSet[pvc.UID] = struct{}{}
+				pvcUIDSet[pvc.UID] = v1alpha1.EmptyStruct{}
 			}
 			dc.Status.Master.UnjoinedMembers[pod.Name] = v1alpha1.UnjoinedMember{
 				PodName:   pod.Name,

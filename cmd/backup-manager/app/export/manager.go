@@ -28,11 +28,13 @@ import (
 	backuputil "github.com/pingcap/tidb-operator/pkg/backup/util"
 	listers "github.com/pingcap/tidb-operator/pkg/client/listers/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
+	pkgutil "github.com/pingcap/tidb-operator/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	errorutils "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // BackupManager mainly used to manage backup related work
@@ -60,13 +62,13 @@ func (bm *BackupManager) setOptions(backup *v1alpha1.Backup) (string, error) {
 	if backup.Spec.From.Port != 0 {
 		bm.Options.Port = backup.Spec.From.Port
 	} else {
-		bm.Options.Port = bkconstants.DefaultTidbPort
+		bm.Options.Port = v1alpha1.DefaultTiDBServerPort
 	}
 
 	if backup.Spec.From.User != "" {
 		bm.Options.User = backup.Spec.From.User
 	} else {
-		bm.Options.User = bkconstants.DefaultTidbUser
+		bm.Options.User = v1alpha1.DefaultTidbUser
 	}
 	bm.Options.Password = util.GetOptionValueFromEnv(bkconstants.TidbPasswordKey, bkconstants.BackupManagerEnvVarPrefix)
 
@@ -98,6 +100,13 @@ func (bm *BackupManager) ProcessBackup() error {
 		return errorutils.NewAggregate(errs)
 	}
 
+	crData, err := json.Marshal(backup)
+	if err != nil {
+		klog.Errorf("failed to marshal backup %v to json, err: %v", backup, err)
+	} else {
+		klog.Infof("start to process backup: %s", string(crData))
+	}
+
 	reason, err := bm.setOptions(backup)
 	if err != nil {
 		errs = append(errs, err)
@@ -121,7 +130,7 @@ func (bm *BackupManager) ProcessBackup() error {
 			return false, err
 		}
 
-		db, err = util.OpenDB(ctx, dsn)
+		db, err = pkgutil.OpenDB(ctx, dsn)
 		if err != nil {
 			klog.Warningf("can't connect to tidb cluster %s, err: %s", bm, err)
 			if ctx.Err() != nil {
@@ -258,7 +267,7 @@ func (bm *BackupManager) performBackup(ctx context.Context, backup *v1alpha1.Bac
 		return err
 	}
 
-	backupErr := bm.dumpTidbClusterData(ctx, backup)
+	backupErr := bm.dumpTidbClusterData(ctx, backupFullPath, backup)
 	if oldTikvGCTimeDuration < tikvGCTimeDuration {
 		// use another context to revert `tikv_gc_life_time` back.
 		// `DefaultTerminationGracePeriodSeconds` for a pod is 30, so we use a smaller timeout value here.

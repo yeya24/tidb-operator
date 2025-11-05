@@ -20,7 +20,6 @@ import (
 )
 
 var (
-	// SchemeBuilder and AddToScheme will stay in k8s.io/kubernetes.
 	SchemeBuilder      runtime.SchemeBuilder
 	localSchemeBuilder = &SchemeBuilder
 	// AddToScheme applies all the stored functions to the scheme.
@@ -54,6 +53,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&TidbClusterList{},
 		&Backup{},
 		&BackupList{},
+		&CompactBackup{},
+		&CompactBackupList{},
 		&BackupSchedule{},
 		&BackupScheduleList{},
 		&Restore{},
@@ -64,10 +65,12 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&TidbInitializerList{},
 		&TidbMonitor{},
 		&TidbMonitorList{},
-		&TidbClusterAutoScaler{},
-		&TidbClusterAutoScalerList{},
 		&DMCluster{},
 		&DMClusterList{},
+		&TidbNGMonitoring{},
+		&TidbNGMonitoringList{},
+		&TidbDashboard{},
+		&TidbDashboardList{},
 	)
 
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)

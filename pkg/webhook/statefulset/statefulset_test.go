@@ -15,6 +15,7 @@ package statefulset
 
 import (
 	"bytes"
+	"context"
 	"reflect"
 	"testing"
 
@@ -24,7 +25,7 @@ import (
 	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned/fake"
 	"github.com/pingcap/tidb-operator/pkg/features"
 	"github.com/pingcap/tidb-operator/pkg/webhook/util"
-	admission "k8s.io/api/admission/v1beta1"
+	admission "k8s.io/api/admission/v1"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -260,7 +261,7 @@ func runTest(t *testing.T, tt testcase, asts bool) {
 		}
 	}
 	if tt.tc != nil {
-		cli.PingcapV1alpha1().TidbClusters(tt.tc.Namespace).Create(tt.tc)
+		cli.PingcapV1alpha1().TidbClusters(tt.tc.Namespace).Create(context.TODO(), tt.tc, metav1.CreateOptions{})
 	}
 	resp := ac.Validate(ar)
 	if resp.Allowed != tt.wantAllowed {

@@ -14,6 +14,8 @@
 package util
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -22,9 +24,10 @@ import (
 
 	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
 	"github.com/pingcap/kvproto/pkg/metapb"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/features"
-	"github.com/pingcap/tidb-operator/pkg/label"
+	"github.com/sethvargo/go-password/password"
 	apps "k8s.io/api/apps/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -37,15 +40,15 @@ import (
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/util/sets"
 	corelisterv1 "k8s.io/client-go/listers/core/v1"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 var (
 	ClusterClientTLSPath   = "/var/lib/cluster-client-tls"
 	ClusterAssetsTLSPath   = "/var/lib/cluster-assets-tls"
-	DMClusterClientTLSPath = "/var/lib/dm-cluster-client-tls"
 	TiDBClientTLSPath      = "/var/lib/tidb-client-tls"
 	BRBinPath              = "/var/lib/br-bin"
+	KVCTLBinPath           = "/var/lib/kvctl-bin"
 	DumplingBinPath        = "/var/lib/dumpling-bin"
 	LightningBinPath       = "/var/lib/lightning-bin"
 	ClusterClientVolName   = "cluster-client-tls"
@@ -59,7 +62,7 @@ const (
 
 func GetOrdinalFromPodName(podName string) (int32, error) {
 	ordinalStr := podName[strings.LastIndex(podName, "-")+1:]
-	ordinalInt, err := strconv.Atoi(ordinalStr)
+	ordinalInt, err := strconv.ParseInt(ordinalStr, 10, 32)
 	if err != nil {
 		return int32(0), err
 	}
@@ -103,6 +106,22 @@ func GetPodOrdinals(tc *v1alpha1.TidbCluster, memberType v1alpha1.MemberType) (s
 	if memberType == v1alpha1.PDMemberType {
 		ann = label.AnnPDDeleteSlots
 		replicas = tc.Spec.PD.Replicas
+	} else if memberType == v1alpha1.PDMSTSOMemberType {
+		for _, component := range tc.Spec.PDMS {
+			if strings.Contains(memberType.String(), component.Name) {
+				replicas = component.Replicas
+				ann = label.AnnTSODeleteSlots
+				break
+			}
+		}
+	} else if memberType == v1alpha1.PDMSSchedulingMemberType {
+		for _, component := range tc.Spec.PDMS {
+			if strings.Contains(memberType.String(), component.Name) {
+				replicas = component.Replicas
+				ann = label.AnnSchedulingDeleteSlots
+				break
+			}
+		}
 	} else if memberType == v1alpha1.TiKVMemberType {
 		ann = label.AnnTiKVDeleteSlots
 		replicas = tc.Spec.TiKV.Replicas
@@ -112,6 +131,12 @@ func GetPodOrdinals(tc *v1alpha1.TidbCluster, memberType v1alpha1.MemberType) (s
 	} else if memberType == v1alpha1.TiFlashMemberType {
 		ann = label.AnnTiFlashDeleteSlots
 		replicas = tc.Spec.TiFlash.Replicas
+	} else if memberType == v1alpha1.TiCDCMemberType {
+		ann = label.AnnTiCDCDeleteSlots
+		replicas = tc.Spec.TiCDC.Replicas
+	} else if memberType == v1alpha1.TiProxyMemberType {
+		ann = label.AnnTiProxyDeleteSlots
+		replicas = tc.Spec.TiProxy.Replicas
 	} else {
 		return nil, fmt.Errorf("unknown member type %v", memberType)
 	}
@@ -171,32 +196,6 @@ func GetStatefulSetName(tc *v1alpha1.TidbCluster, memberType v1alpha1.MemberType
 	return fmt.Sprintf("%s-%s", tc.Name, memberType.String())
 }
 
-func GetAutoScalingOutSlots(tc *v1alpha1.TidbCluster, memberType v1alpha1.MemberType) sets.Int32 {
-	s := sets.Int32{}
-	l := ""
-	switch memberType {
-	case v1alpha1.PDMemberType:
-		return s
-	case v1alpha1.TiKVMemberType:
-		l = label.AnnTiKVAutoScalingOutOrdinals
-	case v1alpha1.TiDBMemberType:
-		l = label.AnnTiDBAutoScalingOutOrdinals
-	default:
-		return s
-	}
-	v, existed := tc.Annotations[l]
-	if !existed {
-		return s
-	}
-	var slice []int32
-	err := json.Unmarshal([]byte(v), &slice)
-	if err != nil {
-		return s
-	}
-	s.Insert(slice...)
-	return s
-}
-
 func Encode(obj interface{}) (string, error) {
 	b, err := json.Marshal(obj)
 	if err != nil {
@@ -217,8 +216,19 @@ func ClusterTLSSecretName(tcName, component string) string {
 	return fmt.Sprintf("%s-%s-cluster-secret", tcName, component)
 }
 
-func TiDBClientTLSSecretName(tcName string) string {
+func TiDBClientTLSSecretName(tcName string, secretName *string) string {
+	if secretName != nil {
+		return *secretName
+	}
 	return fmt.Sprintf("%s-tidb-client-secret", tcName)
+}
+
+func TiDBServerTLSSecretName(tcName string) string {
+	return fmt.Sprintf("%s-tidb-server-secret", tcName)
+}
+
+func TiDBAuthTokenJWKSSecretName(tcName string) string {
+	return fmt.Sprintf("%s-tidb-auth-token-jwks-secret", tcName)
 }
 
 // SortEnvByName implements sort.Interface to sort env list by name.
@@ -355,11 +365,14 @@ func BuildStorageVolumeAndVolumeMount(storageVolumes []v1alpha1.StorageVolume, d
 			} else {
 				tmpStorageClass = defaultStorageClassName
 			}
-			pvcNameInVCT := fmt.Sprintf("%s-%s", memberType.String(), storageVolume.Name)
+			pvcNameInVCT := string(v1alpha1.GetStorageVolumeName(storageVolume.Name, memberType))
 			volumeClaims = append(volumeClaims, VolumeClaimTemplate(storageRequest, pvcNameInVCT, tmpStorageClass))
-			volMounts = append(volMounts, corev1.VolumeMount{
-				Name: pvcNameInVCT, MountPath: storageVolume.MountPath,
-			})
+			if storageVolume.MountPath != "" {
+				volMounts = append(volMounts, corev1.VolumeMount{
+					Name:      pvcNameInVCT,
+					MountPath: storageVolume.MountPath,
+				})
+			}
 		}
 	}
 	return volMounts, volumeClaims
@@ -389,37 +402,40 @@ func MatchLabelFromStoreLabels(storeLabels []*metapb.StoreLabel, componentLabel 
 	return storeKind == componentLabel
 }
 
-// statefulSetEqual compares the new Statefulset's spec with old Statefulset's last applied config
-func StatefulSetEqual(new apps.StatefulSet, old apps.StatefulSet) bool {
+// StatefulSetEqual compares the new Statefulset's spec with old Statefulset's last applied config
+func StatefulSetEqual(new apps.StatefulSet, old apps.StatefulSet) (equal bool, podTemplateCheckedAndNotEqual bool) {
 	// The annotations in old sts may include LastAppliedConfigAnnotation
 	tmpAnno := map[string]string{}
 	for k, v := range old.Annotations {
-		if k != LastAppliedConfigAnnotation {
+		if k != LastAppliedConfigAnnotation && k != label.AnnStsLastSyncTimestamp {
 			tmpAnno[k] = v
 		}
 	}
 	if !apiequality.Semantic.DeepEqual(new.Annotations, tmpAnno) {
-		return false
+		return false, false // pod tempate not checked, return false
 	}
 	oldConfig := apps.StatefulSetSpec{}
 	if lastAppliedConfig, ok := old.Annotations[LastAppliedConfigAnnotation]; ok {
 		err := json.Unmarshal([]byte(lastAppliedConfig), &oldConfig)
 		if err != nil {
 			klog.Errorf("unmarshal Statefulset: [%s/%s]'s applied config failed,error: %v", old.GetNamespace(), old.GetName(), err)
-			return false
+			return false, false
 		}
 		// oldConfig.Template.Annotations may include LastAppliedConfigAnnotation to keep backward compatiability
 		// Please check detail in https://github.com/pingcap/tidb-operator/pull/1489
 		tmpTemplate := oldConfig.Template.DeepCopy()
 		delete(tmpTemplate.Annotations, LastAppliedConfigAnnotation)
+		podTemplateEqual := apiequality.Semantic.DeepEqual(*tmpTemplate, new.Spec.Template)
 		return apiequality.Semantic.DeepEqual(oldConfig.Replicas, new.Spec.Replicas) &&
-			apiequality.Semantic.DeepEqual(*tmpTemplate, new.Spec.Template) &&
-			apiequality.Semantic.DeepEqual(oldConfig.UpdateStrategy, new.Spec.UpdateStrategy)
+			apiequality.Semantic.DeepEqual(oldConfig.UpdateStrategy, new.Spec.UpdateStrategy) && // this will be changed when scaling
+			podTemplateEqual, !podTemplateEqual // pod tempate checked, may not equal
 	}
-	return false
+	return false, false // pod tempate not checked/exist, return false
 }
 
 // ResolvePVCFromPod parses pod volumes definition, and returns all PVCs mounted by this pod
+//
+// If the Pod don't have any PVC, return error 'NotFound'.
 func ResolvePVCFromPod(pod *corev1.Pod, pvcLister corelisterv1.PersistentVolumeClaimLister) ([]*corev1.PersistentVolumeClaim, error) {
 	var pvcs []*corev1.PersistentVolumeClaim
 	var pvcName string
@@ -443,4 +459,48 @@ func ResolvePVCFromPod(pod *corev1.Pod, pvcLister corelisterv1.PersistentVolumeC
 		return pvcs, err
 	}
 	return pvcs, nil
+}
+
+// FixedLengthRandomPasswordBytes generates a random password
+func FixedLengthRandomPasswordBytes() []byte {
+	return RandomBytes(13)
+}
+
+// RandomBytes generates some random bytes that can be used as a token or as a key
+func RandomBytes(length int) []byte {
+	return []byte(password.MustGenerate(
+		length,
+		length/3, // number of digits to include in the result
+		length/4, // number of symbols to include in the result
+		false,    // noUpper
+		false,    // allowRepeat
+	))
+}
+
+// OpenDB opens db
+func OpenDB(ctx context.Context, dsn string) (*sql.DB, error) {
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open datasource failed, err: %v", err)
+	}
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("cannot connect to tidb cluster, err: %v", err)
+	}
+	return db, nil
+}
+
+// SetPassword set tidb password
+func SetPassword(ctx context.Context, db *sql.DB, password string) error {
+
+	sql := fmt.Sprintf("SET PASSWORD FOR 'root'@'%%' = '%s'; FLUSH PRIVILEGES;", password)
+	_, err := db.ExecContext(ctx, sql)
+	return err
+}
+
+// GetDSN get tidb dsn
+func GetDSN(tc *v1alpha1.TidbCluster, password string) string {
+	port := tc.Spec.TiDB.GetServicePort()
+	return fmt.Sprintf("root:%s@tcp(%s-tidb.%s.svc:%d)/?charset=utf8mb4,utf8&multiStatements=true",
+		password, tc.Name, tc.Namespace, port)
 }

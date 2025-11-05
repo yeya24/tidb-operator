@@ -17,11 +17,13 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/google/go-cmp/cmp"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -78,13 +80,34 @@ func ServiceEqual(newSvc, oldSvc *corev1.Service) (bool, error) {
 			klog.Errorf("unmarshal ServiceSpec: [%s/%s]'s applied config failed,error: %v", oldSvc.GetNamespace(), oldSvc.GetName(), err)
 			return false, err
 		}
-		return apiequality.Semantic.DeepEqual(oldSpec, newSvc.Spec), nil
+		equal := apiequality.Semantic.DeepEqual(oldSpec, newSvc.Spec)
+		if !equal {
+			if klog.V(2).Enabled() {
+				diff := cmp.Diff(oldSpec, newSvc.Spec)
+				klog.V(2).Infof("Service spec diff for %s/%s: %s", newSvc.Namespace, newSvc.Name, diff)
+			}
+		}
+
+		return equal, nil
 	}
 	return false, nil
 }
 
-func IngressEqual(newIngress, oldIngres *extensionsv1beta1.Ingress) (bool, error) {
+func IngressV1beta1Equal(newIngress, oldIngres *extensionsv1beta1.Ingress) (bool, error) {
 	oldIngressSpec := extensionsv1beta1.IngressSpec{}
+	if lastAppliedConfig, ok := oldIngres.Annotations[LastAppliedConfigAnnotation]; ok {
+		err := json.Unmarshal([]byte(lastAppliedConfig), &oldIngressSpec)
+		if err != nil {
+			klog.Errorf("unmarshal IngressSpec: [%s/%s]'s applied config failed,error: %v", oldIngres.GetNamespace(), oldIngres.GetName(), err)
+			return false, err
+		}
+		return apiequality.Semantic.DeepEqual(oldIngressSpec, newIngress.Spec), nil
+	}
+	return false, nil
+}
+
+func IngressEqual(newIngress, oldIngres *networkingv1.Ingress) (bool, error) {
+	oldIngressSpec := networkingv1.IngressSpec{}
 	if lastAppliedConfig, ok := oldIngres.Annotations[LastAppliedConfigAnnotation]; ok {
 		err := json.Unmarshal([]byte(lastAppliedConfig), &oldIngressSpec)
 		if err != nil {

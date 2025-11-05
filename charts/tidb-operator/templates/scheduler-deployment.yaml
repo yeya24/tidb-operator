@@ -1,4 +1,5 @@
 {{- if (hasKey .Values.scheduler "create" | ternary .Values.scheduler.create true) }}
+{{- $lgK8sV119 := (semverCompare ">=1.19.0-0" .Capabilities.KubeVersion.GitVersion) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,6 +8,7 @@ metadata:
   {{- else }}
   name: {{ .Values.scheduler.schedulerName }}
   {{- end }}
+  namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/name: {{ template "chart.name" . }}
     app.kubernetes.io/managed-by: {{ .Release.Service }}
@@ -26,13 +28,17 @@ spec:
         app.kubernetes.io/name: {{ template "chart.name" . }}
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: scheduler
+{{- if .Values.scheduler.podAnnotations }}
+      annotations:
+{{ toYaml .Values.scheduler.podAnnotations | indent 8 }}
+{{ end }}
     spec:
     {{- if .Values.scheduler.serviceAccount }}
       {{- if eq .Values.appendReleaseSuffix true}}
       serviceAccount: {{ .Values.scheduler.serviceAccount }}-{{ .Release.Name }}
       {{- else }}
       serviceAccount: {{ .Values.scheduler.serviceAccount }}
-      {{- end }}    
+      {{- end }}
     {{- end }}
     {{- if .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -63,24 +69,33 @@ spec:
 {{ toYaml .Values.scheduler.resources | indent 12 }}
         command:
         - kube-scheduler
+        - --v={{ .Values.scheduler.logLevel }}
+        {{- if $lgK8sV119 }}
+        - --config=/etc/kubernetes/scheduler-config.yaml
+        {{- else }}
         - --port=10261
         - --leader-elect=true
         - --lock-object-namespace={{ .Release.Namespace }}
-        {{- if eq .Values.appendReleaseSuffix true}}
+        - --policy-configmap-namespace={{ .Release.Namespace }}
+          {{- if eq .Values.appendReleaseSuffix true}}
         - --lock-object-name={{ .Values.scheduler.schedulerName }}-{{.Release.Name}}
         - --scheduler-name={{ .Values.scheduler.schedulerName }}-{{.Release.Name}}
         - --policy-configmap={{ .Values.scheduler.schedulerName }}-policy-{{.Release.Name}}
-        {{- else }}
+          {{- else }}
         - --lock-object-name={{ .Values.scheduler.schedulerName }}
         - --scheduler-name={{ .Values.scheduler.schedulerName }}
         - --policy-configmap={{ .Values.scheduler.schedulerName }}-policy
+          {{- end }}
         {{- end }}
-        - --v={{ .Values.scheduler.logLevel }}
-        - --policy-configmap-namespace={{ .Release.Namespace }}
       {{- if and (ne .Values.timezone "UTC") (ne .Values.timezone "") }}
         env:
         - name: TZ
           value: {{ .Values.timezone | default "UTC" }}
+      {{- end }}
+      {{- if $lgK8sV119 }}
+        volumeMounts:
+        - name: scheduler-config
+          mountPath: /etc/kubernetes
       {{- end }}
     {{- with .Values.scheduler.nodeSelector }}
       nodeSelector:
@@ -98,4 +113,14 @@ spec:
       securityContext:
 {{ toYaml . | indent 8 }}
     {{- end}}
+    {{- if $lgK8sV119 }}
+      volumes:
+      - name: scheduler-config
+        configMap:
+          {{- if eq .Values.appendReleaseSuffix true}}
+          name: {{ .Values.scheduler.schedulerName }}-config-{{.Release.Name}}
+          {{- else }}
+          name: {{ .Values.scheduler.schedulerName }}-config
+          {{- end }}
+    {{- end }}
 {{- end }}

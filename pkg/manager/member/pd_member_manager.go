@@ -14,19 +14,26 @@
 package member
 
 import (
+	"context"
 	"fmt"
 	"path"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
-	"github.com/Masterminds/semver"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
 	"github.com/pingcap/tidb-operator/pkg/manager"
+	"github.com/pingcap/tidb-operator/pkg/manager/member/constants"
+	"github.com/pingcap/tidb-operator/pkg/manager/member/startscript"
+	"github.com/pingcap/tidb-operator/pkg/manager/suspender"
+	mngerutils "github.com/pingcap/tidb-operator/pkg/manager/utils"
+	"github.com/pingcap/tidb-operator/pkg/manager/volumes"
+	"github.com/pingcap/tidb-operator/pkg/third_party/k8s"
 	"github.com/pingcap/tidb-operator/pkg/util"
+
+	"github.com/Masterminds/semver"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -34,15 +41,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/uuid"
-	"k8s.io/klog"
-	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/pointer"
 )
 
 const (
-	// pdDataVolumeMountPath is the mount path for pd data volume
-	pdDataVolumeMountPath = "/var/lib/pd"
-
 	// pdClusterCertPath is where the cert for inter-cluster communication stored (if any)
 	pdClusterCertPath  = "/var/lib/pd-tls"
 	tidbClientCertPath = "/var/lib/tidb-client-tls"
@@ -52,25 +55,45 @@ const (
 )
 
 type pdMemberManager struct {
-	deps     *controller.Dependencies
-	scaler   Scaler
-	upgrader Upgrader
-	failover Failover
+	deps              *controller.Dependencies
+	scaler            Scaler
+	upgrader          Upgrader
+	failover          Failover
+	suspender         suspender.Suspender
+	podVolumeModifier volumes.PodVolumeModifier
 }
 
 // NewPDMemberManager returns a *pdMemberManager
-func NewPDMemberManager(dependencies *controller.Dependencies, pdScaler Scaler, pdUpgrader Upgrader, pdFailover Failover) manager.Manager {
+func NewPDMemberManager(dependencies *controller.Dependencies, pdScaler Scaler, pdUpgrader Upgrader, pdFailover Failover, spder suspender.Suspender, pvm volumes.PodVolumeModifier) manager.Manager {
 	return &pdMemberManager{
-		deps:     dependencies,
-		scaler:   pdScaler,
-		upgrader: pdUpgrader,
-		failover: pdFailover,
+		deps:              dependencies,
+		scaler:            pdScaler,
+		upgrader:          pdUpgrader,
+		failover:          pdFailover,
+		suspender:         spder,
+		podVolumeModifier: pvm,
 	}
 }
 
 func (m *pdMemberManager) Sync(tc *v1alpha1.TidbCluster) error {
 	// If pd is not specified return
 	if tc.Spec.PD == nil {
+		return nil
+	}
+
+	if (tc.Spec.PD.Mode == "ms" && tc.Spec.PDMS == nil) ||
+		(tc.Spec.PDMS != nil && tc.Spec.PD.Mode != "ms") {
+		klog.Infof("tidbcluster: [%s/%s]'s enable microservice failed, please check `PD.Mode` and `PDMS`", tc.GetNamespace(), tc.GetName())
+	}
+
+	// skip sync if pd is suspended
+	component := v1alpha1.PDMemberType
+	needSuspend, err := m.suspender.SuspendComponent(tc, component)
+	if err != nil {
+		return fmt.Errorf("suspend %s failed: %v", component, err)
+	}
+	if needSuspend {
+		klog.Infof("component %s for cluster %s/%s is suspended, skip syncing", component, tc.GetNamespace(), tc.GetName())
 		return nil
 	}
 
@@ -112,20 +135,13 @@ func (m *pdMemberManager) syncPDServiceForTidbCluster(tc *v1alpha1.TidbCluster) 
 
 	oldSvc := oldSvcTmp.DeepCopy()
 
-	equal, err := controller.ServiceEqual(newSvc, oldSvc)
+	_, err = m.deps.ServiceControl.SyncComponentService(
+		tc,
+		newSvc,
+		oldSvc,
+		true)
+
 	if err != nil {
-		return err
-	}
-	if !equal {
-		svc := *oldSvc
-		svc.Spec = newSvc.Spec
-		// TODO add unit test
-		err = controller.SetServiceLastAppliedConfigAnnotation(&svc)
-		if err != nil {
-			return err
-		}
-		svc.Spec.ClusterIP = oldSvc.Spec.ClusterIP
-		_, err = m.deps.ServiceControl.UpdateService(tc, &svc)
 		return err
 	}
 
@@ -142,7 +158,7 @@ func (m *pdMemberManager) syncPDHeadlessServiceForTidbCluster(tc *v1alpha1.TidbC
 	tcName := tc.GetName()
 
 	newSvc := getNewPDHeadlessServiceForTidbCluster(tc)
-	oldSvc, err := m.deps.ServiceLister.Services(ns).Get(controller.PDPeerMemberName(tcName))
+	oldSvcTmp, err := m.deps.ServiceLister.Services(ns).Get(controller.PDPeerMemberName(tcName))
 	if errors.IsNotFound(err) {
 		err = controller.SetServiceLastAppliedConfigAnnotation(newSvc)
 		if err != nil {
@@ -154,18 +170,15 @@ func (m *pdMemberManager) syncPDHeadlessServiceForTidbCluster(tc *v1alpha1.TidbC
 		return fmt.Errorf("syncPDHeadlessServiceForTidbCluster: failed to get svc %s for cluster %s/%s, error: %s", controller.PDPeerMemberName(tcName), ns, tcName, err)
 	}
 
-	equal, err := controller.ServiceEqual(newSvc, oldSvc)
+	oldSvc := oldSvcTmp.DeepCopy()
+
+	_, err = m.deps.ServiceControl.SyncComponentService(
+		tc,
+		newSvc,
+		oldSvc,
+		false)
+
 	if err != nil {
-		return err
-	}
-	if !equal {
-		svc := *oldSvc
-		svc.Spec = newSvc.Spec
-		err = controller.SetServiceLastAppliedConfigAnnotation(&svc)
-		if err != nil {
-			return err
-		}
-		_, err = m.deps.ServiceControl.UpdateService(tc, &svc)
 		return err
 	}
 
@@ -202,7 +215,7 @@ func (m *pdMemberManager) syncPDStatefulSetForTidbCluster(tc *v1alpha1.TidbClust
 		return err
 	}
 	if setNotExist {
-		err = SetStatefulSetLastAppliedConfigAnnotation(newPDSet)
+		err = mngerutils.SetStatefulSetLastAppliedConfigAnnotation(newPDSet)
 		if err != nil {
 			return err
 		}
@@ -214,11 +227,17 @@ func (m *pdMemberManager) syncPDStatefulSetForTidbCluster(tc *v1alpha1.TidbClust
 	}
 
 	// Force update takes precedence over scaling because force upgrade won't take effect when cluster gets stuck at scaling
-	if !tc.Status.PD.Synced && NeedForceUpgrade(tc.Annotations) {
-		tc.Status.PD.Phase = v1alpha1.UpgradePhase
-		setUpgradePartition(newPDSet, 0)
-		errSTS := UpdateStatefulSet(m.deps.StatefulSetControl, tc, newPDSet, oldPDSet)
-		return controller.RequeueErrorf("tidbcluster: [%s/%s]'s pd needs force upgrade, %v", ns, tcName, errSTS)
+	if !tc.Status.PD.Synced && !templateEqual(newPDSet, oldPDSet) {
+		// upgrade forced only when `Synced` is false, because unable to upgrade gracefully
+		forceUpgradeAnnoSet := NeedForceUpgrade(tc.Annotations)
+		onlyOnePD := *oldPDSet.Spec.Replicas < 2 && len(tc.Status.PD.PeerMembers) == 0 // it's acceptable to use old record about peer members
+
+		if forceUpgradeAnnoSet || onlyOnePD {
+			tc.Status.PD.Phase = v1alpha1.UpgradePhase
+			mngerutils.SetUpgradePartition(newPDSet, 0)
+			errSTS := mngerutils.UpdateStatefulSet(m.deps.StatefulSetControl, tc, newPDSet, oldPDSet)
+			return controller.RequeueErrorf("tidbcluster: [%s/%s]'s pd needs force upgrade, %v", ns, tcName, errSTS)
+		}
 	}
 
 	// Scaling takes precedence over upgrading because:
@@ -233,11 +252,21 @@ func (m *pdMemberManager) syncPDStatefulSetForTidbCluster(tc *v1alpha1.TidbClust
 	if m.deps.CLIConfig.AutoFailover {
 		if m.shouldRecover(tc) {
 			m.failover.Recover(tc)
-		} else if tc.PDAllPodsStarted() && !tc.PDAllMembersReady() || tc.PDAutoFailovering() {
+		} else if tc.Spec.PD.MaxFailoverCount != nil && *tc.Spec.PD.MaxFailoverCount > 0 && (tc.PDAllPodsStarted() && !tc.PDAllMembersReady() || tc.PDAutoFailovering()) {
 			if err := m.failover.Failover(tc); err != nil {
 				return err
 			}
 		}
+	}
+
+	if tc.Status.PD.VolReplaceInProgress {
+		// Volume Replace in Progress, so do not make any changes to Sts spec, overwrite with old pod spec
+		// config as we are not ready to upgrade yet.
+		_, podSpec, err := GetLastAppliedConfig(oldPDSet)
+		if err != nil {
+			return err
+		}
+		newPDSet.Spec.Template.Spec = *podSpec
 	}
 
 	if !templateEqual(newPDSet, oldPDSet) || tc.Status.PD.Phase == v1alpha1.UpgradePhase {
@@ -246,7 +275,7 @@ func (m *pdMemberManager) syncPDStatefulSetForTidbCluster(tc *v1alpha1.TidbClust
 		}
 	}
 
-	return UpdateStatefulSet(m.deps.StatefulSetControl, tc, newPDSet, oldPDSet)
+	return mngerutils.UpdateStatefulSetWithPrecheck(m.deps, tc, "FailedUpdatePDSTS", newPDSet, oldPDSet)
 }
 
 // shouldRecover checks whether we should perform recovery operation.
@@ -265,7 +294,7 @@ func (m *pdMemberManager) shouldRecover(tc *v1alpha1.TidbCluster) bool {
 			klog.Errorf("pod %s/%s does not exist: %v", tc.Namespace, name, err)
 			return false
 		}
-		if !podutil.IsPodReady(pod) {
+		if !k8s.IsPodReady(pod) {
 			return false
 		}
 		ok := false
@@ -313,6 +342,7 @@ func (m *pdMemberManager) syncTidbClusterStatus(tc *v1alpha1.TidbCluster, set *a
 	pdClient := controller.GetPDClient(m.deps.PDControl, tc)
 
 	healthInfo, err := pdClient.GetHealth()
+
 	if err != nil {
 		tc.Status.PD.Synced = false
 		// get endpoints info
@@ -397,12 +427,16 @@ func (m *pdMemberManager) syncTidbClusterStatus(tc *v1alpha1.TidbCluster, set *a
 	if err := m.collectUnjoinedMembers(tc, set, pdStatus); err != nil {
 		return err
 	}
+
+	err = volumes.SyncVolumeStatus(m.podVolumeModifier, m.deps.PodLister, tc, v1alpha1.PDMemberType)
+	if err != nil {
+		return fmt.Errorf("failed to sync volume status for pd: %v", err)
+	}
 	return nil
 }
 
 // syncPDConfigMap syncs the configmap of PD
 func (m *pdMemberManager) syncPDConfigMap(tc *v1alpha1.TidbCluster, set *apps.StatefulSet) (*corev1.ConfigMap, error) {
-
 	// For backward compatibility, only sync tidb configmap when .pd.config is non-nil
 	if tc.Spec.PD.Config == nil {
 		return nil, nil
@@ -414,12 +448,17 @@ func (m *pdMemberManager) syncPDConfigMap(tc *v1alpha1.TidbCluster, set *apps.St
 
 	var inUseName string
 	if set != nil {
-		inUseName = FindConfigMapVolume(&set.Spec.Template.Spec, func(name string) bool {
+		inUseName = mngerutils.FindConfigMapVolume(&set.Spec.Template.Spec, func(name string) bool {
 			return strings.HasPrefix(name, controller.PDMemberName(tc.Name))
 		})
+	} else {
+		inUseName, err = mngerutils.FindConfigMapNameFromTCAnno(context.Background(), m.deps.ConfigMapLister, tc, v1alpha1.PDMemberType, newCm)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	err = updateConfigMapIfNeed(m.deps.ConfigMapLister, tc.BasePDSpec().ConfigUpdateStrategy(), inUseName, newCm)
+	err = mngerutils.UpdateConfigMapIfNeed(m.deps.ConfigMapLister, tc.BasePDSpec().ConfigUpdateStrategy(), inUseName, newCm)
 	if err != nil {
 		return nil, err
 	}
@@ -446,21 +485,23 @@ func (m *pdMemberManager) getNewPDServiceForTidbCluster(tc *v1alpha1.TidbCluster
 			Ports: []corev1.ServicePort{
 				{
 					Name:       "client",
-					Port:       2379,
-					TargetPort: intstr.FromInt(2379),
+					Port:       v1alpha1.DefaultPDClientPort,
+					TargetPort: intstr.FromInt(int(v1alpha1.DefaultPDClientPort)),
 					Protocol:   corev1.ProtocolTCP,
 				},
 			},
 			Selector: pdSelector.Labels(),
 		},
 	}
-	// if set pd service type ,overwrite global variable services
+
+	// override fields with user-defined ServiceSpec
 	svcSpec := tc.Spec.PD.Service
 	if svcSpec != nil {
 		if svcSpec.Type != "" {
 			pdService.Spec.Type = svcSpec.Type
 		}
-		pdService.ObjectMeta.Annotations = CopyAnnotations(svcSpec.Annotations)
+		pdService.ObjectMeta.Annotations = util.CopyStringMap(svcSpec.Annotations)
+		pdService.ObjectMeta.Labels = util.CombineStringMap(pdService.ObjectMeta.Labels, svcSpec.Labels)
 		if svcSpec.LoadBalancerIP != nil {
 			pdService.Spec.LoadBalancerIP = *svcSpec.LoadBalancerIP
 		}
@@ -471,6 +512,11 @@ func (m *pdMemberManager) getNewPDServiceForTidbCluster(tc *v1alpha1.TidbCluster
 			pdService.Spec.Ports[0].Name = *svcSpec.PortName
 		}
 	}
+
+	if tc.Spec.PreferIPv6 {
+		SetServiceWhenPreferIPv6(pdService)
+	}
+
 	return pdService
 }
 
@@ -482,7 +528,7 @@ func getNewPDHeadlessServiceForTidbCluster(tc *v1alpha1.TidbCluster) *corev1.Ser
 	pdSelector := label.New().Instance(instanceName).PD()
 	pdLabels := pdSelector.Copy().UsedByPeer().Labels()
 
-	return &corev1.Service{
+	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            svcName,
 			Namespace:       ns,
@@ -493,9 +539,15 @@ func getNewPDHeadlessServiceForTidbCluster(tc *v1alpha1.TidbCluster) *corev1.Ser
 			ClusterIP: "None",
 			Ports: []corev1.ServicePort{
 				{
-					Name:       "peer",
-					Port:       2380,
-					TargetPort: intstr.FromInt(2380),
+					Name:       fmt.Sprintf("tcp-peer-%d", v1alpha1.DefaultPDPeerPort),
+					Port:       v1alpha1.DefaultPDPeerPort,
+					TargetPort: intstr.FromInt(int(v1alpha1.DefaultPDPeerPort)),
+					Protocol:   corev1.ProtocolTCP,
+				},
+				{
+					Name:       fmt.Sprintf("tcp-peer-%d", v1alpha1.DefaultPDClientPort),
+					Port:       v1alpha1.DefaultPDClientPort,
+					TargetPort: intstr.FromInt(int(v1alpha1.DefaultPDClientPort)),
 					Protocol:   corev1.ProtocolTCP,
 				},
 			},
@@ -503,10 +555,16 @@ func getNewPDHeadlessServiceForTidbCluster(tc *v1alpha1.TidbCluster) *corev1.Ser
 			PublishNotReadyAddresses: true,
 		},
 	}
+
+	if tc.Spec.PreferIPv6 {
+		SetServiceWhenPreferIPv6(svc)
+	}
+
+	return svc
 }
 
 func (m *pdMemberManager) pdStatefulSetIsUpgrading(set *apps.StatefulSet, tc *v1alpha1.TidbCluster) (bool, error) {
-	if statefulSetIsUpgrading(set) {
+	if mngerutils.StatefulSetIsUpgrading(set) {
 		return true, nil
 	}
 	instanceName := tc.GetInstanceName()
@@ -543,17 +601,18 @@ func getNewPDSetForTidbCluster(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (
 		pdConfigMap = cm.Name
 	}
 
-	clusterVersionGE4, err := clusterVersionGreaterThanOrEqualTo4(tc.PDVersion())
+	clusterVersionGE4, err := clusterVersionGreaterThanOrEqualTo4(tc.PDVersion(), tc.Spec.PD.Mode)
 	if err != nil {
 		klog.V(4).Infof("cluster version: %s is not semantic versioning compatible", tc.PDVersion())
 	}
 
 	annMount, annVolume := annotationsMountVolume()
+	dataVolumeName := string(v1alpha1.GetStorageVolumeName("", v1alpha1.PDMemberType))
 	volMounts := []corev1.VolumeMount{
 		annMount,
 		{Name: "config", ReadOnly: true, MountPath: "/etc/pd"},
 		{Name: "startup-script", ReadOnly: true, MountPath: "/usr/local/bin"},
-		{Name: v1alpha1.PDMemberType.String(), MountPath: pdDataVolumeMountPath},
+		{Name: dataVolumeName, MountPath: constants.PDDataVolumeMountPath},
 	}
 	if tc.IsTLSClusterEnabled() {
 		volMounts = append(volMounts, corev1.VolumeMount{
@@ -613,14 +672,10 @@ func getNewPDSetForTidbCluster(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (
 		}
 	}
 	if tc.Spec.TiDB != nil && tc.Spec.TiDB.IsTLSClientEnabled() && !tc.SkipTLSWhenConnectTiDB() && clusterVersionGE4 {
-		clientSecretName := util.TiDBClientTLSSecretName(tc.Name)
-		if tc.Spec.PD.TLSClientSecretName != nil {
-			clientSecretName = *tc.Spec.PD.TLSClientSecretName
-		}
 		vols = append(vols, corev1.Volume{
 			Name: "tidb-client-tls", VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: clientSecretName,
+					SecretName: util.TiDBClientTLSSecretName(tc.Name, tc.Spec.PD.TLSClientSecretName),
 				},
 			},
 		})
@@ -674,9 +729,10 @@ func getNewPDSetForTidbCluster(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (
 		return nil, fmt.Errorf("cannot parse storage request for PD, tidbcluster %s/%s, error: %v", tc.Namespace, tc.Name, err)
 	}
 
-	pdLabel := label.New().Instance(instanceName).PD()
 	setName := controller.PDMemberName(tcName)
-	podAnnotations := CombineAnnotations(controller.AnnProm(2379), basePDSpec.Annotations())
+	stsLabels := label.New().Instance(instanceName).PD()
+	podLabels := util.CombineStringMap(stsLabels, basePDSpec.Labels())
+	podAnnotations := util.CombineStringMap(basePDSpec.Annotations(), controller.AnnProm(v1alpha1.DefaultPDClientPort, "/metrics"))
 	stsAnnotations := getStsAnnotations(tc.Annotations, label.PDLabelVal)
 
 	deleteSlotsNumber, err := util.GetDeleteSlotsNumber(stsAnnotations)
@@ -692,18 +748,36 @@ func getNewPDSetForTidbCluster(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "server",
-				ContainerPort: int32(2380),
+				ContainerPort: v1alpha1.DefaultPDPeerPort,
 				Protocol:      corev1.ProtocolTCP,
 			},
 			{
 				Name:          "client",
-				ContainerPort: int32(2379),
+				ContainerPort: v1alpha1.DefaultPDClientPort,
 				Protocol:      corev1.ProtocolTCP,
 			},
 		},
-		VolumeMounts: volMounts,
-		Resources:    controller.ContainerResource(tc.Spec.PD.ResourceRequirements),
+		VolumeMounts:    volMounts,
+		Resources:       controller.ContainerResource(tc.Spec.PD.ResourceRequirements),
+		SecurityContext: basePDSpec.SecurityContext(),
 	}
+
+	if tc.Spec.PD.ReadinessProbe != nil {
+		pdContainer.ReadinessProbe = &corev1.Probe{
+			ProbeHandler:        buildPDReadinessProbHandler(tc),
+			InitialDelaySeconds: int32(10),
+		}
+	}
+
+	if tc.Spec.PD.ReadinessProbe != nil {
+		if tc.Spec.PD.ReadinessProbe.InitialDelaySeconds != nil {
+			pdContainer.ReadinessProbe.InitialDelaySeconds = *tc.Spec.PD.ReadinessProbe.InitialDelaySeconds
+		}
+		if tc.Spec.PD.ReadinessProbe.PeriodSeconds != nil {
+			pdContainer.ReadinessProbe.PeriodSeconds = *tc.Spec.PD.ReadinessProbe.PeriodSeconds
+		}
+	}
+
 	env := []corev1.EnvVar{
 		{
 			Name: "NAMESPACE",
@@ -733,7 +807,6 @@ func getNewPDSetForTidbCluster(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (
 
 	podSpec := basePDSpec.BuildPodSpec()
 	if basePDSpec.HostNetwork() {
-		podSpec.DNSPolicy = corev1.DNSClusterFirstWithHostNet
 		env = append(env, corev1.EnvVar{
 			Name: "POD_NAME",
 			ValueFrom: &corev1.EnvVarSource{
@@ -744,8 +817,13 @@ func getNewPDSetForTidbCluster(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (
 		})
 	}
 	pdContainer.Env = util.AppendEnv(env, basePDSpec.Env())
+	pdContainer.EnvFrom = basePDSpec.EnvFrom()
 	podSpec.Volumes = append(vols, basePDSpec.AdditionalVolumes()...)
-	podSpec.Containers = append([]corev1.Container{pdContainer}, basePDSpec.AdditionalContainers()...)
+	podSpec.Containers, err = MergePatchContainers([]corev1.Container{pdContainer}, basePDSpec.AdditionalContainers())
+	if err != nil {
+		return nil, fmt.Errorf("failed to merge containers spec for PD of [%s/%s], error: %v", tc.Namespace, tc.Name, err)
+	}
+
 	podSpec.ServiceAccountName = tc.Spec.PD.ServiceAccount
 	if podSpec.ServiceAccountName == "" {
 		podSpec.ServiceAccountName = tc.Spec.ServiceAccount
@@ -754,7 +832,9 @@ func getNewPDSetForTidbCluster(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (
 	podSpec.InitContainers = append(initContainers, basePDSpec.InitContainers()...)
 
 	updateStrategy := apps.StatefulSetUpdateStrategy{}
-	if basePDSpec.StatefulSetUpdateStrategy() == apps.OnDeleteStatefulSetStrategyType {
+	if tc.Status.PD.VolReplaceInProgress {
+		updateStrategy.Type = apps.OnDeleteStatefulSetStrategyType
+	} else if basePDSpec.StatefulSetUpdateStrategy() == apps.OnDeleteStatefulSetStrategyType {
 		updateStrategy.Type = apps.OnDeleteStatefulSetStrategyType
 	} else {
 		updateStrategy.Type = apps.RollingUpdateStatefulSetStrategyType
@@ -767,36 +847,25 @@ func getNewPDSetForTidbCluster(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            setName,
 			Namespace:       ns,
-			Labels:          pdLabel.Labels(),
+			Labels:          stsLabels.Labels(),
 			Annotations:     stsAnnotations,
 			OwnerReferences: []metav1.OwnerReference{controller.GetOwnerRef(tc)},
 		},
 		Spec: apps.StatefulSetSpec{
 			Replicas: pointer.Int32Ptr(tc.PDStsDesiredReplicas()),
-			Selector: pdLabel.LabelSelector(),
+			Selector: stsLabels.LabelSelector(),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels:      pdLabel.Labels(),
+					Labels:      podLabels,
 					Annotations: podAnnotations,
 				},
 				Spec: podSpec,
 			},
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: v1alpha1.PDMemberType.String(),
-					},
-					Spec: corev1.PersistentVolumeClaimSpec{
-						AccessModes: []corev1.PersistentVolumeAccessMode{
-							corev1.ReadWriteOnce,
-						},
-						StorageClassName: tc.Spec.PD.StorageClassName,
-						Resources:        storageRequest,
-					},
-				},
+				util.VolumeClaimTemplate(storageRequest, dataVolumeName, tc.Spec.PD.StorageClassName),
 			},
 			ServiceName:         controller.PDPeerMemberName(tcName),
-			PodManagementPolicy: apps.ParallelPodManagement,
+			PodManagementPolicy: basePDSpec.PodManagementPolicy(),
 			UpdateStrategy:      updateStrategy,
 		},
 	}
@@ -807,12 +876,12 @@ func getNewPDSetForTidbCluster(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (
 
 func getPDConfigMap(tc *v1alpha1.TidbCluster) (*corev1.ConfigMap, error) {
 	// For backward compatibility, only sync tidb configmap when .tidb.config is non-nil
-	config := tc.Spec.PD.Config
-	if config == nil {
+	if tc.Spec.PD.Config == nil {
 		return nil, nil
 	}
+	config := tc.Spec.PD.Config.DeepCopy() // use copy to not update tc spec
 
-	clusterVersionGE4, err := clusterVersionGreaterThanOrEqualTo4(tc.PDVersion())
+	clusterVersionGE4, err := clusterVersionGreaterThanOrEqualTo4(tc.PDVersion(), tc.Spec.PD.Mode)
 	if err != nil {
 		klog.V(4).Infof("cluster version: %s is not semantic versioning compatible", tc.PDVersion())
 	}
@@ -825,7 +894,9 @@ func getPDConfigMap(tc *v1alpha1.TidbCluster) (*corev1.ConfigMap, error) {
 	}
 	// Versions below v4.0 do not support Dashboard
 	if tc.Spec.TiDB != nil && tc.Spec.TiDB.IsTLSClientEnabled() && !tc.SkipTLSWhenConnectTiDB() && clusterVersionGE4 {
-		config.Set("dashboard.tidb-cacert-path", path.Join(tidbClientCertPath, tlsSecretRootCAKey))
+		if !tc.Spec.TiDB.TLSClient.SkipInternalClientCA {
+			config.Set("dashboard.tidb-cacert-path", path.Join(tidbClientCertPath, tlsSecretRootCAKey))
+		}
 		config.Set("dashboard.tidb-cert-path", path.Join(tidbClientCertPath, corev1.TLSCertKey))
 		config.Set("dashboard.tidb-key-path", path.Join(tidbClientCertPath, corev1.TLSPrivateKeyKey))
 	}
@@ -838,11 +909,8 @@ func getPDConfigMap(tc *v1alpha1.TidbCluster) (*corev1.ConfigMap, error) {
 	if err != nil {
 		return nil, err
 	}
-	startScript, err := RenderPDStartScript(&PDStartScriptModel{
-		Scheme:        tc.Scheme(),
-		DataDir:       filepath.Join(pdDataVolumeMountPath, tc.Spec.PD.DataSubDir),
-		ClusterDomain: tc.Spec.ClusterDomain,
-	})
+
+	startScript, err := startscript.RenderPDStartScript(tc)
 	if err != nil {
 		return nil, err
 	}
@@ -864,7 +932,11 @@ func getPDConfigMap(tc *v1alpha1.TidbCluster) (*corev1.ConfigMap, error) {
 	return cm, nil
 }
 
-func clusterVersionGreaterThanOrEqualTo4(version string) (bool, error) {
+func clusterVersionGreaterThanOrEqualTo4(version, model string) (bool, error) {
+	// TODO: remove `model` and `nightly` when support pd microservice docker
+	if model == "ms" && version == "nightly" {
+		return true, nil
+	}
 	v, err := semver.NewVersion(version)
 	if err != nil {
 		return true, err
@@ -887,6 +959,7 @@ func (m *pdMemberManager) collectUnjoinedMembers(tc *v1alpha1.TidbCluster, set *
 	}
 
 	// check all pods in PD sts to see whether it has already joined the PD cluster
+	unjoined := map[string]v1alpha1.UnjoinedMember{}
 	for _, pod := range pods {
 		var joined = false
 		// if current PD pod name is in the keys of pdStatus, it has joined the PD cluster
@@ -895,33 +968,39 @@ func (m *pdMemberManager) collectUnjoinedMembers(tc *v1alpha1.TidbCluster, set *
 			if err != nil {
 				return fmt.Errorf("unexpected pod name %q: %v", pod.Name, err)
 			}
-			if strings.EqualFold(PdName(tc.Name, ordinal, tc.Namespace, tc.Spec.ClusterDomain), pdName) {
+			if strings.EqualFold(PdName(tc.Name, ordinal, tc.Namespace, tc.Spec.ClusterDomain, tc.Spec.AcrossK8s), pdName) {
 				joined = true
 				break
 			}
 		}
 		if !joined {
-			if tc.Status.PD.UnjoinedMembers == nil {
-				tc.Status.PD.UnjoinedMembers = map[string]v1alpha1.UnjoinedMember{}
-			}
 			pvcs, err := util.ResolvePVCFromPod(pod, m.deps.PVCLister)
 			if err != nil {
 				return fmt.Errorf("collectUnjoinedMembers: failed to get pvcs for pod %s/%s, error: %s", ns, pod.Name, err)
 			}
-			pvcUIDSet := make(map[types.UID]struct{})
+			pvcUIDSet := make(map[types.UID]v1alpha1.EmptyStruct)
 			for _, pvc := range pvcs {
-				pvcUIDSet[pvc.UID] = struct{}{}
+				pvcUIDSet[pvc.UID] = v1alpha1.EmptyStruct{}
 			}
-			tc.Status.PD.UnjoinedMembers[pod.Name] = v1alpha1.UnjoinedMember{
+			unjoined[pod.Name] = v1alpha1.UnjoinedMember{
 				PodName:   pod.Name,
 				PVCUIDSet: pvcUIDSet,
 				CreatedAt: metav1.Now(),
 			}
-		} else {
-			delete(tc.Status.PD.UnjoinedMembers, pod.Name)
 		}
 	}
+
+	tc.Status.PD.UnjoinedMembers = unjoined
 	return nil
+}
+
+// TODO: Support check status http request in future.
+func buildPDReadinessProbHandler(tc *v1alpha1.TidbCluster) corev1.ProbeHandler {
+	return corev1.ProbeHandler{
+		TCPSocket: &corev1.TCPSocketAction{
+			Port: intstr.FromInt(int(v1alpha1.DefaultPDClientPort)),
+		},
+	}
 }
 
 // TODO: seems not used

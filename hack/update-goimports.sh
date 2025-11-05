@@ -20,10 +20,7 @@ set -o pipefail
 ROOT=$(unset CDPATH && cd $(dirname "${BASH_SOURCE[0]}")/.. && pwd)
 cd $ROOT
 
-pushd "${ROOT}/hack/tools" >/dev/null
-    GO111MODULE=on go install golang.org/x/tools/cmd/goimports
-popd >/dev/null
+source hack/lib.sh
+hack::ensure_goimports
 
-find . -type f -name '*.go' -not \( \
-    -path '*/vendor/*' \
-    \) | xargs goimports -w
+find . -type f -name '*.go' | xargs ${OUTPUT_BIN}/goimports -w

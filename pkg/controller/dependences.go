@@ -14,18 +14,13 @@
 package controller
 
 import (
+	"context"
 	"flag"
+	"fmt"
 	"time"
 
-	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
-	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned"
-	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned/fake"
-	informers "github.com/pingcap/tidb-operator/pkg/client/informers/externalversions"
-	listers "github.com/pingcap/tidb-operator/pkg/client/listers/pingcap/v1alpha1"
-	"github.com/pingcap/tidb-operator/pkg/dmapi"
-	"github.com/pingcap/tidb-operator/pkg/pdapi"
-	"github.com/pingcap/tidb-operator/pkg/scheme"
-	"github.com/pingcap/tidb-operator/pkg/tikvapi"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubeinformers "k8s.io/client-go/informers"
@@ -36,11 +31,25 @@ import (
 	batchlisters "k8s.io/client-go/listers/batch/v1"
 	corelisterv1 "k8s.io/client-go/listers/core/v1"
 	extensionslister "k8s.io/client-go/listers/extensions/v1beta1"
+	networklister "k8s.io/client-go/listers/networking/v1"
 	storagelister "k8s.io/client-go/listers/storage/v1"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	controllerfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned"
+	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned/fake"
+	informers "github.com/pingcap/tidb-operator/pkg/client/informers/externalversions"
+	listers "github.com/pingcap/tidb-operator/pkg/client/listers/pingcap/v1alpha1"
+	"github.com/pingcap/tidb-operator/pkg/dmapi"
+	"github.com/pingcap/tidb-operator/pkg/pdapi"
+	"github.com/pingcap/tidb-operator/pkg/scheme"
+	"github.com/pingcap/tidb-operator/pkg/tiflashapi"
+	"github.com/pingcap/tidb-operator/pkg/tikvapi"
+	utildiscovery "github.com/pingcap/tidb-operator/pkg/util/discovery"
 )
 
 // CLIConfig is used save all configuration read from command line parameters
@@ -68,20 +77,26 @@ type CLIConfig struct {
 	LeaseDuration         time.Duration
 	RenewDeadline         time.Duration
 	RetryPeriod           time.Duration
+	ResourceLock          string
 	WaitDuration          time.Duration
 	// ResyncDuration is the resync time of informer
 	ResyncDuration time.Duration
+	// DetectNodeFailure enables detection of node failures for stateful failure pods for recovery
+	DetectNodeFailure bool
+	// PodHardRecoveryPeriod is the hard recovery period for a failure pod
+	PodHardRecoveryPeriod time.Duration
 	// Defines whether tidb operator run in test mode, test mode is
 	// only open when test
 	TestMode               bool
 	TiDBBackupManagerImage string
 	TiDBDiscoveryImage     string
-	// PodWebhookEnabled is the key to indicate whether pod admission
-	// webhook is set up.
-	PodWebhookEnabled bool
 	// Selector is used to filter CR labels to decide
 	// what resources should be watched and synced by controller
 	Selector string
+
+	// KubeClientQPS indicates the maximum QPS to the kubenetes API server from client.
+	KubeClientQPS   float64
+	KubeClientBurst int
 }
 
 // DefaultCLIConfig returns the default command line configuration
@@ -99,8 +114,11 @@ func DefaultCLIConfig() *CLIConfig {
 		LeaseDuration:          15 * time.Second,
 		RenewDeadline:          10 * time.Second,
 		RetryPeriod:            2 * time.Second,
+		ResourceLock:           resourcelock.LeasesResourceLock, // k8s uses leases by default from v1.20
 		WaitDuration:           5 * time.Second,
 		ResyncDuration:         30 * time.Second,
+		PodHardRecoveryPeriod:  24 * time.Hour,
+		DetectNodeFailure:      false,
 		TiDBBackupManagerImage: "pingcap/tidb-backup-manager:latest",
 		TiDBDiscoveryImage:     "pingcap/tidb-operator:latest",
 		Selector:               "",
@@ -123,18 +141,22 @@ func (c *CLIConfig) AddFlag(_ *flag.FlagSet) {
 	flag.DurationVar(&c.TiDBFailoverPeriod, "tidb-failover-period", c.TiDBFailoverPeriod, "TiDB failover period")
 	flag.DurationVar(&c.MasterFailoverPeriod, "dm-master-failover-period", c.MasterFailoverPeriod, "dm-master failover period")
 	flag.DurationVar(&c.WorkerFailoverPeriod, "dm-worker-failover-period", c.WorkerFailoverPeriod, "dm-worker failover period")
+	flag.DurationVar(&c.PodHardRecoveryPeriod, "pod-hard-recovery-period", c.PodHardRecoveryPeriod, "Hard recovery period for a failure pod default(24h)")
+	flag.BoolVar(&c.DetectNodeFailure, "detect-node-failure", c.DetectNodeFailure, "Automatically detect node failures")
 	flag.DurationVar(&c.ResyncDuration, "resync-duration", c.ResyncDuration, "Resync time of informer")
 	flag.BoolVar(&c.TestMode, "test-mode", false, "whether tidb-operator run in test mode")
 	flag.StringVar(&c.TiDBBackupManagerImage, "tidb-backup-manager-image", c.TiDBBackupManagerImage, "The image of backup manager tool")
 	// TODO: actually we just want to use the same image with tidb-controller-manager, but DownwardAPI cannot get image ID, see if there is any better solution
 	flag.StringVar(&c.TiDBDiscoveryImage, "tidb-discovery-image", c.TiDBDiscoveryImage, "The image of the tidb discovery service")
-	flag.BoolVar(&c.PodWebhookEnabled, "pod-webhook-enabled", false, "Whether Pod admission webhook is enabled")
 	flag.StringVar(&c.Selector, "selector", c.Selector, "Selector (label query) to filter on, supports '=', '==', and '!='")
 
 	// see https://pkg.go.dev/k8s.io/client-go/tools/leaderelection#LeaderElectionConfig for the config
 	flag.DurationVar(&c.LeaseDuration, "leader-lease-duration", c.LeaseDuration, "leader-lease-duration is the duration that non-leader candidates will wait to force acquire leadership")
 	flag.DurationVar(&c.RenewDeadline, "leader-renew-deadline", c.RenewDeadline, "leader-renew-deadline is the duration that the acting master will retry refreshing leadership before giving up")
 	flag.DurationVar(&c.RetryPeriod, "leader-retry-period", c.RetryPeriod, "leader-retry-period is the duration the LeaderElector clients should wait between tries of actions")
+	flag.StringVar(&c.ResourceLock, "leader-resource-lock", c.ResourceLock, "The type of resource object that is used for locking during leader election")
+	flag.Float64Var(&c.KubeClientQPS, "kube-client-qps", c.KubeClientQPS, "The maximum QPS to the kubenetes API server from client")
+	flag.IntVar(&c.KubeClientBurst, "kube-client-burst", c.KubeClientBurst, "The maximum burst for throttle to the kubenetes API server from client")
 }
 
 // HasNodePermission returns whether the user has permission for node operations.
@@ -165,12 +187,17 @@ type Controls struct {
 	TypedControl       TypedControlInterface
 	PDControl          pdapi.PDControlInterface
 	TiKVControl        tikvapi.TiKVControlInterface
+	TiFlashControl     tiflashapi.TiFlashControlInterface
 	DMMasterControl    dmapi.MasterControlInterface
 	TiDBClusterControl TidbClusterControlInterface
 	DMClusterControl   DMClusterControlInterface
 	CDCControl         TiCDCControlInterface
+	ProxyControl       TiProxyControlInterface
 	TiDBControl        TiDBControlInterface
 	BackupControl      BackupControlInterface
+	CompactControl     CompactBackupControlInterface
+	RestoreControl     RestoreControlInterface
+	SecretControl      SecretControlInterface
 }
 
 // Dependencies is used to store all shared dependent resources to avoid
@@ -189,30 +216,35 @@ type Dependencies struct {
 	Recorder                       record.EventRecorder
 
 	// Listers
-	ServiceLister               corelisterv1.ServiceLister
-	EndpointLister              corelisterv1.EndpointsLister
-	PVCLister                   corelisterv1.PersistentVolumeClaimLister
-	PVLister                    corelisterv1.PersistentVolumeLister
-	PodLister                   corelisterv1.PodLister
-	NodeLister                  corelisterv1.NodeLister
-	SecretLister                corelisterv1.SecretLister
-	ConfigMapLister             corelisterv1.ConfigMapLister
-	StatefulSetLister           appslisters.StatefulSetLister
-	DeploymentLister            appslisters.DeploymentLister
-	JobLister                   batchlisters.JobLister
-	IngressLister               extensionslister.IngressLister
-	StorageClassLister          storagelister.StorageClassLister
-	TiDBClusterLister           listers.TidbClusterLister
-	TiDBClusterAutoScalerLister listers.TidbClusterAutoScalerLister
-	DMClusterLister             listers.DMClusterLister
-	BackupLister                listers.BackupLister
-	RestoreLister               listers.RestoreLister
-	BackupScheduleLister        listers.BackupScheduleLister
-	TiDBInitializerLister       listers.TidbInitializerLister
-	TiDBMonitorLister           listers.TidbMonitorLister
+	ServiceLister          corelisterv1.ServiceLister
+	EndpointLister         corelisterv1.EndpointsLister
+	PVCLister              corelisterv1.PersistentVolumeClaimLister
+	PVLister               corelisterv1.PersistentVolumeLister
+	PodLister              corelisterv1.PodLister
+	NodeLister             corelisterv1.NodeLister
+	SecretLister           corelisterv1.SecretLister
+	ConfigMapLister        corelisterv1.ConfigMapLister
+	StatefulSetLister      appslisters.StatefulSetLister
+	DeploymentLister       appslisters.DeploymentLister
+	JobLister              batchlisters.JobLister
+	IngressLister          networklister.IngressLister
+	IngressV1Beta1Lister   extensionslister.IngressLister // TODO: in order to be compatibility with kubernetes which less than v1.19, remove it if v1.19- is not supported
+	StorageClassLister     storagelister.StorageClassLister
+	TiDBClusterLister      listers.TidbClusterLister
+	DMClusterLister        listers.DMClusterLister
+	BackupLister           listers.BackupLister
+	CompactBackupLister    listers.CompactBackupLister
+	RestoreLister          listers.RestoreLister
+	BackupScheduleLister   listers.BackupScheduleLister
+	TiDBInitializerLister  listers.TidbInitializerLister
+	TiDBMonitorLister      listers.TidbMonitorLister
+	TiDBNGMonitoringLister listers.TidbNGMonitoringLister
+	TiDBDashboardLister    listers.TidbDashboardLister
 
 	// Controls
 	Controls
+
+	AWSConfig aws.Config
 }
 
 func newRealControls(
@@ -225,12 +257,15 @@ func newRealControls(
 	recorder record.EventRecorder) Controls {
 	// Shared variables to construct `Dependencies` and some of its fields
 	var (
-		pdControl         = pdapi.NewDefaultPDControl(kubeClientset)
-		tikvControl       = tikvapi.NewDefaultTiKVControl(kubeClientset)
-		masterControl     = dmapi.NewDefaultMasterControl(kubeClientset)
+		secretLister      = kubeInformerFactory.Core().V1().Secrets().Lister()
+		pdControl         = pdapi.NewDefaultPDControl(secretLister)
+		tikvControl       = tikvapi.NewDefaultTiKVControl(secretLister)
+		tiflashControl    = tiflashapi.NewDefaultTiFlashControl(secretLister)
+		masterControl     = dmapi.NewDefaultMasterControl(secretLister)
 		genericCtrl       = NewRealGenericControl(genericCli, recorder)
 		tidbClusterLister = informerFactory.Pingcap().V1alpha1().TidbClusters().Lister()
 		dmClusterLister   = informerFactory.Pingcap().V1alpha1().DMClusters().Lister()
+		restoreLister     = informerFactory.Pingcap().V1alpha1().Restores().Lister()
 		statefulSetLister = kubeInformerFactory.Apps().V1().StatefulSets().Lister()
 		serviceLister     = kubeInformerFactory.Core().V1().Services().Lister()
 		pvcLister         = kubeInformerFactory.Core().V1().PersistentVolumeClaims().Lister()
@@ -250,16 +285,21 @@ func newRealControls(
 		PVCControl:         NewRealPVCControl(kubeClientset, recorder, pvcLister),
 		GeneralPVCControl:  NewRealGeneralPVCControl(kubeClientset, recorder),
 		GenericControl:     genericCtrl,
-		PodControl:         NewRealPodControl(kubeClientset, pdControl, podLister, recorder),
+		PodControl:         NewRealPodControl(kubeClientset, pdapi.NewDefaultPDControl(secretLister), podLister, recorder),
 		TypedControl:       NewTypedControl(genericCtrl),
 		PDControl:          pdControl,
 		TiKVControl:        tikvControl,
+		TiFlashControl:     tiflashControl,
 		DMMasterControl:    masterControl,
 		TiDBClusterControl: NewRealTidbClusterControl(clientset, tidbClusterLister, recorder),
 		DMClusterControl:   NewRealDMClusterControl(clientset, dmClusterLister, recorder),
-		CDCControl:         NewDefaultTiCDCControl(kubeClientset),
-		TiDBControl:        NewDefaultTiDBControl(kubeClientset),
+		CDCControl:         NewDefaultTiCDCControl(secretLister),
+		ProxyControl:       NewDefaultTiProxyControl(),
+		TiDBControl:        NewDefaultTiDBControl(secretLister),
 		BackupControl:      NewRealBackupControl(clientset, recorder),
+		CompactControl:     NewRealCompactControl(clientset, recorder),
+		RestoreControl:     NewRealRestoreControl(clientset, restoreLister, recorder),
+		SecretControl:      NewRealSecretControl(kubeClientset, secretLister, recorder),
 	}
 }
 
@@ -271,12 +311,14 @@ func newDependencies(
 	informerFactory informers.SharedInformerFactory,
 	kubeInformerFactory kubeinformers.SharedInformerFactory,
 	labelFilterKubeInformerFactory kubeinformers.SharedInformerFactory,
-	recorder record.EventRecorder) *Dependencies {
+	recorder record.EventRecorder) (*Dependencies, error) {
 
 	var (
-		nodeLister corelisterv1.NodeLister
-		pvLister   corelisterv1.PersistentVolumeLister
-		scLister   storagelister.StorageClassLister
+		nodeLister       corelisterv1.NodeLister
+		pvLister         corelisterv1.PersistentVolumeLister
+		scLister         storagelister.StorageClassLister
+		ingLister        networklister.IngressLister
+		ingv1beta1Lister extensionslister.IngressLister
 	)
 	if cliCfg.HasNodePermission() {
 		nodeLister = kubeInformerFactory.Core().V1().Nodes().Lister()
@@ -294,6 +336,21 @@ func newDependencies(
 		klog.Info("no permission for storage classes, skip creating sc lister")
 	}
 
+	supported, err := utildiscovery.IsAPIGroupVersionResourceSupported(kubeClientset.Discovery(), "networking.k8s.io/v1", "ingresses")
+	if err != nil {
+		return nil, fmt.Errorf("failed to check resource networking.k8s.io/v1/ingresses: %s", err)
+	}
+	if supported {
+		ingLister = kubeInformerFactory.Networking().V1().Ingresses().Lister()
+	} else {
+		ingv1beta1Lister = kubeInformerFactory.Extensions().V1beta1().Ingresses().Lister()
+	}
+
+	cfg, err := config.LoadDefaultConfig(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("can't load aws config: %w", err)
+	}
+
 	return &Dependencies{
 		CLIConfig:                      cliCfg,
 		InformerFactory:                informerFactory,
@@ -305,32 +362,37 @@ func newDependencies(
 		Recorder:                       recorder,
 
 		// Listers
-		ServiceLister:               kubeInformerFactory.Core().V1().Services().Lister(),
-		EndpointLister:              kubeInformerFactory.Core().V1().Endpoints().Lister(),
-		PVCLister:                   kubeInformerFactory.Core().V1().PersistentVolumeClaims().Lister(),
-		PVLister:                    pvLister,
-		PodLister:                   kubeInformerFactory.Core().V1().Pods().Lister(),
-		NodeLister:                  nodeLister,
-		SecretLister:                kubeInformerFactory.Core().V1().Secrets().Lister(),
-		ConfigMapLister:             labelFilterKubeInformerFactory.Core().V1().ConfigMaps().Lister(),
-		StatefulSetLister:           kubeInformerFactory.Apps().V1().StatefulSets().Lister(),
-		DeploymentLister:            kubeInformerFactory.Apps().V1().Deployments().Lister(),
-		StorageClassLister:          scLister,
-		JobLister:                   kubeInformerFactory.Batch().V1().Jobs().Lister(),
-		IngressLister:               kubeInformerFactory.Extensions().V1beta1().Ingresses().Lister(),
-		TiDBClusterLister:           informerFactory.Pingcap().V1alpha1().TidbClusters().Lister(),
-		TiDBClusterAutoScalerLister: informerFactory.Pingcap().V1alpha1().TidbClusterAutoScalers().Lister(),
-		DMClusterLister:             informerFactory.Pingcap().V1alpha1().DMClusters().Lister(),
-		BackupLister:                informerFactory.Pingcap().V1alpha1().Backups().Lister(),
-		RestoreLister:               informerFactory.Pingcap().V1alpha1().Restores().Lister(),
-		BackupScheduleLister:        informerFactory.Pingcap().V1alpha1().BackupSchedules().Lister(),
-		TiDBInitializerLister:       informerFactory.Pingcap().V1alpha1().TidbInitializers().Lister(),
-		TiDBMonitorLister:           informerFactory.Pingcap().V1alpha1().TidbMonitors().Lister(),
-	}
+		ServiceLister:          kubeInformerFactory.Core().V1().Services().Lister(),
+		EndpointLister:         kubeInformerFactory.Core().V1().Endpoints().Lister(),
+		PVCLister:              kubeInformerFactory.Core().V1().PersistentVolumeClaims().Lister(),
+		PVLister:               pvLister,
+		PodLister:              kubeInformerFactory.Core().V1().Pods().Lister(),
+		NodeLister:             nodeLister,
+		SecretLister:           kubeInformerFactory.Core().V1().Secrets().Lister(),
+		ConfigMapLister:        labelFilterKubeInformerFactory.Core().V1().ConfigMaps().Lister(),
+		StatefulSetLister:      kubeInformerFactory.Apps().V1().StatefulSets().Lister(),
+		DeploymentLister:       kubeInformerFactory.Apps().V1().Deployments().Lister(),
+		StorageClassLister:     scLister,
+		JobLister:              kubeInformerFactory.Batch().V1().Jobs().Lister(),
+		IngressLister:          ingLister,
+		IngressV1Beta1Lister:   ingv1beta1Lister,
+		TiDBClusterLister:      informerFactory.Pingcap().V1alpha1().TidbClusters().Lister(),
+		DMClusterLister:        informerFactory.Pingcap().V1alpha1().DMClusters().Lister(),
+		BackupLister:           informerFactory.Pingcap().V1alpha1().Backups().Lister(),
+		CompactBackupLister:    informerFactory.Pingcap().V1alpha1().CompactBackups().Lister(),
+		RestoreLister:          informerFactory.Pingcap().V1alpha1().Restores().Lister(),
+		BackupScheduleLister:   informerFactory.Pingcap().V1alpha1().BackupSchedules().Lister(),
+		TiDBInitializerLister:  informerFactory.Pingcap().V1alpha1().TidbInitializers().Lister(),
+		TiDBMonitorLister:      informerFactory.Pingcap().V1alpha1().TidbMonitors().Lister(),
+		TiDBNGMonitoringLister: informerFactory.Pingcap().V1alpha1().TidbNGMonitorings().Lister(),
+		TiDBDashboardLister:    informerFactory.Pingcap().V1alpha1().TidbDashboards().Lister(),
+
+		AWSConfig: cfg,
+	}, nil
 }
 
 // NewDependencies is used to construct the dependencies
-func NewDependencies(ns string, cliCfg *CLIConfig, clientset versioned.Interface, kubeClientset kubernetes.Interface, genericCli client.Client) *Dependencies {
+func NewDependencies(ns string, cliCfg *CLIConfig, clientset versioned.Interface, kubeClientset kubernetes.Interface, genericCli client.Client) (*Dependencies, error) {
 	var (
 		options     []informers.SharedInformerOption
 		kubeoptions []kubeinformers.SharedInformerOption
@@ -365,9 +427,12 @@ func NewDependencies(ns string, cliCfg *CLIConfig, clientset versioned.Interface
 	eventBroadcaster.StartRecordingToSink(&eventv1.EventSinkImpl{
 		Interface: eventv1.New(kubeClientset.CoreV1().RESTClient()).Events("")})
 	recorder := eventBroadcaster.NewRecorder(v1alpha1.Scheme, corev1.EventSource{Component: "tidb-controller-manager"})
-	deps := newDependencies(cliCfg, clientset, kubeClientset, genericCli, informerFactory, kubeInformerFactory, labelFilterKubeInformerFactory, recorder)
+	deps, err := newDependencies(cliCfg, clientset, kubeClientset, genericCli, informerFactory, kubeInformerFactory, labelFilterKubeInformerFactory, recorder)
+	if err != nil {
+		return nil, err
+	}
 	deps.Controls = newRealControls(cliCfg, clientset, kubeClientset, genericCli, informerFactory, kubeInformerFactory, recorder)
-	return deps
+	return deps, nil
 }
 
 func newFakeControl(kubeClientset kubernetes.Interface, informerFactory informers.SharedInformerFactory, kubeInformerFactory kubeinformers.SharedInformerFactory) Controls {
@@ -384,13 +449,17 @@ func newFakeControl(kubeClientset kubernetes.Interface, informerFactory informer
 		GenericControl:     genericCtrl,
 		PodControl:         NewFakePodControl(kubeInformerFactory.Core().V1().Pods()),
 		TypedControl:       NewTypedControl(genericCtrl),
-		PDControl:          pdapi.NewFakePDControl(kubeClientset),
-		TiKVControl:        tikvapi.NewFakeTiKVControl(kubeClientset),
-		DMMasterControl:    dmapi.NewFakeMasterControl(kubeClientset),
+		PDControl:          pdapi.NewFakePDControl(kubeInformerFactory.Core().V1().Secrets().Lister()),
+		TiKVControl:        tikvapi.NewFakeTiKVControl(kubeInformerFactory.Core().V1().Secrets().Lister()),
+		DMMasterControl:    dmapi.NewFakeMasterControl(kubeInformerFactory.Core().V1().Secrets().Lister()),
+		TiFlashControl:     tiflashapi.NewFakeTiFlashControl(kubeInformerFactory.Core().V1().Secrets().Lister()),
 		TiDBClusterControl: NewFakeTidbClusterControl(informerFactory.Pingcap().V1alpha1().TidbClusters()),
-		CDCControl:         NewDefaultTiCDCControl(kubeClientset), // TODO: no fake control?
-		TiDBControl:        NewFakeTiDBControl(),
+		CDCControl:         NewFakeTiCDCControl(),
+		TiDBControl:        NewFakeTiDBControl(kubeInformerFactory.Core().V1().Secrets().Lister()),
 		BackupControl:      NewFakeBackupControl(informerFactory.Pingcap().V1alpha1().Backups()),
+		CompactControl:     NewFakeCompactControl(informerFactory.Pingcap().V1alpha1().CompactBackups()),
+		ProxyControl:       NewFakeTiProxyControl(),
+		SecretControl:      NewFakeSecretControl(kubeInformerFactory.Core().V1().Secrets()),
 	}
 }
 
@@ -400,6 +469,8 @@ func NewSimpleClientDependencies() *Dependencies {
 
 	// TODO make all controller use real controller with simple client.
 	deps.BackupControl = NewRealBackupControl(deps.Clientset, deps.Recorder)
+	deps.StatefulSetControl = NewRealStatefuSetControl(deps.KubeClientset, deps.StatefulSetLister, deps.Recorder)
+	deps.ConfigMapControl = NewRealConfigMapControl(deps.KubeClientset, deps.Recorder)
 	deps.JobControl = NewRealJobControl(deps.KubeClientset, deps.Recorder)
 	return deps
 }
@@ -414,7 +485,20 @@ func NewFakeDependencies() *Dependencies {
 	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeCli, 0)
 	labelFilterKubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeCli, 0)
 	recorder := record.NewFakeRecorder(100)
-	deps := newDependencies(cliCfg, cli, kubeCli, genCli, informerFactory, kubeInformerFactory, labelFilterKubeInformerFactory, recorder)
+
+	kubeCli.Fake.Resources = append(kubeCli.Fake.Resources, &metav1.APIResourceList{
+		GroupVersion: "networking.k8s.io/v1",
+		APIResources: []metav1.APIResource{
+			{
+				Name: "ingresses",
+			},
+		},
+	})
+
+	deps, err := newDependencies(cliCfg, cli, kubeCli, genCli, informerFactory, kubeInformerFactory, labelFilterKubeInformerFactory, recorder)
+	if err != nil {
+		klog.Fatalf("failed to create Dependencies: %s", err)
+	}
 	deps.Controls = newFakeControl(kubeCli, informerFactory, kubeInformerFactory)
 	return deps
 }

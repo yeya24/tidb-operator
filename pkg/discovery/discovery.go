@@ -14,17 +14,21 @@
 package discovery
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned"
+	"github.com/pingcap/tidb-operator/pkg/controller"
 	"github.com/pingcap/tidb-operator/pkg/dmapi"
 	"github.com/pingcap/tidb-operator/pkg/pdapi"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // TiDBDiscovery helps new PD and dm-master member to discover all other members in cluster bootstrap phase.
@@ -88,7 +92,7 @@ func (d *tidbDiscovery) Discover(advertisePeerUrl string) (string, error) {
 	if ns != podNamespace {
 		return "", fmt.Errorf("the peer's namespace: %s is not equal to discovery namespace: %s", ns, podNamespace)
 	}
-	tc, err := d.cli.PingcapV1alpha1().TidbClusters(ns).Get(tcName, metav1.GetOptions{})
+	tc, err := d.cli.PingcapV1alpha1().TidbClusters(ns).Get(context.TODO(), tcName, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -112,8 +116,8 @@ func (d *tidbDiscovery) Discover(advertisePeerUrl string) (string, error) {
 		if len(pdAddresses) != 0 {
 			return fmt.Sprintf("--join=%s", strings.Join(pdAddresses, ",")), nil
 		}
-		// Initialize the PD cluster with the FQDN format service record if tc.Spec.ClusterDomain is set.
-		if len(tc.Spec.ClusterDomain) > 0 {
+		// Initialize the PD cluster with the FQDN format service record if deploy across k8s or tc.Spec.ClusterDomain is set
+		if tc.AcrossK8s() || tc.Spec.ClusterDomain != "" {
 			return fmt.Sprintf("--initial-cluster=%s=%s://%s", strArr[0], tc.Scheme(), advertisePeerUrl), nil
 		}
 		// Initialize the PD cluster in the normal format service record.
@@ -123,19 +127,27 @@ func (d *tidbDiscovery) Discover(advertisePeerUrl string) (string, error) {
 	var pdClients []pdapi.PDClient
 
 	if tc.Spec.PD != nil {
-		pdClients = append(pdClients, d.pdControl.GetPDClient(pdapi.Namespace(tc.GetNamespace()), tc.GetName(), tc.IsTLSClusterEnabled()))
+		// connect to pd of current cluster, `ClusterDomain` may be empty
+		pdClients = append(pdClients, d.pdControl.GetPDClient(pdapi.Namespace(tc.GetNamespace()), tc.GetName(), tc.IsTLSClusterEnabled(), pdapi.ClusterRef(tc.Spec.ClusterDomain)))
 	}
 
-	if tc.Spec.Cluster != nil && len(tc.Spec.Cluster.Name) > 0 {
+	if tc.Heterogeneous() {
+		// connect to pd of other cluster and use own cert
 		namespace := tc.Spec.Cluster.Namespace
 		if len(namespace) == 0 {
 			namespace = tc.GetNamespace()
 		}
-		pdClients = append(pdClients, d.pdControl.GetClusterRefPDClient(pdapi.Namespace(namespace), tc.Spec.Cluster.Name, tc.Spec.Cluster.ClusterDomain, tc.IsTLSClusterEnabled()))
+		pdClients = append(pdClients,
+			d.pdControl.GetPDClient(pdapi.Namespace(namespace), tc.Spec.Cluster.Name, tc.IsTLSClusterEnabled(),
+				pdapi.TLSCertFromTC(pdapi.Namespace(tc.GetNamespace()), tc.GetName()),
+				pdapi.ClusterRef(tc.Spec.Cluster.ClusterDomain),
+				pdapi.UseHeadlessService(tc.Spec.AcrossK8s),
+			),
+		)
 	}
 
 	for _, pdMember := range tc.Status.PD.PeerMembers {
-		pdClients = append(pdClients, d.pdControl.GetPeerPDClient(pdapi.Namespace(ns), tc.Name, tc.IsTLSClusterEnabled(), pdMember.ClientURL, pdMember.Name))
+		pdClients = append(pdClients, d.pdControl.GetPDClient(pdapi.Namespace(ns), tc.Name, tc.IsTLSClusterEnabled(), pdapi.SpecifyClient(pdMember.ClientURL, pdMember.Name)))
 	}
 
 	var membersInfo *pdapi.MembersInfo
@@ -164,7 +176,7 @@ func (d *tidbDiscovery) Discover(advertisePeerUrl string) (string, error) {
 		if member.Name == podName || member.Name == strArr[0] {
 			continue
 		}
-		memberURL := strings.ReplaceAll(member.PeerUrls[0], ":2380", ":2379")
+		memberURL := strings.ReplaceAll(member.PeerUrls[0], fmt.Sprintf(":%d", v1alpha1.DefaultPDPeerPort), fmt.Sprintf(":%d", v1alpha1.DefaultPDClientPort))
 		membersArr = append(membersArr, memberURL)
 	}
 	delete(currentCluster.peers, podName)
@@ -193,7 +205,7 @@ func (d *tidbDiscovery) DiscoverDM(advertisePeerUrl string) (string, error) {
 	dcName := strings.TrimSuffix(peerServiceName, "-dm-master-peer")
 	ns := os.Getenv("MY_POD_NAMESPACE")
 
-	dc, err := d.cli.PingcapV1alpha1().DMClusters(ns).Get(dcName, metav1.GetOptions{})
+	dc, err := d.cli.PingcapV1alpha1().DMClusters(ns).Get(context.TODO(), dcName, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -240,10 +252,20 @@ func (d *tidbDiscovery) VerifyPDEndpoint(pdURL string) (string, error) {
 	klog.Infof("Get PD endpoint URL: %s, scheme is %s, pdMemberName is %s, pdMemberPort is %s, tcName is %s", pdURL, pdEndpoint.scheme, pdEndpoint.pdMemberName, pdEndpoint.pdMemberPort, pdEndpoint.tcName)
 
 	ns := os.Getenv("MY_POD_NAMESPACE")
-	tc, err := d.cli.PingcapV1alpha1().TidbClusters(ns).Get(pdEndpoint.tcName, metav1.GetOptions{})
+	tc, err := d.cli.PingcapV1alpha1().TidbClusters(ns).Get(context.TODO(), pdEndpoint.tcName, metav1.GetOptions{})
 	if err != nil {
 		klog.Errorf("Failed to get the tidbcluster when verifying PD endpoint, tcName: %s , ns: %s", pdEndpoint.tcName, ns)
 		return pdURL, err
+	}
+
+	// if local pd doesn't exist, return target cluster pd peer addr
+	if tc.Heterogeneous() && tc.WithoutLocalPD() {
+		addr := controller.PDPeerFullyDomain(tc.Spec.Cluster.Name, tc.Spec.Cluster.Namespace, tc.Spec.Cluster.ClusterDomain)
+		if pdEndpoint.scheme != "" {
+			addr = fmt.Sprintf("%s://%s", pdEndpoint.scheme, addr)
+		}
+		addr = addr + ":" + pdEndpoint.pdMemberPort
+		return addr, nil
 	}
 
 	var returnPDMember string
@@ -270,7 +292,7 @@ func parsePDURL(pdURL string) pdEndpointURL {
 	pdEndpoint := pdEndpointURL{
 		scheme:       "",
 		pdMemberName: "",
-		pdMemberPort: "2379",
+		pdMemberPort: strconv.FormatInt(int64(v1alpha1.DefaultPDClientPort), 10),
 		tcName:       "",
 	}
 

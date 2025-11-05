@@ -18,8 +18,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
-	"github.com/pingcap/tidb-operator/pkg/label"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 )
 
@@ -106,7 +106,7 @@ func (dc *DMCluster) MasterStsDesiredOrdinals(excludeFailover bool) sets.Int32 {
 	if !excludeFailover {
 		replicas = dc.MasterStsDesiredReplicas()
 	}
-	return helper.GetPodOrdinalsFromReplicasAndDeleteSlots(replicas, dc.getDeleteSlots(label.DMMasterLabelVal))
+	return GetPodOrdinalsFromReplicasAndDeleteSlots(replicas, dc.getDeleteSlots(label.DMMasterLabelVal))
 }
 
 func (dc *DMCluster) WorkerStsActualReplicas() int32 {
@@ -133,7 +133,14 @@ func (dc *DMCluster) WorkerStsDesiredOrdinals(excludeFailover bool) sets.Int32 {
 	if !excludeFailover {
 		replicas = dc.WorkerStsDesiredReplicas()
 	}
-	return helper.GetPodOrdinalsFromReplicasAndDeleteSlots(replicas, dc.getDeleteSlots(label.DMWorkerLabelVal))
+	return GetPodOrdinalsFromReplicasAndDeleteSlots(replicas, dc.getDeleteSlots(label.DMWorkerLabelVal))
+}
+
+func (dc *DMCluster) GetWorkerRecoverByUID() types.UID {
+	if dc.Spec.Worker == nil || dc.Spec.Worker.Failover == nil {
+		return ""
+	}
+	return dc.Spec.Worker.Failover.RecoverByUID
 }
 
 func (dc *DMCluster) GetInstanceName() string {
@@ -236,6 +243,50 @@ func (dc *DMCluster) MasterIsAvailable() bool {
 
 	if dc.Status.Master.StatefulSet == nil || dc.Status.Master.StatefulSet.ReadyReplicas < lowerLimit {
 		return false
+	}
+
+	if dc.Status.Master.Phase == SuspendPhase {
+		return false
+	}
+
+	return true
+}
+
+func (dc *DMCluster) ComponentIsNormal(typ MemberType) bool {
+	status := dc.ComponentStatus(typ)
+	if status == nil {
+		return false
+	}
+	return status.GetPhase() == NormalPhase
+}
+
+// ComponentIsSuspending return true if the component's phase is `Suspend`
+func (dc *DMCluster) ComponentIsSuspending(typ MemberType) bool {
+	status := dc.ComponentStatus(typ)
+	if status == nil {
+		return false
+	}
+	return status.GetPhase() == SuspendPhase
+}
+
+// ComponentIsSuspended return true if the component's phase is `Suspend` and all resources is suspended
+func (dc *DMCluster) ComponentIsSuspended(typ MemberType) bool {
+	spec := dc.ComponentSpec(typ)
+	status := dc.ComponentStatus(typ)
+	if spec == nil || status == nil {
+		return false
+	}
+
+	if !dc.ComponentIsSuspending(typ) {
+		return false
+	}
+
+	action := spec.SuspendAction()
+	if action != nil && action.SuspendStatefulSet {
+		if status.GetStatefulSet() != nil {
+			// the statefulset is set to nil by suspender when the sts is deleted.
+			return false
+		}
 	}
 
 	return true

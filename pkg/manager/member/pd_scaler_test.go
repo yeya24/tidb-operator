@@ -20,9 +20,9 @@ import (
 
 	. "github.com/onsi/gomega"
 	"github.com/pingcap/kvproto/pkg/pdpb"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
 	"github.com/pingcap/tidb-operator/pkg/pdapi"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -174,39 +174,6 @@ func TestPDScalerScaleOut(t *testing.T) {
 			statusSyncFailed: false,
 			err:              false,
 			changed:          true,
-		},
-		{
-			name: "don't have members",
-			update: func(tc *v1alpha1.TidbCluster) {
-				tc.Status.PD.Members = nil
-			},
-			pdUpgrading:      false,
-			hasPVC:           true,
-			hasDeferAnn:      true,
-			annoIsNil:        false,
-			pvcDeleteErr:     false,
-			statusSyncFailed: false,
-			err:              true,
-			changed:          false,
-		},
-		{
-			name: "pd member not health",
-			update: func(tc *v1alpha1.TidbCluster) {
-				normalPDMember(tc)
-				tcName := tc.GetName()
-				podName := ordinalPodName(v1alpha1.PDMemberType, tcName, 1)
-				member1 := tc.Status.PD.Members[podName]
-				member1.Health = false
-				tc.Status.PD.Members[podName] = member1
-			},
-			pdUpgrading:      false,
-			hasPVC:           true,
-			hasDeferAnn:      false,
-			annoIsNil:        true,
-			pvcDeleteErr:     false,
-			statusSyncFailed: false,
-			err:              true,
-			changed:          false,
 		},
 		{
 			name:             "pd status sync failed",
@@ -609,4 +576,13 @@ func normalPDMember(tc *v1alpha1.TidbCluster) {
 		ordinalPodName(v1alpha1.PDMemberType, tcName, 3): {Health: true},
 		ordinalPodName(v1alpha1.PDMemberType, tcName, 4): {Health: true},
 	}
+}
+
+func newPVCWithDeleteAnnotaion(set *apps.StatefulSet, memberType v1alpha1.MemberType, name string, ordinal int32) *corev1.PersistentVolumeClaim {
+	pvc := _newPVCForStatefulSet(set, memberType, name, ordinal)
+	if pvc.Annotations == nil {
+		pvc.Annotations = make(map[string]string)
+	}
+	pvc.Annotations[label.AnnPVCDeferDeleting] = time.Now().Format(time.RFC3339)
+	return pvc
 }

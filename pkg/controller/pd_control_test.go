@@ -20,6 +20,7 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/pdapi"
+	kubeinformers "k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 )
 
@@ -28,7 +29,8 @@ func TestGetPDClient(t *testing.T) {
 
 	tc := newTidbCluster()
 	kubeCli := kubefake.NewSimpleClientset()
-	pdControl := pdapi.NewFakePDControl(kubeCli)
+	informer := kubeinformers.NewSharedInformerFactory(kubeCli, 0)
+	pdControl := pdapi.NewFakePDControl(informer.Core().V1().Secrets().Lister())
 
 	type testcase struct {
 		name     string
@@ -72,7 +74,7 @@ func TestGetPDClient(t *testing.T) {
 				pdClientCluster1.AddReaction(pdapi.GetHealthActionType, func(action *pdapi.Action) (interface{}, error) {
 					return nil, fmt.Errorf("Fake cluster 1 PD crashed")
 				})
-				pdClientCluster2 := NewFakePDClientWithAddress(pdControl, "pd-0")
+				pdClientCluster2 := NewFakePDClientForMember(pdControl, tc, &v1alpha1.PDMember{Name: "pd-0"})
 				pdClientCluster2.AddReaction(pdapi.GetHealthActionType, func(action *pdapi.Action) (interface{}, error) {
 					return &pdapi.HealthInfo{Healths: []pdapi.MemberHealth{
 						{Name: "pd-0", MemberID: uint64(1), ClientUrls: []string{"http://pd-0.pd.pingcap.cluster2.com:2379"}, Health: true},
@@ -96,7 +98,7 @@ func TestGetPDClient(t *testing.T) {
 				pdClientCluster1.AddReaction(pdapi.GetHealthActionType, func(action *pdapi.Action) (interface{}, error) {
 					return nil, fmt.Errorf("Fake cluster 1 PD crashed")
 				})
-				pdClientCluster2 := NewFakePDClientWithAddress(pdControl, "pd-0")
+				pdClientCluster2 := NewFakePDClientForMember(pdControl, tc, &v1alpha1.PDMember{Name: "pd-0"})
 				pdClientCluster2.AddReaction(pdapi.GetHealthActionType, func(action *pdapi.Action) (interface{}, error) {
 					return nil, fmt.Errorf("Fake cluster 2 PD crashed")
 				})

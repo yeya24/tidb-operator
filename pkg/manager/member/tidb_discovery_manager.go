@@ -22,14 +22,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/pointer"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
 	"github.com/pingcap/tidb-operator/pkg/util"
 )
 
@@ -38,7 +38,7 @@ const (
 )
 
 type TidbDiscoveryManager interface {
-	Reconcile(obj runtime.Object) error
+	Reconcile(obj client.Object) error
 }
 
 type realTidbDiscoveryManager struct {
@@ -49,7 +49,7 @@ func NewTidbDiscoveryManager(deps *controller.Dependencies) TidbDiscoveryManager
 	return &realTidbDiscoveryManager{deps: deps}
 }
 
-func (m *realTidbDiscoveryManager) Reconcile(obj runtime.Object) error {
+func (m *realTidbDiscoveryManager) Reconcile(obj client.Object) error {
 	metaObj, ok := obj.(metav1.Object)
 	if !ok {
 		return fmt.Errorf("%T is not a metav1.Object", obj)
@@ -57,11 +57,12 @@ func (m *realTidbDiscoveryManager) Reconcile(obj runtime.Object) error {
 
 	var (
 		clusterPolicyRule rbacv1.PolicyRule
+		preferIPv6        bool
 	)
 	switch cluster := obj.(type) {
 	case *v1alpha1.TidbCluster:
 		// If PD is not specified return
-		if cluster.Spec.PD == nil {
+		if cluster.Spec.PD == nil && !cluster.AcrossK8s() {
 			return nil
 		}
 		clusterPolicyRule = rbacv1.PolicyRule{
@@ -70,6 +71,7 @@ func (m *realTidbDiscoveryManager) Reconcile(obj runtime.Object) error {
 			ResourceNames: []string{metaObj.GetName()},
 			Verbs:         []string{"get"},
 		}
+		preferIPv6 = cluster.Spec.PreferIPv6
 	case *v1alpha1.DMCluster:
 		clusterPolicyRule = rbacv1.PolicyRule{
 			APIGroups:     []string{v1alpha1.GroupName},
@@ -77,6 +79,7 @@ func (m *realTidbDiscoveryManager) Reconcile(obj runtime.Object) error {
 			ResourceNames: []string{metaObj.GetName()},
 			Verbs:         []string{"get"},
 		}
+		preferIPv6 = cluster.Spec.PreferIPv6
 	default:
 		klog.Warningf("unsupported type %T for discovery", obj)
 		return nil
@@ -91,7 +94,7 @@ func (m *realTidbDiscoveryManager) Reconcile(obj runtime.Object) error {
 			{
 				APIGroups: []string{corev1.GroupName},
 				Resources: []string{"secrets"},
-				Verbs:     []string{"get", "list"},
+				Verbs:     []string{"get", "list", "watch"},
 			},
 		},
 	})
@@ -128,16 +131,16 @@ func (m *realTidbDiscoveryManager) Reconcile(obj runtime.Object) error {
 		return controller.RequeueErrorf("error creating or updating discovery service: %v", err)
 	}
 	// RBAC ensured, reconcile
-	_, err = m.deps.TypedControl.CreateOrUpdateService(obj, getTidbDiscoveryService(metaObj, deploy))
+	_, err = m.deps.TypedControl.CreateOrUpdateService(obj, getTidbDiscoveryService(metaObj, deploy, preferIPv6))
 	if err != nil {
 		return controller.RequeueErrorf("error creating or updating discovery service: %v", err)
 	}
 	return nil
 }
 
-func getTidbDiscoveryService(obj metav1.Object, deploy *appsv1.Deployment) *corev1.Service {
+func getTidbDiscoveryService(obj metav1.Object, deploy *appsv1.Deployment, preferIPv6 bool) *corev1.Service {
 	meta, _ := getDiscoveryMeta(obj, controller.DiscoveryMemberName)
-	return &corev1.Service{
+	svc := &corev1.Service{
 		ObjectMeta: meta,
 		Spec: corev1.ServiceSpec{
 			Type: corev1.ServiceTypeClusterIP,
@@ -158,14 +161,20 @@ func getTidbDiscoveryService(obj metav1.Object, deploy *appsv1.Deployment) *core
 			Selector: deploy.Spec.Template.Labels,
 		},
 	}
+	if preferIPv6 {
+		SetServiceWhenPreferIPv6(svc)
+	}
+	return svc
 }
 
 func (m *realTidbDiscoveryManager) getTidbDiscoveryDeployment(obj metav1.Object) (*appsv1.Deployment, error) {
 	var (
-		resources corev1.ResourceRequirements
-		timezone  string
-		baseSpec  v1alpha1.ComponentAccessor
-		podSpec   corev1.PodSpec
+		resources     corev1.ResourceRequirements
+		timezone      string
+		baseSpec      v1alpha1.ComponentAccessor
+		podSpec       corev1.PodSpec
+		readinessProb *corev1.Probe
+		livenessProbe *corev1.Probe
 	)
 
 	switch cluster := obj.(type) {
@@ -174,43 +183,62 @@ func (m *realTidbDiscoveryManager) getTidbDiscoveryDeployment(obj metav1.Object)
 		timezone = cluster.Timezone()
 		baseSpec = cluster.BaseDiscoverySpec()
 		podSpec = baseSpec.BuildPodSpec()
+		if cluster.Spec.Discovery.ComponentSpec != nil && cluster.Spec.Discovery.ComponentSpec.ReadinessProbe != nil {
+			readinessProb = buildDiscoveryProb(cluster.Spec.Discovery.ComponentSpec.ReadinessProbe)
+		}
+		if cluster.Spec.Discovery.LivenessProbe != nil {
+			livenessProbe = buildDiscoveryProb(cluster.Spec.Discovery.LivenessProbe)
+		}
 	case *v1alpha1.DMCluster:
 		resources = cluster.Spec.Discovery.ResourceRequirements
 		timezone = cluster.Timezone()
 		baseSpec = cluster.BaseDiscoverySpec()
 		podSpec = baseSpec.BuildPodSpec()
+		if cluster.Spec.Discovery.ComponentSpec != nil && cluster.Spec.Discovery.ComponentSpec.ReadinessProbe != nil {
+			readinessProb = buildDiscoveryProb(cluster.Spec.Discovery.ComponentSpec.ReadinessProbe)
+		}
+		if cluster.Spec.Discovery.LivenessProbe != nil {
+			livenessProbe = buildDiscoveryProb(cluster.Spec.Discovery.LivenessProbe)
+		}
 	default:
 		panic(fmt.Sprintf("unsupported type %T for discovery meta", obj))
 	}
 
 	meta, l := getDiscoveryMeta(obj, controller.DiscoveryMemberName)
-	podSpec.ServiceAccountName = meta.Name
-	podSpec.Containers = append(podSpec.Containers, corev1.Container{
+
+	envs := []corev1.EnvVar{
+		{
+			Name: "MY_POD_NAMESPACE",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.namespace",
+				},
+			},
+		},
+		{
+			Name:  "TZ",
+			Value: timezone,
+		},
+		{
+			Name:  "TC_NAME",
+			Value: obj.GetName(), // for DmCluster, we still name it as TC_NAME because only ProxyServer use it now.
+		},
+	}
+	envs = util.AppendEnv(envs, baseSpec.Env())
+	var volMounts []corev1.VolumeMount
+	volMounts = append(volMounts, baseSpec.AdditionalVolumeMounts()...)
+	discoveryContainer := corev1.Container{
 		Name:      "discovery",
 		Resources: controller.ContainerResource(resources),
 		Command: []string{
 			"/usr/local/bin/tidb-discovery",
 		},
 		Image:           m.deps.CLIConfig.TiDBDiscoveryImage,
-		ImagePullPolicy: corev1.PullIfNotPresent,
-		Env: []corev1.EnvVar{
-			{
-				Name: "MY_POD_NAMESPACE",
-				ValueFrom: &corev1.EnvVarSource{
-					FieldRef: &corev1.ObjectFieldSelector{
-						FieldPath: "metadata.namespace",
-					},
-				},
-			},
-			{
-				Name:  "TZ",
-				Value: timezone,
-			},
-			{
-				Name:  "TC_NAME",
-				Value: obj.GetName(), // for DmCluster, we still name it as TC_NAME because only ProxyServer use it now.
-			},
-		},
+		ImagePullPolicy: baseSpec.ImagePullPolicy(),
+		Env:             envs,
+		EnvFrom:         baseSpec.EnvFrom(),
+		VolumeMounts:    volMounts,
+		SecurityContext: baseSpec.SecurityContext(),
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "discovery",
@@ -223,32 +251,49 @@ func (m *realTidbDiscoveryManager) getTidbDiscoveryDeployment(obj metav1.Object)
 				ContainerPort: 10262,
 			},
 		},
-	})
+	}
+	if readinessProb != nil {
+		discoveryContainer.ReadinessProbe = readinessProb
+	}
+	if livenessProbe != nil {
+		discoveryContainer.LivenessProbe = livenessProbe
+	}
 
-	if tc, ok := obj.(*v1alpha1.TidbCluster); ok && tc.IsTLSClusterEnabled() {
-		podSpec.Volumes = []corev1.Volume{
-			{
-				Name: "pd-tls",
-				VolumeSource: corev1.VolumeSource{
-					Secret: &corev1.SecretVolumeSource{
-						SecretName: util.ClusterTLSSecretName(obj.GetName(), label.PDLabelVal),
-					},
+	podSpec.Containers = append(podSpec.Containers, discoveryContainer)
+
+	var err error
+	podSpec.Containers, err = MergePatchContainers(podSpec.Containers, baseSpec.AdditionalContainers())
+	if err != nil {
+		return nil, fmt.Errorf("failed to merge containers spec for Discovery of [%s/%s], error: %v", meta.Namespace, meta.Name, err)
+	}
+
+	podSpec.InitContainers = append(podSpec.InitContainers, baseSpec.InitContainers()...)
+
+	podSpec.ServiceAccountName = meta.Name
+
+	podSpec.Volumes = append(podSpec.Volumes, baseSpec.AdditionalVolumes()...)
+	if tc, ok := obj.(*v1alpha1.TidbCluster); ok && tc.IsTLSClusterEnabled() && !tc.WithoutLocalPD() {
+		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+			Name: "pd-tls",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: util.ClusterTLSSecretName(obj.GetName(), label.PDLabelVal),
 				},
 			},
-		}
-		podSpec.Containers[0].VolumeMounts = []corev1.VolumeMount{
-			{
-				Name:      "pd-tls",
-				ReadOnly:  true,
-				MountPath: PdTlsCertPath,
-			},
-		}
+		})
+		podSpec.Containers[0].VolumeMounts = append(podSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      "pd-tls",
+			ReadOnly:  true,
+			MountPath: PdTlsCertPath,
+		})
 		podSpec.Containers[0].Env = append(podSpec.Containers[0].Env, corev1.EnvVar{
 			Name:  "TC_TLS_ENABLED",
 			Value: strconv.FormatBool(true),
 		})
 	}
 
+	podLabels := util.CombineStringMap(l.Labels(), baseSpec.Labels())
+	podAnnotations := baseSpec.Annotations()
 	d := &appsv1.Deployment{
 		ObjectMeta: meta,
 		Spec: appsv1.DeploymentSpec{
@@ -257,12 +302,14 @@ func (m *realTidbDiscoveryManager) getTidbDiscoveryDeployment(obj metav1.Object)
 			Selector: l.LabelSelector(),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: l.Labels(),
+					Labels:      podLabels,
+					Annotations: podAnnotations,
 				},
 				Spec: podSpec,
 			},
 		},
 	}
+
 	b, err := json.Marshal(d.Spec.Template.Spec)
 	if err != nil {
 		return nil, err
@@ -273,6 +320,28 @@ func (m *realTidbDiscoveryManager) getTidbDiscoveryDeployment(obj metav1.Object)
 	d.Annotations[controller.LastAppliedPodTemplate] = string(b)
 
 	return d, nil
+}
+
+func buildDiscoveryProb(probSpec *v1alpha1.Probe) *corev1.Probe {
+	if probSpec == nil {
+		return nil
+	}
+
+	prob := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			// only TCP socket is supported for now
+			TCPSocket: &corev1.TCPSocketAction{
+				Port: intstr.FromInt(10261),
+			},
+		},
+	}
+	if probSpec.InitialDelaySeconds != nil {
+		prob.InitialDelaySeconds = *probSpec.InitialDelaySeconds
+	}
+	if probSpec.PeriodSeconds != nil {
+		prob.PeriodSeconds = *probSpec.PeriodSeconds
+	}
+	return prob
 }
 
 func getDiscoveryMeta(obj metav1.Object, nameFunc func(string) string) (metav1.ObjectMeta, label.Label) {
@@ -289,7 +358,7 @@ func getDiscoveryMeta(obj metav1.Object, nameFunc func(string) string) (metav1.O
 		ownerRef = controller.GetOwnerRef(cluster)
 		discoveryLabel = label.New().Instance(instanceName).Discovery()
 	case *v1alpha1.DMCluster:
-		// NOTE: for DmCluster, add a `-dm` prefix for discovery to avoid name conflicts.
+		// NOTE: for DmCluster, add a `-dm` suffix for discovery to avoid name conflicts.
 		name = fmt.Sprintf("%s-dm", cluster.GetName())
 		instanceName := fmt.Sprintf("%s-dm", cluster.GetInstanceName())
 		ownerRef = controller.GetDMOwnerRef(cluster) // TODO: refactor to unify methods
@@ -319,7 +388,7 @@ func (m *FakeDiscoveryManager) SetReconcileError(err error) {
 	m.err = err
 }
 
-func (m *FakeDiscoveryManager) Reconcile(_ runtime.Object) error {
+func (m *FakeDiscoveryManager) Reconcile(_ client.Object) error {
 	if m.err != nil {
 		return m.err
 	}

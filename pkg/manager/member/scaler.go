@@ -14,25 +14,28 @@
 package member
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
 	"github.com/pingcap/tidb-operator/pkg/features"
-	"github.com/pingcap/tidb-operator/pkg/label"
 	apps "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 const (
 	skipReasonScalerPVCNotFound             = "scaler: pvc is not found"
 	skipReasonScalerAnnIsNil                = "scaler: pvc annotations is nil"
 	skipReasonScalerAnnDeferDeletingIsEmpty = "scaler: pvc annotations defer deleting is empty"
+	scalingOutFlag                          = 1
+	scalingInFlag                           = -1
 )
 
 // Scaler implements the logic for scaling out or scaling in the cluster.
@@ -43,8 +46,6 @@ type Scaler interface {
 	ScaleOut(meta metav1.Object, actual *apps.StatefulSet, desired *apps.StatefulSet) error
 	// ScaleIn scales in the cluster
 	ScaleIn(meta metav1.Object, actual *apps.StatefulSet, desired *apps.StatefulSet) error
-	// SyncAutoScalerAnn would sync Ann created by AutoScaler
-	SyncAutoScalerAnn(meta metav1.Object, actual *apps.StatefulSet) error
 }
 
 type generalScaler struct {
@@ -59,7 +60,7 @@ func (s *generalScaler) deleteDeferDeletingPVC(controller runtime.Object, member
 	// for unit test
 	skipReason := map[string]string{}
 
-	selector, err := getPVCSelectorForPod(controller, memberType, ordinal)
+	selector, err := GetPVCSelectorForPod(controller, memberType, ordinal)
 	if err != nil {
 		return skipReason, fmt.Errorf("%s %s/%s assemble label selector failed, err: %v", kind, ns, meta.GetName(), err)
 	}
@@ -68,7 +69,7 @@ func (s *generalScaler) deleteDeferDeletingPVC(controller runtime.Object, member
 	if err != nil {
 		msg := fmt.Sprintf("%s %s/%s list pvc failed, selector: %s, err: %v", kind, ns, meta.GetName(), selector, err)
 		klog.Error(msg)
-		return skipReason, fmt.Errorf(msg)
+		return skipReason, errors.New(msg)
 	}
 	if len(pvcs) == 0 {
 		klog.Infof("%s %s/%s list pvc not found, selector: %s", kind, ns, meta.GetName(), selector)
@@ -80,10 +81,12 @@ func (s *generalScaler) deleteDeferDeletingPVC(controller runtime.Object, member
 	for _, pvc := range pvcs {
 		pvcName := pvc.Name
 		if pvc.Annotations == nil {
+			klog.Infof("Exists unexpected pvc %s/%s: %s", ns, pvcName, skipReasonScalerAnnIsNil)
 			skipReason[pvcName] = skipReasonScalerAnnIsNil
 			continue
 		}
 		if _, ok := pvc.Annotations[label.AnnPVCDeferDeleting]; !ok {
+			klog.Infof("Exists unexpected pvc %s/%s: %s", ns, pvcName, skipReasonScalerAnnDeferDeletingIsEmpty)
 			skipReason[pvcName] = skipReasonScalerAnnDeferDeletingIsEmpty
 			continue
 		}
@@ -114,12 +117,12 @@ func (s *generalScaler) updateDeferDeletingPVC(tc *v1alpha1.TidbCluster,
 	if err != nil {
 		msg := fmt.Sprintf("Cluster %s/%s list pvc failed, selector: %s, err: %v", ns, tc.Name, selector, err)
 		klog.Error(msg)
-		return fmt.Errorf(msg)
+		return errors.New(msg)
 	}
 	if len(pvcs) == 0 {
 		msg := fmt.Sprintf("Cluster %s/%s list pvc not found, selector: %s", ns, tc.Name, selector)
 		klog.Error(msg)
-		return fmt.Errorf(msg)
+		return errors.New(msg)
 	}
 
 	for _, pvc := range pvcs {
@@ -176,15 +179,37 @@ func ordinalPodName(memberType v1alpha1.MemberType, tcName string, ordinal int32
 //   - 0: no scaling required
 //   - 1: scaling out
 //   - -1: scaling in
+//
 // - ordinal: pod ordinal to create or delete
 // - replicas/deleteSlots: desired replicas and deleteSlots by allowing only one pod to be deleted or created
 func scaleOne(actual *apps.StatefulSet, desired *apps.StatefulSet) (scaling int, ordinal int32, replicas int32, deleteSlots sets.Int32) {
+	var ordinals []int32
+	scaling, ordinals, replicas, deleteSlots = scaleMulti(actual, desired, 1)
+	if len(ordinals) == 0 {
+		ordinal = -1
+	} else {
+		ordinal = ordinals[0]
+	}
+	return
+}
+
+// scaleMulti calculates desired replicas and delete slots from actual/desired
+// StatefulSets by allowing multiple pods to be deleted or created
+// it returns following values:
+// - scaling:
+//   - 0: no scaling required
+//   - 1: scaling out
+//   - -1: scaling in
+//
+// - ordinals: pod ordinals to create or delete
+// - replicas/deleteSlots: desired replicas and deleteSlots by allowing no more than maxCount pods to be deleted or created
+func scaleMulti(actual *apps.StatefulSet, desired *apps.StatefulSet, maxCount int) (scaling int, ordinals []int32, replicas int32, deleteSlots sets.Int32) {
 	actualPodOrdinals := helper.GetPodOrdinals(*actual.Spec.Replicas, actual)
 	desiredPodOrdinals := helper.GetPodOrdinals(*desired.Spec.Replicas, desired)
 	additions := desiredPodOrdinals.Difference(actualPodOrdinals)
 	deletions := actualPodOrdinals.Difference(desiredPodOrdinals)
 	scaling = 0
-	ordinal = -1
+	ordinals = make([]int32, 0, maxCount)
 	replicas = *actual.Spec.Replicas
 	actualDeleteSlots := helper.GetDeleteSlots(actual)
 	desiredDeleteSlots := helper.GetDeleteSlots(desired)
@@ -195,23 +220,34 @@ func scaleOne(actual *apps.StatefulSet, desired *apps.StatefulSet) (scaling int,
 		}
 	}
 	if additions.Len() > 0 {
-		// we always do scaling out before scaling in to maintain maximum avaiability
-		scaling = 1
-		ordinal = additions.List()[0]
-		replicas++
-		if !desiredDeleteSlots.Has(ordinal) {
-			// not in desired delete slots, remove it from actual delete slots
-			actualDeleteSlots.Delete(ordinal)
+		// we always do scaling out before scaling in to maintain maximum availability
+		scaling = scalingOutFlag
+		additionsList := additions.List()
+		for i := 0; i < len(additionsList) && i < maxCount; i++ {
+			ordinal := additionsList[i]
+			replicas++
+			ordinals = append(ordinals, ordinal)
+			if !desiredDeleteSlots.Has(ordinal) {
+				// not in desired delete slots, remove it from actual delete slots
+				actualDeleteSlots.Delete(ordinal)
+			}
 		}
 		actualDeleteSlots = normalizeDeleteSlots(replicas, actualDeleteSlots, desiredDeleteSlots)
 	} else if deletions.Len() > 0 {
-		scaling = -1
+		scaling = scalingInFlag
 		deletionsList := deletions.List()
-		ordinal = deletionsList[len(deletionsList)-1]
-		replicas--
-		if desiredDeleteSlots.Has(ordinal) {
-			// in desired delete slots, add it in actual delete slots
-			actualDeleteSlots.Insert(ordinal)
+		stop := len(deletionsList) - maxCount
+		if stop < 0 {
+			stop = 0
+		}
+		for i := len(deletionsList) - 1; i >= stop; i-- {
+			ordinal := deletionsList[i]
+			replicas--
+			ordinals = append(ordinals, ordinal)
+			if desiredDeleteSlots.Has(ordinal) {
+				// in desired delete slots, add it in actual delete slots
+				actualDeleteSlots.Insert(ordinal)
+			}
 		}
 		actualDeleteSlots = normalizeDeleteSlots(replicas, actualDeleteSlots, desiredDeleteSlots)
 	}
@@ -231,4 +267,55 @@ func normalizeDeleteSlots(replicas int32, deleteSlots sets.Int32, desiredDeleteS
 		}
 	}
 	return deleteSlots
+}
+
+// setReplicasAndDeleteSlotsByFinished sets the replica and deleteSlots according to the ordinals finished successfully.
+// parameter means:
+// - scaling:
+//   - 1: scaling out
+//   - -1: scaling in
+//
+// - ordinals: pod oridnals to create or delete this round, in processing order, which means increasing when scale out and decreasing when scale in.
+// - finishedOrdinals: oridnals finished successfully in this round.
+func setReplicasAndDeleteSlotsByFinished(scaling int, newSet, oldSet *apps.StatefulSet, ordinals []int32, finishedOrdinals sets.Int32) {
+	klog.Infof("scale statefulset: ordinals: %v, finishedOrdinals: %v, StatefulSet: %s/%s", ordinals, finishedOrdinals, newSet.Namespace, newSet.Name)
+	newReplicas := *oldSet.Spec.Replicas
+	actualPodOrdinals := helper.GetPodOrdinals(*oldSet.Spec.Replicas, oldSet)
+	actualDeleteSlots := helper.GetDeleteSlots(oldSet)
+	desiredDeleteSlots := helper.GetDeleteSlots(newSet)
+	// copy delete slots from desired delete slots if not in actual pod ordinals
+	for i := range desiredDeleteSlots {
+		if !actualPodOrdinals.Has(i) {
+			actualDeleteSlots.Insert(i)
+		}
+	}
+	// we should count ordinal by order strict here.
+	if scaling > 0 {
+		for _, ordinal := range ordinals {
+			if !finishedOrdinals.Has(ordinal) {
+				break
+			}
+			newReplicas++
+			if !desiredDeleteSlots.Has(ordinal) {
+				actualDeleteSlots.Delete(ordinal)
+			}
+		}
+	} else {
+		for _, ordinal := range ordinals {
+			if !finishedOrdinals.Has(ordinal) {
+				break
+			}
+			newReplicas--
+			if desiredDeleteSlots.Has(ordinal) {
+				actualDeleteSlots.Insert(ordinal)
+			}
+		}
+	}
+	if newReplicas == *oldSet.Spec.Replicas {
+		// reset if nothing changed.
+		resetReplicas(newSet, oldSet)
+	} else {
+		actualDeleteSlots = normalizeDeleteSlots(newReplicas, actualDeleteSlots, desiredDeleteSlots)
+		setReplicasAndDeleteSlots(newSet, newReplicas, actualDeleteSlots)
+	}
 }

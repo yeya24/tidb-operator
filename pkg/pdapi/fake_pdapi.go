@@ -15,6 +15,7 @@ package pdapi
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
@@ -23,25 +24,31 @@ import (
 type ActionType string
 
 const (
-	GetHealthActionType                ActionType = "GetHealth"
-	GetConfigActionType                ActionType = "GetConfig"
-	GetClusterActionType               ActionType = "GetCluster"
-	GetMembersActionType               ActionType = "GetMembers"
-	GetStoresActionType                ActionType = "GetStores"
-	GetTombStoneStoresActionType       ActionType = "GetTombStoneStores"
-	GetStoreActionType                 ActionType = "GetStore"
-	DeleteStoreActionType              ActionType = "DeleteStore"
-	SetStoreStateActionType            ActionType = "SetStoreState"
-	DeleteMemberByIDActionType         ActionType = "DeleteMemberByID"
-	DeleteMemberActionType             ActionType = "DeleteMember "
-	SetStoreLabelsActionType           ActionType = "SetStoreLabels"
-	UpdateReplicationActionType        ActionType = "UpdateReplicationConfig"
-	BeginEvictLeaderActionType         ActionType = "BeginEvictLeader"
-	EndEvictLeaderActionType           ActionType = "EndEvictLeader"
-	GetEvictLeaderSchedulersActionType ActionType = "GetEvictLeaderSchedulers"
-	GetPDLeaderActionType              ActionType = "GetPDLeader"
-	TransferPDLeaderActionType         ActionType = "TransferPDLeader"
-	GetAutoscalingPlansActionType      ActionType = "GetAutoscalingPlans"
+	GetHealthActionType                         ActionType = "GetHealth"
+	GetConfigActionType                         ActionType = "GetConfig"
+	GetClusterActionType                        ActionType = "GetCluster"
+	GetMembersActionType                        ActionType = "GetMembers"
+	GetPDMSMembersActionType                    ActionType = "GetPDMSMembers"
+	GetPDMSPrimaryActionType                    ActionType = "GetPDMSPrimary"
+	GetStoresActionType                         ActionType = "GetStores"
+	GetTombStoneStoresActionType                ActionType = "GetTombStoneStores"
+	GetStoreActionType                          ActionType = "GetStore"
+	DeleteStoreActionType                       ActionType = "DeleteStore"
+	SetStoreStateActionType                     ActionType = "SetStoreState"
+	DeleteMemberByIDActionType                  ActionType = "DeleteMemberByID"
+	DeleteMemberActionType                      ActionType = "DeleteMember "
+	SetStoreLabelsActionType                    ActionType = "SetStoreLabels"
+	UpdateReplicationActionType                 ActionType = "UpdateReplicationConfig"
+	BeginEvictLeaderActionType                  ActionType = "BeginEvictLeader"
+	EndEvictLeaderActionType                    ActionType = "EndEvictLeader"
+	GetEvictLeaderSchedulersActionType          ActionType = "GetEvictLeaderSchedulers"
+	GetEvictLeaderSchedulersForStoresActionType ActionType = "GetEvictLeaderSchedulersForStores"
+	GetPDLeaderActionType                       ActionType = "GetPDLeader"
+	TransferPDLeaderActionType                  ActionType = "TransferPDLeader"
+	GetAutoscalingPlansActionType               ActionType = "GetAutoscalingPlans"
+	GetRecoveringMarkActionType                 ActionType = "GetRecoveringMark"
+	GetReadyActionType                          ActionType = "GetReady"
+	PDMSTransferPrimaryActionType               ActionType = "PDMSTransferPrimary"
 )
 
 type NotFoundReaction struct {
@@ -64,6 +71,24 @@ type Reaction func(action *Action) (interface{}, error)
 // FakePDClient implements a fake version of PDClient.
 type FakePDClient struct {
 	reactions map[ActionType]Reaction
+}
+
+func (c *FakePDClient) GetMSMembers(_ string) ([]string, error) {
+	action := &Action{}
+	result, err := c.fakeAPI(GetPDMSMembersActionType, action)
+	if err != nil {
+		return nil, err
+	}
+	return result.([]string), nil
+}
+
+func (c *FakePDClient) GetMSPrimary(_ string) (string, error) {
+	action := &Action{}
+	result, err := c.fakeAPI(GetPDMSPrimaryActionType, action)
+	if err != nil {
+		return "", err
+	}
+	return result.(string), nil
 }
 
 func NewFakePDClient() *FakePDClient {
@@ -234,6 +259,15 @@ func (c *FakePDClient) GetEvictLeaderSchedulers() ([]string, error) {
 	return nil, nil
 }
 
+func (c *FakePDClient) GetEvictLeaderSchedulersForStores(storeIDs ...uint64) (map[uint64]string, error) {
+	if reaction, ok := c.reactions[GetEvictLeaderSchedulersActionType]; ok {
+		action := &Action{}
+		result, err := reaction(action)
+		return result.(map[uint64]string), err
+	}
+	return nil, nil
+}
+
 func (c *FakePDClient) GetPDLeader() (*pdpb.Member, error) {
 	if reaction, ok := c.reactions[GetPDLeaderActionType]; ok {
 		action := &Action{}
@@ -259,4 +293,64 @@ func (c *FakePDClient) GetAutoscalingPlans(strategy Strategy) ([]Plan, error) {
 		return result.([]Plan), err
 	}
 	return nil, nil
+}
+
+func (c *FakePDClient) GetRecoveringMark() (bool, error) {
+	action := &Action{}
+	_, err := c.fakeAPI(GetRecoveringMarkActionType, action)
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+func (c *FakePDClient) GetReady() (bool, error) {
+	action := &Action{}
+	result, err := c.fakeAPI(GetReadyActionType, action)
+	if err != nil {
+		return false, err
+	}
+	return result.(bool), nil
+}
+
+// FakePDMSClient implements a fake version of PDMSClient.
+type FakePDMSClient struct {
+	reactions map[ActionType]Reaction
+	domain    string
+}
+
+func NewFakePDMSClient(domain string) *FakePDMSClient {
+	return &FakePDMSClient{reactions: map[ActionType]Reaction{}, domain: domain}
+}
+
+func (c *FakePDMSClient) AddReaction(actionType ActionType, reaction Reaction) {
+	c.reactions[actionType] = reaction
+}
+
+// fakeAPI is a small helper for fake API calls
+func (c *FakePDMSClient) fakeAPI(actionType ActionType, action *Action) (interface{}, error) {
+	if reaction, ok := c.reactions[actionType]; ok {
+		result, err := reaction(action)
+		if err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+	return nil, &NotFoundReaction{actionType}
+}
+
+func (c *FakePDMSClient) GetHealth() error {
+	action := &Action{}
+	_, err := c.fakeAPI(GetHealthActionType, action)
+	return err
+}
+
+func (c *FakePDMSClient) TransferPrimary(newPrimary string) error {
+	action := &Action{Name: newPrimary}
+	if len(c.domain) > 0 && !strings.Contains(newPrimary, c.domain) {
+		return fmt.Errorf("new primary %s does not contain domain %s", newPrimary, c.domain)
+	}
+	_, err := c.fakeAPI(PDMSTransferPrimaryActionType, action)
+	return err
 }

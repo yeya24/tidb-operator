@@ -17,11 +17,15 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"strings"
 
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
 	"github.com/pingcap/tidb-operator/pkg/manager"
+	startscriptv1 "github.com/pingcap/tidb-operator/pkg/manager/member/startscript/v1"
+	"github.com/pingcap/tidb-operator/pkg/manager/suspender"
+	mngerutils "github.com/pingcap/tidb-operator/pkg/manager/utils"
 	"github.com/pingcap/tidb-operator/pkg/util"
 
 	apps "k8s.io/api/apps/v1"
@@ -30,7 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/pointer"
 )
 
@@ -42,17 +46,19 @@ const (
 )
 
 type workerMemberManager struct {
-	deps     *controller.Dependencies
-	scaler   Scaler
-	failover DMFailover
+	deps      *controller.Dependencies
+	scaler    Scaler
+	failover  DMFailover
+	suspender suspender.Suspender
 }
 
 // NewWorkerMemberManager returns a *ticdcMemberManager
-func NewWorkerMemberManager(deps *controller.Dependencies, scaler Scaler, failover DMFailover) manager.DMManager {
+func NewWorkerMemberManager(deps *controller.Dependencies, scaler Scaler, failover DMFailover, spder suspender.Suspender) manager.DMManager {
 	return &workerMemberManager{
-		deps:     deps,
-		scaler:   scaler,
-		failover: failover,
+		deps:      deps,
+		scaler:    scaler,
+		failover:  failover,
+		suspender: spder,
 	}
 }
 
@@ -67,6 +73,18 @@ func (m *workerMemberManager) SyncDM(dc *v1alpha1.DMCluster) error {
 		klog.Infof("DMCluster %s/%s is paused, skip syncing dm-worker deployment", ns, dcName)
 		return nil
 	}
+
+	// skip sync if dm worker is suspended
+	component := v1alpha1.DMWorkerMemberType
+	needSuspend, err := m.suspender.SuspendComponent(dc, component)
+	if err != nil {
+		return fmt.Errorf("suspend %s failed: %v", component, err)
+	}
+	if needSuspend {
+		klog.Infof("component %s for cluster %s/%s is suspended, skip syncing", component, dc.GetNamespace(), dc.GetName())
+		return nil
+	}
+
 	if !dc.MasterIsAvailable() {
 		return controller.RequeueErrorf("DMCluster: %s/%s, waiting for dm-master cluster running", ns, dcName)
 	}
@@ -99,18 +117,13 @@ func (m *workerMemberManager) syncWorkerHeadlessServiceForDMCluster(dc *v1alpha1
 
 	oldSvc := oldSvcTmp.DeepCopy()
 
-	equal, err := controller.ServiceEqual(newSvc, oldSvc)
+	_, err = m.deps.ServiceControl.SyncComponentService(
+		dc,
+		newSvc,
+		oldSvc,
+		false)
+
 	if err != nil {
-		return err
-	}
-	if !equal {
-		svc := *oldSvc
-		svc.Spec = newSvc.Spec
-		err = controller.SetServiceLastAppliedConfigAnnotation(&svc)
-		if err != nil {
-			return err
-		}
-		_, err = m.deps.ServiceControl.UpdateService(dc, &svc)
 		return err
 	}
 
@@ -124,7 +137,7 @@ func getNewWorkerHeadlessServiceForDMCluster(dc *v1alpha1.DMCluster) *corev1.Ser
 	svcName := controller.DMWorkerPeerMemberName(dcName)
 	svcLabel := label.NewDM().Instance(instanceName).DMWorker().Labels()
 
-	svc := corev1.Service{
+	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            svcName,
 			Namespace:       ns,
@@ -145,7 +158,12 @@ func getNewWorkerHeadlessServiceForDMCluster(dc *v1alpha1.DMCluster) *corev1.Ser
 			PublishNotReadyAddresses: true,
 		},
 	}
-	return &svc
+
+	if dc.Spec.PreferIPv6 {
+		SetServiceWhenPreferIPv6(svc)
+	}
+
+	return svc
 }
 
 func (m *workerMemberManager) syncWorkerStatefulSetForDMCluster(dc *v1alpha1.DMCluster) error {
@@ -180,7 +198,7 @@ func (m *workerMemberManager) syncWorkerStatefulSetForDMCluster(dc *v1alpha1.DMC
 		m.failover.RemoveUndesiredFailures(dc)
 	}
 	if len(dc.Status.Worker.FailureMembers) > 0 &&
-		dc.Spec.Worker.RecoverFailover &&
+		(dc.Spec.Worker.RecoverFailover || dc.Status.Worker.FailoverUID == dc.GetWorkerRecoverByUID()) &&
 		shouldRecoverDM(dc, label.DMWorkerLabelVal, m.deps.PodLister) {
 		m.failover.Recover(dc)
 	}
@@ -191,7 +209,7 @@ func (m *workerMemberManager) syncWorkerStatefulSetForDMCluster(dc *v1alpha1.DMC
 	}
 
 	if stsNotExist {
-		err = SetStatefulSetLastAppliedConfigAnnotation(newSts)
+		err = mngerutils.SetStatefulSetLastAppliedConfigAnnotation(newSts)
 		if err != nil {
 			return err
 		}
@@ -217,7 +235,7 @@ func (m *workerMemberManager) syncWorkerStatefulSetForDMCluster(dc *v1alpha1.DMC
 		}
 	}
 
-	return UpdateStatefulSet(m.deps.StatefulSetControl, dc, newSts, oldSts)
+	return mngerutils.UpdateStatefulSet(m.deps.StatefulSetControl, dc, newSts, oldSts)
 }
 
 func (m *workerMemberManager) syncDMClusterStatus(dc *v1alpha1.DMCluster, set *apps.StatefulSet) error {
@@ -288,7 +306,7 @@ func (m *workerMemberManager) syncDMClusterStatus(dc *v1alpha1.DMCluster, set *a
 }
 
 func (m *workerMemberManager) workerStatefulSetIsUpgrading(set *apps.StatefulSet, dc *v1alpha1.DMCluster) (bool, error) {
-	if statefulSetIsUpgrading(set) {
+	if mngerutils.StatefulSetIsUpgrading(set) {
 		return true, nil
 	}
 	instanceName := dc.GetInstanceName()
@@ -321,6 +339,18 @@ func (m *workerMemberManager) syncWorkerConfigMap(dc *v1alpha1.DMCluster, set *a
 	if err != nil {
 		return nil, err
 	}
+
+	var inUseName string
+	if set != nil {
+		inUseName = mngerutils.FindConfigMapVolume(&set.Spec.Template.Spec, func(name string) bool {
+			return strings.HasPrefix(name, controller.DMWorkerMemberName(dc.Name))
+		})
+	}
+
+	err = mngerutils.UpdateConfigMapIfNeed(m.deps.ConfigMapLister, dc.BaseWorkerSpec().ConfigUpdateStrategy(), inUseName, newCm)
+	if err != nil {
+		return nil, err
+	}
 	return m.deps.TypedControl.CreateOrUpdateConfigMap(dc, newCm)
 }
 
@@ -335,11 +365,12 @@ func getNewWorkerSetForDMCluster(dc *v1alpha1.DMCluster, cm *corev1.ConfigMap) (
 	workerConfigMap := cm.Name
 
 	annoMount, annoVolume := annotationsMountVolume()
+	dataVolumeName := string(v1alpha1.GetStorageVolumeName("", v1alpha1.DMWorkerMemberType))
 	volMounts := []corev1.VolumeMount{
 		annoMount,
 		{Name: "config", ReadOnly: true, MountPath: "/etc/dm-worker"},
 		{Name: "startup-script", ReadOnly: true, MountPath: "/usr/local/bin"},
-		{Name: v1alpha1.DMWorkerMemberType.String(), MountPath: dmWorkerDataVolumeMountPath},
+		{Name: dataVolumeName, MountPath: dmWorkerDataVolumeMountPath},
 	}
 	volMounts = append(volMounts, dc.Spec.Worker.AdditionalVolumeMounts...)
 
@@ -409,9 +440,10 @@ func getNewWorkerSetForDMCluster(dc *v1alpha1.DMCluster, cm *corev1.ConfigMap) (
 		},
 	}
 
-	workerLabel := label.NewDM().Instance(instanceName).DMWorker()
 	setName := controller.DMWorkerMemberName(dcName)
-	podAnnotations := CombineAnnotations(controller.AnnProm(8262), baseWorkerSpec.Annotations())
+	stsLabels := label.NewDM().Instance(instanceName).DMWorker()
+	podLabels := util.CombineStringMap(stsLabels, baseWorkerSpec.Labels())
+	podAnnotations := util.CombineStringMap(baseWorkerSpec.Annotations(), controller.AnnProm(8262, "/metrics"))
 	stsAnnotations := getStsAnnotations(dc.Annotations, label.DMWorkerLabelVal)
 
 	workerContainer := corev1.Container{
@@ -426,8 +458,9 @@ func getNewWorkerSetForDMCluster(dc *v1alpha1.DMCluster, cm *corev1.ConfigMap) (
 				Protocol:      corev1.ProtocolTCP,
 			},
 		},
-		VolumeMounts: volMounts,
-		Resources:    controller.ContainerResource(dc.Spec.Worker.ResourceRequirements),
+		VolumeMounts:    volMounts,
+		Resources:       controller.ContainerResource(dc.Spec.Worker.ResourceRequirements),
+		SecurityContext: baseWorkerSpec.SecurityContext(),
 	}
 	env := []corev1.EnvVar{
 		{
@@ -458,7 +491,6 @@ func getNewWorkerSetForDMCluster(dc *v1alpha1.DMCluster, cm *corev1.ConfigMap) (
 
 	podSpec := baseWorkerSpec.BuildPodSpec()
 	if baseWorkerSpec.HostNetwork() {
-		podSpec.DNSPolicy = corev1.DNSClusterFirstWithHostNet
 		env = append(env, corev1.EnvVar{
 			Name: "POD_NAME",
 			ValueFrom: &corev1.EnvVarSource{
@@ -469,23 +501,31 @@ func getNewWorkerSetForDMCluster(dc *v1alpha1.DMCluster, cm *corev1.ConfigMap) (
 		})
 	}
 	workerContainer.Env = util.AppendEnv(env, baseWorkerSpec.Env())
+	workerContainer.EnvFrom = baseWorkerSpec.EnvFrom()
 	podSpec.Volumes = append(vols, baseWorkerSpec.AdditionalVolumes()...)
-	podSpec.Containers = append([]corev1.Container{workerContainer}, baseWorkerSpec.AdditionalContainers()...)
+
+	podSpec.Containers, err = MergePatchContainers([]corev1.Container{workerContainer}, baseWorkerSpec.AdditionalContainers())
+	if err != nil {
+		return nil, fmt.Errorf("failed to merge containers spec for DC [%s/%s], error: %v", dc.Namespace, dc.Name, err)
+	}
+
+	var initContainers []corev1.Container // no default initContainers now
+	podSpec.InitContainers = append(initContainers, baseWorkerSpec.InitContainers()...)
 
 	workerSet := &apps.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            setName,
 			Namespace:       ns,
-			Labels:          workerLabel.Labels(),
+			Labels:          stsLabels,
 			Annotations:     stsAnnotations,
 			OwnerReferences: []metav1.OwnerReference{controller.GetDMOwnerRef(dc)},
 		},
 		Spec: apps.StatefulSetSpec{
 			Replicas: pointer.Int32Ptr(dc.WorkerStsDesiredReplicas()),
-			Selector: workerLabel.LabelSelector(),
+			Selector: stsLabels.LabelSelector(),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels:      workerLabel.Labels(),
+					Labels:      podLabels,
 					Annotations: podAnnotations,
 				},
 				Spec: podSpec,
@@ -493,7 +533,7 @@ func getNewWorkerSetForDMCluster(dc *v1alpha1.DMCluster, cm *corev1.ConfigMap) (
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
 				{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: v1alpha1.DMWorkerMemberType.String(),
+						Name: dataVolumeName,
 					},
 					Spec: corev1.PersistentVolumeClaimSpec{
 						AccessModes: []corev1.PersistentVolumeAccessMode{
@@ -505,9 +545,9 @@ func getNewWorkerSetForDMCluster(dc *v1alpha1.DMCluster, cm *corev1.ConfigMap) (
 				},
 			},
 			ServiceName:         controller.DMWorkerPeerMemberName(dcName),
-			PodManagementPolicy: apps.ParallelPodManagement,
+			PodManagementPolicy: baseWorkerSpec.PodManagementPolicy(),
 			UpdateStrategy: apps.StatefulSetUpdateStrategy{
-				Type: apps.RollingUpdateStatefulSetStrategyType,
+				Type: baseWorkerSpec.StatefulSetUpdateStrategy(),
 			},
 		},
 	}
@@ -516,23 +556,23 @@ func getNewWorkerSetForDMCluster(dc *v1alpha1.DMCluster, cm *corev1.ConfigMap) (
 }
 
 func getWorkerConfigMap(dc *v1alpha1.DMCluster) (*corev1.ConfigMap, error) {
-	config := dc.Spec.Worker.Config
-	if config == nil {
-		config = &v1alpha1.WorkerConfig{}
+	config := v1alpha1.NewWorkerConfig()
+	if dc.Spec.Worker.Config != nil {
+		config = dc.Spec.Worker.Config.DeepCopy()
 	}
 
 	// override CA if tls enabled
 	if dc.IsTLSClusterEnabled() {
-		config.SSLCA = pointer.StringPtr(path.Join(dmWorkerClusterCertPath, tlsSecretRootCAKey))
-		config.SSLCert = pointer.StringPtr(path.Join(dmWorkerClusterCertPath, corev1.TLSCertKey))
-		config.SSLKey = pointer.StringPtr(path.Join(dmWorkerClusterCertPath, corev1.TLSPrivateKeyKey))
+		config.Set("ssl-ca", path.Join(dmWorkerClusterCertPath, tlsSecretRootCAKey))
+		config.Set("ssl-cert", path.Join(dmWorkerClusterCertPath, corev1.TLSCertKey))
+		config.Set("ssl-key", path.Join(dmWorkerClusterCertPath, corev1.TLSPrivateKeyKey))
 	}
 
-	confText, err := MarshalTOML(config)
+	confText, err := config.MarshalTOML()
 	if err != nil {
 		return nil, err
 	}
-	startScript, err := RenderDMWorkerStartScript(&DMWorkerStartScriptModel{
+	startScript, err := startscriptv1.RenderDMWorkerStartScript(&startscriptv1.DMWorkerStartScriptModel{
 		DataDir:       filepath.Join(dmWorkerDataVolumeMountPath, dc.Spec.Worker.DataSubDir),
 		MasterAddress: controller.DMMasterMemberName(dc.Name) + ":8261",
 	})
@@ -553,10 +593,6 @@ func getWorkerConfigMap(dc *v1alpha1.DMCluster) (*corev1.ConfigMap, error) {
 			"config-file":    string(confText),
 			"startup-script": startScript,
 		},
-	}
-
-	if err := AddConfigMapDigestSuffix(cm); err != nil {
-		return nil, err
 	}
 	return cm, nil
 }

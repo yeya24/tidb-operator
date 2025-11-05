@@ -22,9 +22,9 @@ import (
 
 	"github.com/pingcap/tidb-operator/tests/pkg/fault-trigger/api"
 	"github.com/pingcap/tidb-operator/tests/pkg/fault-trigger/manager"
+	"github.com/pingcap/tidb-operator/tests/third_party/k8s/log"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/component-base/logs"
-	"k8s.io/kubernetes/test/e2e/framework/log"
 )
 
 var (
@@ -53,6 +53,6 @@ func main() {
 	}, 5*time.Second)
 
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", pprofPort), nil); err != nil {
-		log.Fail(err.Error())
+		log.Failf(err.Error())
 	}
 }

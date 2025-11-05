@@ -21,11 +21,12 @@ import (
 	"github.com/pingcap/tidb-operator/cmd/backup-manager/app/constants"
 	"github.com/pingcap/tidb-operator/cmd/backup-manager/app/restore"
 	"github.com/pingcap/tidb-operator/cmd/backup-manager/app/util"
+	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	informers "github.com/pingcap/tidb-operator/pkg/client/informers/externalversions"
 	"github.com/pingcap/tidb-operator/pkg/controller"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 )
 
@@ -47,6 +48,13 @@ func NewRestoreCommand() *cobra.Command {
 	cmd.Flags().StringVar(&ro.TiKVVersion, "tikvVersion", util.DefaultVersion, "TiKV version")
 	cmd.Flags().BoolVar(&ro.TLSClient, "client-tls", false, "Whether client tls is enabled")
 	cmd.Flags().BoolVar(&ro.TLSCluster, "cluster-tls", false, "Whether cluster tls is enabled")
+	cmd.Flags().BoolVar(&ro.SkipClientCA, "skipClientCA", false, "Whether to skip tidb server's certificates validation")
+	cmd.Flags().StringVar(&ro.Mode, "mode", string(v1alpha1.RestoreModeSnapshot), "restore mode, which is pitr or snapshot(default)")
+	cmd.Flags().StringVar(&ro.PitrRestoredTs, "pitrRestoredTs", "0", "The pitr restored ts")
+	cmd.Flags().BoolVar(&ro.Prepare, "prepare", false, "Whether to prepare for restore")
+	cmd.Flags().StringVar(&ro.TargetAZ, "target-az", "", "For volume-snapshot restore, which az the volume snapshots restore to")
+	cmd.Flags().BoolVar(&ro.UseFSR, "use-fsr", false, "EBS snapshot restore use FSR for TiKV data volumes or not")
+	cmd.Flags().BoolVar(&ro.Abort, "abort", false, "Whether to abort/cleanup a failed restore operation")
 	return cmd
 }
 
@@ -62,6 +70,7 @@ func runRestore(restoreOpts restore.Options, kubecfg string) error {
 	recorder := util.NewEventRecorder(kubeCli, "restore")
 	restoreInformer := informerFactory.Pingcap().V1alpha1().Restores()
 	statusUpdater := controller.NewRealRestoreConditionUpdater(cli, restoreInformer.Lister(), recorder)
+	restoreControl := controller.NewRealRestoreControl(cli, restoreInformer.Lister(), recorder)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -71,6 +80,6 @@ func runRestore(restoreOpts restore.Options, kubecfg string) error {
 	cache.WaitForCacheSync(ctx.Done(), restoreInformer.Informer().HasSynced)
 
 	klog.Infof("start to process restore %s", restoreOpts.String())
-	rm := restore.NewManager(restoreInformer.Lister(), statusUpdater, restoreOpts)
+	rm := restore.NewManager(restoreInformer.Lister(), statusUpdater, restoreControl, restoreOpts)
 	return rm.ProcessRestore()
 }

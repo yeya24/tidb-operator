@@ -22,7 +22,7 @@ import (
 	"sync"
 
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 var (
@@ -30,7 +30,8 @@ var (
 	defaultFeatures = map[string]bool{
 		StableScheduling:    true,
 		AdvancedStatefulSet: false,
-		AutoScaling:         false,
+		VolumeModifying:     false,
+		VolumeReplacing:     false,
 	}
 	// DefaultFeatureGate is a shared global FeatureGate.
 	DefaultFeatureGate FeatureGate = NewDefaultFeatureGate()
@@ -43,8 +44,13 @@ const (
 	// AdvancedStatefulSet controls whether to use AdvancedStatefulSet to manage pods
 	AdvancedStatefulSet string = "AdvancedStatefulSet"
 
-	// AutoScaling controls whether to use TidbClusterAutoScaler to auto scale-in/out pods
-	AutoScaling string = "AutoScaling"
+	// VolumeModifying controls whether allow to modify volumes
+	// NOTE: volume resize is always allowed even if this feature is disabled
+	VolumeModifying string = "VolumeModifying"
+
+	// VolumeReplacing controls whether to replace whole volumes by deleting and recreating on changes.
+	// tidb, tikv & pd supported. If enabled takes precedence over resizing/modifying.
+	VolumeReplacing string = "VolumeReplacing"
 )
 
 type FeatureGate interface {

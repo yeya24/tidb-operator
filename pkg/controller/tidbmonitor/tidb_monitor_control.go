@@ -14,16 +14,18 @@
 package tidbmonitor
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
 	"github.com/pingcap/tidb-operator/pkg/monitor"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	errorutils "k8s.io/apimachinery/pkg/util/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // ControlInterface reconciles TidbMonitor
@@ -64,6 +66,7 @@ func (c *defaultTidbMonitorControl) reconcileTidbMonitor(tm *v1alpha1.TidbMonito
 	if apiequality.Semantic.DeepEqual(&tm.Status, oldStatus) {
 		return errorutils.NewAggregate(errs)
 	}
+
 	if _, err := c.UpdateTidbMonitor(tm.DeepCopy()); err != nil {
 		errs = append(errs, err)
 	}
@@ -87,7 +90,7 @@ func (tmc *FakeTidbMonitorControl) SetReconcileTidbMonitorError(err error) {
 	tmc.err = err
 }
 
-// CreateBackup adds the backup to BackupIndexer
+// ReconcileTidbMonitor adds the backup to BackupIndexer
 func (tmc *FakeTidbMonitorControl) ReconcileTidbMonitor(tm *v1alpha1.TidbMonitor) error {
 	if tmc.err != nil {
 		return tmc.err
@@ -95,7 +98,7 @@ func (tmc *FakeTidbMonitorControl) ReconcileTidbMonitor(tm *v1alpha1.TidbMonitor
 	return nil
 }
 
-// CreateBackup adds the backup to BackupIndexer
+// UpdateTidbMonitor adds the backup to BackupIndexer
 func (tmc *FakeTidbMonitorControl) UpdateTidbMonitor(tm *v1alpha1.TidbMonitor) (*v1alpha1.TidbMonitor, error) {
 	return nil, nil
 }
@@ -112,7 +115,7 @@ func (c *defaultTidbMonitorControl) UpdateTidbMonitor(tm *v1alpha1.TidbMonitor) 
 	// don't wait due to limited number of clients, but backoff after the default number of steps
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var updateErr error
-		update, updateErr = c.deps.Clientset.PingcapV1alpha1().TidbMonitors(ns).Update(tm)
+		update, updateErr = c.deps.Clientset.PingcapV1alpha1().TidbMonitors(ns).Update(context.TODO(), tm, metav1.UpdateOptions{})
 		if updateErr == nil {
 			klog.Infof("TidbMonitor: [%s/%s] updated successfully", ns, tmName)
 			return nil

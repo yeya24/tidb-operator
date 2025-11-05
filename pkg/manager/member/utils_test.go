@@ -22,89 +22,15 @@ import (
 	"github.com/google/go-cmp/cmp"
 	. "github.com/onsi/gomega"
 	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
-	"github.com/pingcap/tidb-operator/pkg/label"
-	apps "k8s.io/api/apps/v1"
+	"github.com/pingcap/tidb-operator/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubeinformers "k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 )
-
-func TestStatefulSetIsUpgrading(t *testing.T) {
-	g := NewGomegaWithT(t)
-
-	type testcase struct {
-		name            string
-		update          func(*apps.StatefulSet)
-		expectUpgrading bool
-	}
-
-	testFn := func(test *testcase, t *testing.T) {
-		t.Log(test.name)
-
-		set := &apps.StatefulSet{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test",
-				Namespace: metav1.NamespaceDefault,
-			},
-		}
-		if test.update != nil {
-			test.update(set)
-		}
-		b := statefulSetIsUpgrading(set)
-		if test.expectUpgrading {
-			g.Expect(b).To(BeTrue())
-		} else {
-			g.Expect(b).To(BeFalse())
-		}
-	}
-	tests := []*testcase{
-		{
-			name:            "ObservedGeneration is nil",
-			update:          nil,
-			expectUpgrading: false,
-		},
-		{
-			name: "CurrentRevision not equal UpdateRevision",
-			update: func(set *apps.StatefulSet) {
-				set.Status.ObservedGeneration = 1000
-				set.Status.CurrentRevision = "v1"
-				set.Status.UpdateRevision = "v2"
-			},
-			expectUpgrading: true,
-		},
-		{
-			name: "set.Generation > *set.Status.ObservedGeneration && *set.Spec.Replicas == set.Status.Replicas",
-			update: func(set *apps.StatefulSet) {
-				set.Generation = 1001
-				set.Status.ObservedGeneration = 1000
-				set.Status.CurrentRevision = "v1"
-				set.Status.UpdateRevision = "v1"
-				set.Status.Replicas = 3
-				set.Spec.Replicas = func() *int32 { var i int32 = 3; return &i }()
-			},
-			expectUpgrading: true,
-		},
-		{
-			name: "replicas not equal",
-			update: func(set *apps.StatefulSet) {
-				set.Generation = 1001
-				set.Status.ObservedGeneration = 1000
-				set.Status.CurrentRevision = "v1"
-				set.Status.UpdateRevision = "v1"
-				set.Status.Replicas = 3
-				set.Spec.Replicas = func() *int32 { var i int32 = 2; return &i }()
-			},
-			expectUpgrading: false,
-		},
-	}
-
-	for _, test := range tests {
-		testFn(test, t)
-	}
-}
 
 func TestGetStsAnnotations(t *testing.T) {
 	tests := []struct {
@@ -288,7 +214,7 @@ func TestShouldRecover(t *testing.T) {
 		},
 	}
 	podsWithFailover := append(pods, []*v1.Pod{
-		&v1.Pod{
+		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "failover-tikv-2",
 				Namespace: v1.NamespaceDefault,
@@ -302,7 +228,7 @@ func TestShouldRecover(t *testing.T) {
 				},
 			},
 		},
-		&v1.Pod{
+		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "failover-tiflash-2",
 				Namespace: v1.NamespaceDefault,
@@ -715,7 +641,7 @@ func TestShouldRecover(t *testing.T) {
 			defer cancel()
 			client := kubefake.NewSimpleClientset()
 			for _, pod := range tt.pods {
-				client.CoreV1().Pods(pod.Namespace).Create(pod)
+				client.CoreV1().Pods(pod.Namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
 			}
 			kubeInformerFactory := kubeinformers.NewSharedInformerFactory(client, 0)
 			podLister := kubeInformerFactory.Core().V1().Pods().Lister()
@@ -790,7 +716,7 @@ func TestCombineAnnotations(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := CombineAnnotations(tt.a, tt.b)
+			got := util.CombineStringMap(tt.a, tt.b)
 			if diff := cmp.Diff(tt.expected, got); diff != "" {
 				t.Errorf("unexpected (-want, +got): %s", diff)
 			}
@@ -813,8 +739,8 @@ func TestMemberPodName(t *testing.T) {
 			controllerName: "test",
 			controllerKind: v1alpha1.TiDBClusterKind,
 			ordinal:        2,
-			memberType:     v1alpha1.SlowLogTailerMemberType,
-			expected:       "test-slowlog-2",
+			memberType:     v1alpha1.PDMemberType,
+			expected:       "test-pd-2",
 		},
 		{
 			name:           "unknown controller kind",
@@ -835,5 +761,220 @@ func TestMemberPodName(t *testing.T) {
 				t.Errorf("unexpected (-want, +got): %s", diff)
 			}
 		})
+	}
+}
+
+func TestTiKVLessThanV50(t *testing.T) {
+	g := NewGomegaWithT(t)
+
+	type testcase struct {
+		name   string
+		image  string
+		expect bool
+	}
+
+	tests := []*testcase{
+		{
+			name:   "normal version less than v5.0.0",
+			image:  "pingcap/tikv:v4.0.13",
+			expect: true,
+		},
+		{
+			name:   "normal version more than v5.0.0",
+			image:  "pingcap/tikv:v5.2.1",
+			expect: false,
+		},
+		{
+			name:   "invalid version",
+			image:  "pingcap/tikv:v5.0.x",
+			expect: false,
+		},
+		{
+			name:   "dirty version less than v5.0.0",
+			image:  "pingcap/tikv:v4.0.0-20200909",
+			expect: true,
+		},
+		{
+			name:   "dirty version more than v5.0.0",
+			image:  "pingcap/tikv:v5.1.1-20210926",
+			expect: false,
+		},
+		{
+			name:   "alpha version more than v5.0.0",
+			image:  "pingcap/tikv:v4.0.0-alpha",
+			expect: true,
+		},
+		{
+			name:   "alpha version more than v5.0.0",
+			image:  "pingcap/tikv:v5.2.0-alpha",
+			expect: false,
+		},
+		{
+			name:   "nightly version more than v5.0.0",
+			image:  "pingcap/tikv:v4.0.0-nightly",
+			expect: true,
+		},
+		{
+			name:   "nightly version more than v5.0.0",
+			image:  "pingcap/tikv:v5.2.0-nightly",
+			expect: false,
+		},
+		{
+			name:   "rc version more than v5.0.0",
+			image:  "pingcap/tikv:v4.0.0-rc",
+			expect: true,
+		},
+		{
+			name:   "rc version more than v5.0.0",
+			image:  "pingcap/tikv:v5.2.0-rc",
+			expect: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ok := TiKVLessThanV50(tt.image)
+			g.Expect(ok).To(Equal(tt.expect))
+		})
+	}
+}
+
+func TestPodLabelsAnnotations(t *testing.T) {
+	g := NewGomegaWithT(t)
+	build := func(name, image string, ports ...v1.ContainerPort) v1.Container {
+		return v1.Container{
+			Name:  name,
+			Image: image,
+			Ports: ports,
+		}
+	}
+
+	port1A := v1.ContainerPort{
+		Name:          "portA",
+		ContainerPort: 1,
+	}
+	port1B := v1.ContainerPort{
+		Name:          "portB",
+		ContainerPort: 1,
+	}
+	port2A := v1.ContainerPort{
+		Name:          "portA",
+		ContainerPort: 2,
+	}
+
+	testCases := []struct {
+		name    string
+		base    []v1.Container
+		patches []v1.Container
+		result  []v1.Container
+	}{
+		// sanity checks
+		{
+			name: "everything nil",
+		}, {
+			name:   "no patch",
+			base:   []v1.Container{build("c1", "image:A")},
+			result: []v1.Container{build("c1", "image:A")},
+		}, {
+			name:    "no Base",
+			patches: []v1.Container{build("c1", "image:A")},
+			result:  []v1.Container{build("c1", "image:A")},
+		}, {
+			name:    "no conflict",
+			base:    []v1.Container{build("c1", "image:A")},
+			patches: []v1.Container{build("c2", "image:A")},
+			result:  []v1.Container{build("c1", "image:A"), build("c2", "image:A")},
+		}, {
+			name:    "no conflict with port",
+			base:    []v1.Container{build("c1", "image:A", port1A)},
+			patches: []v1.Container{build("c2", "image:A", port1B)},
+			result:  []v1.Container{build("c1", "image:A", port1A), build("c2", "image:A", port1B)},
+		},
+		// string conflicts
+		{
+			name:    "one conflict",
+			base:    []v1.Container{build("c1", "image:A")},
+			patches: []v1.Container{build("c1", "image:B")},
+			result:  []v1.Container{build("c1", "image:B")},
+		}, {
+			name:    "one conflict with ports",
+			base:    []v1.Container{build("c1", "image:A", port1A)},
+			patches: []v1.Container{build("c1", "image:B", port1A)},
+			result:  []v1.Container{build("c1", "image:B", port1A)},
+		}, {
+			name:    "out of order conflict",
+			base:    []v1.Container{build("c1", "image:A"), build("c2", "image:A")},
+			patches: []v1.Container{build("c2", "image:B"), build("c1", "image:B")},
+			result:  []v1.Container{build("c1", "image:B"), build("c2", "image:B")},
+		},
+		// struct conflict
+		{
+			name:    "port name conflict",
+			base:    []v1.Container{build("c1", "image:A", port1A)},
+			patches: []v1.Container{build("c1", "image:A", port2A)},
+			result:  []v1.Container{build("c1", "image:A", port2A, port1A)},
+		},
+		{
+			name:    "port value conflict",
+			base:    []v1.Container{build("c1", "image:A", port1A)},
+			patches: []v1.Container{build("c1", "image:A", port1B)},
+			result:  []v1.Container{build("c1", "image:A", port1B)},
+		},
+		{
+			name:    "empty image, add port",
+			base:    []v1.Container{build("c1", "image:A")},
+			patches: []v1.Container{build("c1", "", port1A)},
+			result:  []v1.Container{build("c1", "image:A", port1A)},
+		},
+	}
+
+	for _, tc := range testCases {
+		result, err := MergePatchContainers(tc.base, tc.patches)
+		g.Expect(err).NotTo(HaveOccurred())
+		if diff := cmp.Diff(result, tc.result); diff != "" {
+			t.Fatalf("Test %s: patch result did not match. diff: %s.", tc.name, diff)
+		}
+	}
+}
+
+func TestMergePatchContainersOrderPreserved(t *testing.T) {
+	g := NewGomegaWithT(t)
+	build := func(name, image string) v1.Container {
+		return v1.Container{
+			Name:  name,
+			Image: image,
+		}
+	}
+
+	for i := 0; i < 10; i++ {
+		result, err := MergePatchContainers(
+			[]v1.Container{
+				build("c1", "image:base"),
+				build("c2", "image:base"),
+			},
+			[]v1.Container{
+				build("c1", "image:A"),
+				build("c3", "image:B"),
+				build("c4", "image:C"),
+				build("c5", "image:D"),
+				build("c6", "image:E"),
+			},
+		)
+		g.Expect(err).NotTo(HaveOccurred())
+
+		diff := cmp.Diff(
+			result,
+			[]v1.Container{
+				build("c1", "image:A"),
+				build("c2", "image:base"),
+				build("c3", "image:B"),
+				build("c4", "image:C"),
+				build("c5", "image:D"),
+				build("c6", "image:E"),
+			},
+		)
+		if diff != "" {
+			t.Fatalf("patch result did not match. diff:\n%s", diff)
+		}
 	}
 }

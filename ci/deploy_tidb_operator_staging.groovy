@@ -26,20 +26,18 @@ admissionWebhook:
   replicas: 2
   validation:
     statefulSets: true
-    pods: true
     pingcapResources: false
   mutation:
     pingcapResources: true
   failurePolicy:
     validation: Fail
     mutation: Fail
-features:
-  - AutoScaling=true
 '''
 
 def call(BUILD_BRANCH) {
     def GITHASH
-    def UCLOUD_OSS_URL = "http://pingcap-dev.hk.ufileos.com"
+    def FILE_SERVER_URL = "http://fileserver.pingcap.net"
+    def FILE_BASE_DIR = "pingcap/tidb-operator"
 
     catchError {
         node('delivery') {
@@ -50,12 +48,12 @@ def call(BUILD_BRANCH) {
 
                 dir("${WORKSPACE}/operator-staging") {
                     stage('Download tidb-operator binary') {
-                        GITHASH = sh(returnStdout: true, script: "curl ${UCLOUD_OSS_URL}/refs/pingcap/operator/${BUILD_BRANCH}/centos7/sha1").trim()
-                        sh "curl ${UCLOUD_OSS_URL}/builds/pingcap/operator/${GITHASH}/centos7/tidb-operator.tar.gz | tar xz"
+                        GITHASH = sh(returnStdout: true, script: "curl ${FILE_SERVER_URL}/download/${FILE_BASE_DIR}/refs/${BUILD_BRANCH}/sha1").trim()
+                        sh "curl ${FILE_SERVER_URL}/download/${FILE_BASE_DIR}/builds/${GITHASH}/tidb-operator.tar.gz | tar xz"
                     }
                     stage('Push tidb-operator Docker Image to Harbor') {
                         docker.withRegistry("https://hub.pingcap.net", "harbor-pingcap") {
-                            docker.build("hub.pingcap.net/jenkins/tidb-operator:${GITHASH}", "images/tidb-operator").push()
+                            docker.build("hub.pingcap.net/jenkins/tidb-operator:${GITHASH}", "--build-arg=TARGETARCH=amd64 images/tidb-operator").push()
                         }
                     }
 

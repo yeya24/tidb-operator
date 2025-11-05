@@ -18,7 +18,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"k8s.io/kubernetes/test/e2e/framework/log"
+	"github.com/pingcap/tidb-operator/tests/third_party/k8s/log"
 )
 
 type VirshVMManager struct {
@@ -72,7 +72,9 @@ func (m *VirshVMManager) StartVM(v *VM) error {
 }
 
 // example input:
-//  Id    Name                           State
+//
+//	Id    Name                           State
+//
 // ----------------------------------------------------
 // 6     vm2                            running
 // 11    vm3                            running

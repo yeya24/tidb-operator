@@ -14,14 +14,15 @@
 package testutils
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	. "github.com/onsi/gomega"
-
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/backup/constants"
 	"github.com/pingcap/tidb-operator/pkg/controller"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -39,8 +40,10 @@ func NewHelper(t *testing.T) *Helper {
 	stop := make(chan struct{})
 	deps.InformerFactory.Start(stop)
 	deps.KubeInformerFactory.Start(stop)
+	deps.LabelFilterKubeInformerFactory.Start(stop)
 	deps.InformerFactory.WaitForCacheSync(stop)
 	deps.KubeInformerFactory.WaitForCacheSync(stop)
+	deps.LabelFilterKubeInformerFactory.WaitForCacheSync(stop)
 
 	return &Helper{
 		stop: stop,
@@ -58,7 +61,7 @@ func (h *Helper) Close() {
 func (h *Helper) JobExists(restore *v1alpha1.Restore) {
 	h.T.Helper()
 	g := NewGomegaWithT(h.T)
-	_, err := h.Deps.KubeClientset.BatchV1().Jobs(restore.Namespace).Get(restore.GetRestoreJobName(), metav1.GetOptions{})
+	_, err := h.Deps.KubeClientset.BatchV1().Jobs(restore.Namespace).Get(context.TODO(), restore.GetRestoreJobName(), metav1.GetOptions{})
 	g.Expect(err).Should(BeNil())
 }
 
@@ -73,55 +76,179 @@ func (h *Helper) createSecret(namespace, secretName string) {
 	}
 	s.Namespace = namespace
 	s.Name = secretName
-	_, err := h.Deps.KubeClientset.CoreV1().Secrets(s.Namespace).Create(s)
+	_, err := h.Deps.KubeClientset.CoreV1().Secrets(s.Namespace).Create(context.TODO(), s, metav1.CreateOptions{})
 	g.Expect(err).Should(BeNil())
 }
 
 // CreateSecret creates secrets based on backup/restore spec
 func (h *Helper) CreateSecret(obj interface{}) {
 	h.T.Helper()
+	g := NewGomegaWithT(h.T)
 	if obj1, ok := obj.(*v1alpha1.Backup); ok {
 		h.createSecret(obj1.Namespace, obj1.Spec.From.SecretName)
+		g.Eventually(func() error {
+			_, err := h.Deps.SecretLister.Secrets(obj1.Namespace).Get(obj1.Spec.From.SecretName)
+			return err
+		}, time.Second*10).Should(BeNil())
 		if obj1.Spec.StorageProvider.S3 != nil && obj1.Spec.StorageProvider.S3.SecretName != "" {
 			h.createSecret(obj1.Namespace, obj1.Spec.StorageProvider.S3.SecretName)
+			g.Eventually(func() error {
+				_, err := h.Deps.SecretLister.Secrets(obj1.Namespace).Get(obj1.Spec.StorageProvider.S3.SecretName)
+				return err
+			}, time.Second*10).Should(BeNil())
 		} else if obj1.Spec.StorageProvider.Gcs != nil && obj1.Spec.StorageProvider.Gcs.SecretName != "" {
 			h.createSecret(obj1.Namespace, obj1.Spec.StorageProvider.Gcs.SecretName)
+			g.Eventually(func() error {
+				_, err := h.Deps.SecretLister.Secrets(obj1.Namespace).Get(obj1.Spec.StorageProvider.Gcs.SecretName)
+				return err
+			}, time.Second*10).Should(BeNil())
 		}
 	} else if obj2, ok := obj.(*v1alpha1.Restore); ok {
 		h.createSecret(obj2.Namespace, obj2.Spec.To.SecretName)
+		g.Eventually(func() error {
+			_, err := h.Deps.SecretLister.Secrets(obj2.Namespace).Get(obj2.Spec.To.SecretName)
+			return err
+		}, time.Second*10).Should(BeNil())
 		if obj2.Spec.StorageProvider.S3 != nil && obj2.Spec.StorageProvider.S3.SecretName != "" {
 			h.createSecret(obj2.Namespace, obj2.Spec.StorageProvider.S3.SecretName)
+			g.Eventually(func() error {
+				_, err := h.Deps.SecretLister.Secrets(obj2.Namespace).Get(obj2.Spec.StorageProvider.S3.SecretName)
+				return err
+			}, time.Second*10).Should(BeNil())
 		} else if obj2.Spec.StorageProvider.Gcs != nil && obj2.Spec.StorageProvider.Gcs.SecretName != "" {
 			h.createSecret(obj2.Namespace, obj2.Spec.StorageProvider.Gcs.SecretName)
+			g.Eventually(func() error {
+				_, err := h.Deps.SecretLister.Secrets(obj2.Namespace).Get(obj2.Spec.StorageProvider.Gcs.SecretName)
+				return err
+			}, time.Second*10).Should(BeNil())
 		}
 	}
 }
 
 // CreateTC creates a TidbCluster with name `clusterName` in ns `namespace`
-func (h *Helper) CreateTC(namespace, clusterName string) {
+func (h *Helper) CreateTC(namespace, clusterName string, acrossK8s, recoverMode bool) {
 	h.T.Helper()
 	g := NewGomegaWithT(h.T)
 	var err error
 
 	tc := &v1alpha1.TidbCluster{
 		Spec: v1alpha1.TidbClusterSpec{
-			TLSCluster: &v1alpha1.TLSCluster{Enabled: true},
+			AcrossK8s:    acrossK8s,
+			RecoveryMode: recoverMode,
+			TLSCluster:   &v1alpha1.TLSCluster{Enabled: true},
 			TiKV: &v1alpha1.TiKVSpec{
 				BaseImage: "pingcap/tikv",
+				Replicas:  3,
+				StorageVolumes: []v1alpha1.StorageVolume{
+					{MountPath: "/var/lib/raft", Name: "raft", StorageSize: "50Gi"},
+					{MountPath: "/var/lib/wal", Name: "wal", StorageSize: "50Gi"},
+				},
 			},
 			TiDB: &v1alpha1.TiDBSpec{
 				TLSClient: &v1alpha1.TiDBTLSClient{Enabled: true},
+			},
+			PD: &v1alpha1.PDSpec{
+				Replicas: 1,
+			},
+		},
+		Status: v1alpha1.TidbClusterStatus{
+			PD: v1alpha1.PDStatus{
+				Members: map[string]v1alpha1.PDMember{
+					"pd-0": {Name: "pd-0", Health: true},
+				},
+			},
+			TiKV: v1alpha1.TiKVStatus{
+				Stores: map[string]v1alpha1.TiKVStore{
+					"1": {ID: "1", State: v1alpha1.TiKVStateUp},
+					"2": {ID: "2", State: v1alpha1.TiKVStateUp},
+					"3": {ID: "3", State: v1alpha1.TiKVStateUp},
+				},
+				StatefulSet: &appsv1.StatefulSetStatus{
+					Replicas:      3,
+					ReadyReplicas: 3,
+				},
+			},
+			Conditions: []v1alpha1.TidbClusterCondition{
+				{
+					Type:   v1alpha1.TidbClusterReady,
+					Status: corev1.ConditionTrue,
+				},
 			},
 		},
 	}
 	tc.Namespace = namespace
 	tc.Name = clusterName
-	_, err = h.Deps.Clientset.PingcapV1alpha1().TidbClusters(tc.Namespace).Create(tc)
+	_, err = h.Deps.Clientset.PingcapV1alpha1().TidbClusters(tc.Namespace).Create(context.TODO(), tc, metav1.CreateOptions{})
 	g.Expect(err).Should(BeNil())
 	// make sure can read tc from lister
 	g.Eventually(func() error {
 		_, err := h.Deps.TiDBClusterLister.TidbClusters(tc.Namespace).Get(tc.Name)
 		return err
 	}, time.Second*10).Should(BeNil())
+	g.Expect(err).Should(BeNil())
+}
+
+// CreateTCWithNoTiKV creates a TidbCluster with name `clusterName` in ns `namespace` with no TiKV nodes
+func (h *Helper) CreateTCWithNoTiKV(namespace, clusterName string, acrossK8s, recoverMode bool) {
+	h.T.Helper()
+	g := NewGomegaWithT(h.T)
+	var err error
+
+	tc := &v1alpha1.TidbCluster{
+		Spec: v1alpha1.TidbClusterSpec{
+			AcrossK8s:    acrossK8s,
+			RecoveryMode: recoverMode,
+			TLSCluster:   &v1alpha1.TLSCluster{Enabled: true},
+			TiKV: &v1alpha1.TiKVSpec{
+				BaseImage: "pingcap/tikv",
+				Replicas:  3,
+				StorageVolumes: []v1alpha1.StorageVolume{
+					{MountPath: "/var/lib/raft", Name: "raft", StorageSize: "50Gi"},
+					{MountPath: "/var/lib/wal", Name: "wal", StorageSize: "50Gi"},
+				},
+			},
+			TiDB: &v1alpha1.TiDBSpec{
+				TLSClient: &v1alpha1.TiDBTLSClient{Enabled: true},
+			},
+			PD: &v1alpha1.PDSpec{
+				Replicas: 1,
+			},
+		},
+		Status: v1alpha1.TidbClusterStatus{
+			PD: v1alpha1.PDStatus{
+				Members: map[string]v1alpha1.PDMember{
+					"pd-0": {Name: "pd-0", Health: true},
+				},
+			},
+			Conditions: []v1alpha1.TidbClusterCondition{
+				{
+					Type:   v1alpha1.TidbClusterReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+	tc.Namespace = namespace
+	tc.Name = clusterName
+	_, err = h.Deps.Clientset.PingcapV1alpha1().TidbClusters(tc.Namespace).Create(context.TODO(), tc, metav1.CreateOptions{})
+	g.Expect(err).Should(BeNil())
+	// make sure can read tc from lister
+	g.Eventually(func() error {
+		_, err := h.Deps.TiDBClusterLister.TidbClusters(tc.Namespace).Get(tc.Name)
+		return err
+	}, time.Second*10).Should(BeNil())
+	g.Expect(err).Should(BeNil())
+}
+
+func (h *Helper) CreateRestore(restore *v1alpha1.Restore) {
+	h.T.Helper()
+	g := NewGomegaWithT(h.T)
+	_, err := h.Deps.Clientset.PingcapV1alpha1().Restores(restore.Namespace).Create(context.TODO(), restore, metav1.CreateOptions{})
+	g.Expect(err).Should(BeNil())
+	// make sure can read tc from lister
+	g.Eventually(func() error {
+		_, err := h.Deps.RestoreLister.Restores(restore.Namespace).Get(restore.Name)
+		return err
+	}, time.Second).Should(BeNil())
 	g.Expect(err).Should(BeNil())
 }

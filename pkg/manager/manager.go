@@ -13,7 +13,9 @@
 
 package manager
 
-import "github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+import (
+	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+)
 
 // Manager implements the logic for syncing tidbcluster.
 type Manager interface {
@@ -24,4 +26,12 @@ type Manager interface {
 type DMManager interface {
 	// Sync implements the logic for syncing dmcluster.
 	SyncDM(*v1alpha1.DMCluster) error
+}
+
+type TiDBNGMonitoringManager interface {
+	Sync(*v1alpha1.TidbNGMonitoring, *v1alpha1.TidbCluster) error
+}
+
+type TiDBDashboardManager interface {
+	Sync(*v1alpha1.TidbDashboard, *v1alpha1.TidbCluster) error
 }

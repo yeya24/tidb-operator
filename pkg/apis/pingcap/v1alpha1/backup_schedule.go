@@ -16,10 +16,16 @@ package v1alpha1
 import (
 	"fmt"
 	"time"
-
-	"github.com/pingcap/tidb-operator/pkg/backup/constants"
 )
 
 func (bs *BackupSchedule) GetBackupCRDName(timestamp time.Time) string {
-	return fmt.Sprintf("%s-%s", bs.GetName(), timestamp.UTC().Format(constants.TimeFormat))
+	return fmt.Sprintf("%s-%s", bs.GetName(), timestamp.UTC().Format(BackupNameTimeFormat))
+}
+
+func (bs *BackupSchedule) GetLogBackupCRDName() string {
+	return fmt.Sprintf("%s-%s", "log", bs.GetName())
+}
+
+func (bs *BackupSchedule) GetCompactBackupCRDName(timestamp time.Time) string {
+	return fmt.Sprintf("%s-%s-%s", "compact", bs.GetName(), timestamp.UTC().Format(BackupNameTimeFormat))
 }

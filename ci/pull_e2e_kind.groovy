@@ -24,7 +24,24 @@ properties([
         string(name: 'PR_ID', defaultValue: '', description: 'pull request ID, this will override GIT_REF if set, e.g. 1889'),
         string(name: 'GINKGO_NODES', defaultValue: env.DEFAULT_GINKGO_NODES, description: 'the number of ginkgo nodes'),
         string(name: 'E2E_ARGS', defaultValue: env.DEFAULT_E2E_ARGS, description: "e2e args, e.g. --ginkgo.focus='\\[Stability\\]'"),
-        string(name: 'DELETE_NAMESPACE_ON_FAILURE', defaultValue: env.DEFAULT_DELETE_NAMESPACE_ON_FAILURE, description: 'delete ns after test case fails')
+        string(name: 'DELETE_NAMESPACE_ON_FAILURE', defaultValue: env.DEFAULT_DELETE_NAMESPACE_ON_FAILURE, description: 'delete ns after test case fails'),
+
+        string(name: 'CUSTOM_PORT_TIDB_SERVER', defaultValue: '', description: 'custom component port: tidb server'),
+        string(name: 'CUSTOM_PORT_TIDB_STATUS', defaultValue: '', description: 'custom component port: tidb status'),
+        string(name: 'CUSTOM_PORT_PD_CLIENT', defaultValue: '', description: 'custom component port: pd client'),
+        string(name: 'CUSTOM_PORT_PD_PEER', defaultValue: '', description: 'custom component port: pd peer'),
+        string(name: 'CUSTOM_PORT_TIKV_SERVER', defaultValue: '', description: 'custom component port: tikv server'),
+        string(name: 'CUSTOM_PORT_TIKV_STATUS', defaultValue: '', description: 'custom component port: tikv status'),
+        string(name: 'CUSTOM_PORT_TIFLASH_TCP', defaultValue: '', description: 'custom component port: tiflash tcp'),
+        string(name: 'CUSTOM_PORT_TIFLASH_HTTP', defaultValue: '', description: 'custom component port: tiflash http'),
+        string(name: 'CUSTOM_PORT_TIFLASH_FLASH', defaultValue: '', description: 'custom component port: tiflash flash'),
+        string(name: 'CUSTOM_PORT_TIFLASH_PROXY', defaultValue: '', description: 'custom component port: tiflash proxy'),
+        string(name: 'CUSTOM_PORT_TIFLASH_METRICS', defaultValue: '', description: 'custom component port: tiflash metrics'),
+        string(name: 'CUSTOM_PORT_TIFLASH_PROXY_STATUS', defaultValue: '', description: 'custom component port: tiflash proxy status'),
+        string(name: 'CUSTOM_PORT_TIFLASH_INTERNAL_STATUS', defaultValue: '', description: 'custom component port: tiflash internal status'),
+        string(name: 'CUSTOM_PORT_PUMP', defaultValue: '', description: 'custom component port: pump'),
+        string(name: 'CUSTOM_PORT_DRAINER', defaultValue: '', description: 'custom component port: drainer'),
+        string(name: 'CUSTOM_PORT_TICDC', defaultValue: '', description: 'custom component port: ticdc')
     ])
 ])
 
@@ -37,32 +54,13 @@ metadata:
 spec:
   containers:
   - name: main
-    image: gcr.io/k8s-testimages/kubekins-e2e:v20200311-1e25827-master
+    image: hub.pingcap.net/tidb-operator/kubekins-e2e:v8-go1.23.1
     command:
     - runner.sh
-    # Clean containers on TERM signal in root process to avoid cgroup leaking.
-    # https://github.com/pingcap/tidb-operator/issues/1603#issuecomment-582402196
     - exec
     - bash
     - -c
     - |
-      function clean() {
-        echo "info: clean all containers to avoid cgroup leaking"
-        docker kill `docker ps -q` || true
-        docker system prune -af || true
-      }
-      function setup_docker_mirror() {
-        cat > /etc/docker/daemon.json <<EOF
-        {
-          "registry-mirrors": [
-            "https://registry-mirror.pingcap.net"
-          ]
-        }
-      EOF
-        service docker restart
-      }
-      setup_docker_mirror
-      trap clean TERM
       sleep 1d & wait
     # we need privileged mode in order to do docker in docker
     securityContext:
@@ -76,13 +74,12 @@ spec:
       requests:
         cpu: <%= resources.requests.cpu %>
         memory: <%= resources.requests.memory %>
-        ephemeral-storage: 150Gi
+        ephemeral-storage: <%= resources.requests.storage %>
     <% } %>
     <% if (resources.limits) { %>
       limits:
         cpu: <%= resources.limits.cpu %>
         memory: <%= resources.limits.memory %>
-        ephemeral-storage: 150Gi
     <% } %>
 <% } %>
     # kind needs /lib/modules and cgroups from the host
@@ -119,25 +116,12 @@ spec:
   - name: kind-data-dir
     emptyDir: {}
   - name: etcd-data-dir
-    emptyDir:
-      medium: Memory
+    emptyDir: {}
   tolerations:
   - effect: NoSchedule
     key: tidb-operator
     operator: Exists
   affinity:
-<% if (!any) { %>
-    # run on nodes prepared for tidb-operator by default
-    # https://github.com/pingcap/tidb-operator/issues/1603
-    nodeAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        nodeSelectorTerms:
-        - matchExpressions:
-          - key: ci.pingcap.com
-            operator: In
-            values:
-            - tidb-operator
-<% } %>
     podAntiAffinity:
       preferredDuringSchedulingIgnoredDuringExecution:
       - weight: 100
@@ -161,17 +145,19 @@ String buildPodYAML(Map m = [:]) {
 
 e2ePodResources = [
     requests: [
-        cpu: "6",
-        memory: "10Gi"
+        cpu: "16",
+        memory: "32Gi",
+        storage: "250Gi"
     ],
     limits: [
-        cpu: "8",
-        memory: "16Gi"
+        cpu: "32",
+        memory: "64Gi",
+        storage: "250Gi"
     ],
 ]
 
 def build(String name, String code, Map resources = e2ePodResources) {
-    podTemplate(yaml: buildPodYAML(resources: resources)) {
+    podTemplate(yaml: buildPodYAML(resources: resources), namespace: "jenkins-tidb-operator", cloud: "kubernetes-ng") {
         node(POD_LABEL) {
             container('main') {
                 def WORKSPACE = pwd()
@@ -180,12 +166,11 @@ def build(String name, String code, Map resources = e2ePodResources) {
                     dir("${WORKSPACE}/go/src/github.com/pingcap/tidb-operator") {
                         unstash 'tidb-operator'
                         stage("Debug Info") {
-                            println "debug host: 172.16.5.15"
-                            println "debug command: kubectl -n jenkins-ci exec -ti ${NODE_NAME} bash"
                             sh """
                             echo "====== shell env ======"
                             echo "pwd: \$(pwd)"
                             env
+                            unset GOSUMDB
                             echo "====== go env ======"
                             go env
                             echo "====== docker version ======"
@@ -194,6 +179,7 @@ def build(String name, String code, Map resources = e2ePodResources) {
                         }
                         stage('Run') {
                             sh """#!/bin/bash
+                            unset GOSUMDB
                             export GOPATH=${WORKSPACE}/go
                             export ARTIFACTS=${ARTIFACTS}
                             export RUNNER_SUITE_NAME=${name}
@@ -272,26 +258,47 @@ try {
         GIT_REF = env.ghprbActualCommit
     }
 
+    def CUSTOM_PORT_TIDB_SERVER = params.CUSTOM_PORT_TIDB_SERVER
+    def CUSTOM_PORT_TIDB_STATUS = params.CUSTOM_PORT_TIDB_STATUS
+    def CUSTOM_PORT_PD_CLIENT = params.CUSTOM_PORT_PD_CLIENT
+    def CUSTOM_PORT_PD_PEER = params.CUSTOM_PORT_PD_PEER
+    def CUSTOM_PORT_TIKV_SERVER = params.CUSTOM_PORT_TIKV_SERVER
+    def CUSTOM_PORT_TIKV_STATUS = params.CUSTOM_PORT_TIKV_STATUS
+    def CUSTOM_PORT_TIFLASH_TCP = params.CUSTOM_PORT_TIFLASH_TCP
+    def CUSTOM_PORT_TIFLASH_HTTP = params.CUSTOM_PORT_TIFLASH_HTTP
+    def CUSTOM_PORT_TIFLASH_FLASH = params.CUSTOM_PORT_TIFLASH_FLASH
+    def CUSTOM_PORT_TIFLASH_PROXY = params.CUSTOM_PORT_TIFLASH_PROXY
+    def CUSTOM_PORT_TIFLASH_METRICS = params.CUSTOM_PORT_TIFLASH_METRICS
+    def CUSTOM_PORT_TIFLASH_PROXY_STATUS = params.CUSTOM_PORT_TIFLASH_PROXY_STATUS
+    def CUSTOM_PORT_TIFLASH_INTERNAL_STATUS = params.CUSTOM_PORT_TIFLASH_INTERNAL_STATUS
+    def CUSTOM_PORT_PUMP = params.CUSTOM_PORT_PUMP
+    def CUSTOM_PORT_DRAINER = params.CUSTOM_PORT_DRAINER
+    def CUSTOM_PORT_TICDC = params.CUSTOM_PORT_TICDC
+
     timeout (time: 2, unit: 'HOURS') {
         // use fixed label, so we can reuse previous workers
         // increase version in pod label when we update pod template
-        def buildPodLabel = "tidb-operator-build-v1-pingcap-docker-mirror"
+        def buildPodLabel = "tidb-operator-build-v5-pingcap-docker-mirror"
         def resources = [
             requests: [
-                cpu: "6",
-                memory: "10Gi"
+                cpu: "4",
+                memory: "10Gi",
+                storage: "50Gi"
             ],
             limits: [
                 cpu: "8",
-                memory: "32Gi"
+                memory: "32Gi",
+                storage: "50Gi"
             ],
         ]
         podTemplate(
+            cloud: "kubernetes-ng",
+            namespace: "jenkins-tidb-operator",
             label: buildPodLabel,
             yaml: buildPodYAML(resources: resources, any: true),
             // We allow this pod to remain active for a while, later jobs can
             // reuse cache in previous created nodes.
-            idleMinutes: 180,
+            idleMinutes: 30,
         ) {
         node(buildPodLabel) {
             container("main") {
@@ -303,19 +310,37 @@ try {
                         # we run as root in our pods, this is required
                         # otherwise jenkins agent will fail because of the lack of permission
                         chown -R 1000:1000 .
+                        git config --global --add safe.directory '*'
                         """
 
                         // clean stale files because we may reuse previous created nodes
                         deleteDir()
 
-                        checkout changelog: false, poll: false, scm: [
-                                $class: 'GitSCM',
-                                branches: [[name: "${GIT_REF}"]],
-                                userRemoteConfigs: [[
-                                    refspec: '+refs/heads/*:refs/remotes/origin/* +refs/pull/*:refs/remotes/origin/pull/*',
-                                    url: "${params.GIT_URL}",
-                                ]]
+                        try {
+                            checkout changelog: false, poll: false, scm: [
+                                    $class: 'GitSCM',
+                                    branches: [[name: "${GIT_REF}"]],
+                                    userRemoteConfigs: [[
+                                            refspec: '+refs/heads/*:refs/remotes/origin/* +refs/pull/*:refs/remotes/origin/pull/*',
+                                            url: "${params.GIT_URL}",
+                                    ]]
                             ]
+                        } catch (info) {
+                            retry(3) {
+                                echo "checkout failed, retry.."
+                                sleep 10
+                                checkout changelog: false, poll: false, scm: [
+                                        $class: 'GitSCM',
+                                        branches: [[name: "${GIT_REF}"]],
+                                        userRemoteConfigs: [[
+                                                refspec: '+refs/heads/*:refs/remotes/origin/* +refs/pull/*:refs/remotes/origin/pull/*',
+                                                url: "${params.GIT_URL}",
+                                        ]]
+                                ]
+                            }
+                        }
+
+
 
                         GITHASH = sh(returnStdout: true, script: "git rev-parse HEAD").trim()
                         IMAGE_TAG = env.JOB_NAME + "-" + GITHASH.substring(0, 6)
@@ -328,8 +353,27 @@ try {
                             sh """#!/bin/bash
                             set -eu
                             echo "info: building"
+                            unset GOSUMDB
+                            echo "====== go env ======"
+                            go env
                             echo "info: patch charts and golang code to enable coverage profile"
                             ./hack/e2e-patch-codecov.sh
+                            export CUSTOM_PORT_TIDB_SERVER=${CUSTOM_PORT_TIDB_SERVER}
+                            export CUSTOM_PORT_TIDB_STATUS=${CUSTOM_PORT_TIDB_STATUS}
+                            export CUSTOM_PORT_PD_CLIENT=${CUSTOM_PORT_PD_CLIENT}
+                            export CUSTOM_PORT_PD_PEER=${CUSTOM_PORT_PD_PEER}
+                            export CUSTOM_PORT_TIKV_SERVER=${CUSTOM_PORT_TIKV_SERVER}
+                            export CUSTOM_PORT_TIKV_STATUS=${CUSTOM_PORT_TIKV_STATUS}
+                            export CUSTOM_PORT_TIFLASH_TCP=${CUSTOM_PORT_TIFLASH_TCP}
+                            export CUSTOM_PORT_TIFLASH_HTTP=${CUSTOM_PORT_TIFLASH_HTTP}
+                            export CUSTOM_PORT_TIFLASH_FLASH=${CUSTOM_PORT_TIFLASH_FLASH}
+                            export CUSTOM_PORT_TIFLASH_PROXY=${CUSTOM_PORT_TIFLASH_PROXY}
+                            export CUSTOM_PORT_TIFLASH_METRICS=${CUSTOM_PORT_TIFLASH_METRICS}
+                            export CUSTOM_PORT_TIFLASH_PROXY_STATUS=${CUSTOM_PORT_TIFLASH_PROXY_STATUS}
+                            export CUSTOM_PORT_TIFLASH_INTERNAL_STATUS=${CUSTOM_PORT_TIFLASH_INTERNAL_STATUS}
+                            export CUSTOM_PORT_PUMP=${CUSTOM_PORT_PUMP}
+                            export CUSTOM_PORT_DRAINER=${CUSTOM_PORT_DRAINER}
+                            export CUSTOM_PORT_TICDC=${CUSTOM_PORT_TICDC}
                             E2E=y make build e2e-build
                             make gocovmerge
                             """
@@ -340,13 +384,14 @@ try {
                         withCredentials([usernamePassword(credentialsId: 'TIDB_OPERATOR_HUB_AUTH', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
                             sh """#!/bin/bash
                             set -eu
+                            unset GOSUMDB
                             echo "save GTI_COMMIT export script into file"
                             echo "export GIT_COMMIT=\$(git rev-parse HEAD)" > EXPORT_GIT_COMMIT
                             echo "info: logging into hub.pingcap.net"
                             docker login -u \$USERNAME --password-stdin hub.pingcap.net <<< \$PASSWORD
                             echo "info: build and push images for e2e"
                             echo "test: show docker daemon config file"
-                            cat /etc/docker/daemon.json
+                            cat /etc/docker/daemon.json || true
                             E2E=y NO_BUILD=y DOCKER_REPO=hub.pingcap.net/tidb-operator-e2e IMAGE_TAG=${IMAGE_TAG} make docker-push e2e-docker-push
                             echo "info: download binaries for e2e"
                             E2E=y SKIP_BUILD=y SKIP_IMAGE_BUILD=y SKIP_UP=y SKIP_TEST=y SKIP_DOWN=y ./hack/e2e.sh
@@ -369,24 +414,19 @@ try {
         if (GIT_REF ==~ /^(master|)$/ || GIT_REF ==~ /^(release-.*)$/
             || GIT_REF ==~ /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/) {
             // Upload assets if the git ref is the master branch or version tag
-            podTemplate(yaml: buildPodYAML(resources: [requests: [cpu: "1", memory: "2Gi"]])) {
+            podTemplate(yaml: buildPodYAML(resources: [requests: [cpu: "1", memory: "2Gi"]]),
+              cloud: "kubernetes-ng", namespace: "jenkins-tidb-operator",
+            ) {
                 node(POD_LABEL) {
                     container("main") {
                         dir("${PROJECT_DIR}") {
                             unstash 'tidb-operator'
                             stage('upload tidb-operator binaries and charts'){
-                                withCredentials([
-                                    string(credentialsId: 'UCLOUD_PUBLIC_KEY', variable: 'UCLOUD_PUBLIC_KEY'),
-                                    string(credentialsId: 'UCLOUD_PRIVATE_KEY', variable: 'UCLOUD_PRIVATE_KEY'),
-                                ]) {
-                                    sh """
-                                    export UCLOUD_UFILE_PROXY_HOST=pingcap-dev.hk.ufileos.com
-                                    export UCLOUD_UFILE_BUCKET=pingcap-dev
-                                    export BUILD_BRANCH=${GIT_REF}
-                                    export GITHASH=${GITHASH}
-                                    ./ci/upload-binaries-charts.sh
-                                    """
-                                }
+                              sh """
+                              export BUILD_BRANCH=${GIT_REF}
+                              export GITHASH=${GITHASH}
+                              ./ci/upload-binaries-charts.sh
+                              """
                             }
                         }
                     }

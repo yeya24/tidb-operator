@@ -32,7 +32,8 @@ import (
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
 	"k8s.io/kubectl/pkg/polymorphichelpers"
-	"k8s.io/kubernetes/test/e2e/framework/log"
+
+	"github.com/pingcap/tidb-operator/tests/third_party/k8s/log"
 )
 
 const (
@@ -66,6 +67,7 @@ func (f *portForwarder) forwardPorts(podKey, method string, url *url.URL, addres
 	readyChan := make(chan struct{})
 	fw, err := portforward.NewOnAddresses(dialer, addresses, ports, ctx.Done(), readyChan, w, w)
 	if err != nil {
+		cancel()
 		return nil, nil, err
 	}
 
@@ -125,7 +127,7 @@ func (f *portForwarder) Forward(namespace, resourceName string, addresses []stri
 		return nil, nil, err
 	}
 
-	pod, err := f.client.CoreV1().Pods(namespace).Get(forwardablePod.Name, metav1.GetOptions{})
+	pod, err := f.client.CoreV1().Pods(namespace).Get(context.TODO(), forwardablePod.Name, metav1.GetOptions{})
 	if err != nil {
 		return nil, nil, err
 	}

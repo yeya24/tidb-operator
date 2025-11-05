@@ -14,41 +14,45 @@
 package member
 
 import (
+	"context"
 	"fmt"
 	"path"
-	"path/filepath"
 	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 
-	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
-	"github.com/pingcap/kvproto/pkg/metapb"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
 	"github.com/pingcap/tidb-operator/pkg/manager"
+	"github.com/pingcap/tidb-operator/pkg/manager/member/constants"
+	"github.com/pingcap/tidb-operator/pkg/manager/suspender"
+	mngerutils "github.com/pingcap/tidb-operator/pkg/manager/utils"
+	"github.com/pingcap/tidb-operator/pkg/manager/volumes"
 	"github.com/pingcap/tidb-operator/pkg/pdapi"
 	"github.com/pingcap/tidb-operator/pkg/util"
+
+	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
+	"github.com/pingcap/kvproto/pkg/metapb"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	corelisters "k8s.io/client-go/listers/core/v1"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 const (
-	// tikvDataVolumeMountPath is the mount path for tikv data volume
-	tikvDataVolumeMountPath = "/var/lib/tikv"
-
 	// tikvClusterCertPath is where the cert for inter-cluster communication stored (if any)
 	tikvClusterCertPath = "/var/lib/tikv-tls"
 
-	//find a better way to manage store only managed by tikv in Operator
+	// find a better way to manage store only managed by tikv in Operator
 	tikvStoreLimitPattern = `%s-tikv-\d+\.%s-tikv-peer\.%s\.svc%s\:\d+`
 )
 
@@ -58,16 +62,20 @@ type tikvMemberManager struct {
 	failover                 Failover
 	scaler                   Scaler
 	upgrader                 TiKVUpgrader
+	suspender                suspender.Suspender
+	podVolumeModifier        volumes.PodVolumeModifier
 	statefulSetIsUpgradingFn func(corelisters.PodLister, pdapi.PDControlInterface, *apps.StatefulSet, *v1alpha1.TidbCluster) (bool, error)
 }
 
 // NewTiKVMemberManager returns a *tikvMemberManager
-func NewTiKVMemberManager(deps *controller.Dependencies, failover Failover, scaler Scaler, upgrader TiKVUpgrader) manager.Manager {
+func NewTiKVMemberManager(deps *controller.Dependencies, failover Failover, scaler Scaler, upgrader TiKVUpgrader, spder suspender.Suspender, pvm volumes.PodVolumeModifier) manager.Manager {
 	m := &tikvMemberManager{
-		deps:     deps,
-		failover: failover,
-		scaler:   scaler,
-		upgrader: upgrader,
+		deps:              deps,
+		failover:          failover,
+		scaler:            scaler,
+		upgrader:          upgrader,
+		suspender:         spder,
+		podVolumeModifier: pvm,
 	}
 	m.statefulSetIsUpgradingFn = tikvStatefulSetIsUpgrading
 	return m
@@ -92,14 +100,39 @@ func (m *tikvMemberManager) Sync(tc *v1alpha1.TidbCluster) error {
 	ns := tc.GetNamespace()
 	tcName := tc.GetName()
 
+	// skip sync if tikv is suspended
+	component := v1alpha1.TiKVMemberType
+	needSuspend, err := m.suspender.SuspendComponent(tc, component)
+	if err != nil {
+		return fmt.Errorf("suspend %s failed: %v", component, err)
+	}
+	if needSuspend {
+		klog.Infof("component %s for cluster %s/%s is suspended, skip syncing", component, ns, tcName)
+		return nil
+	}
+
 	if tc.Spec.PD != nil && !tc.PDIsAvailable() {
 		return controller.RequeueErrorf("TidbCluster: [%s/%s], waiting for PD cluster running", ns, tcName)
+	}
+	// Check if all PD microservices are available
+	if tc.Spec.PDMS != nil && (tc.Spec.PD != nil && tc.Spec.PD.Mode == "ms") {
+		for _, pdms := range tc.Spec.PDMS {
+			if cli := controller.GetPDMSClient(m.deps.PDControl, tc, pdms.Name); cli == nil {
+				return controller.RequeueErrorf("PDMS component %s for TidbCluster: [%s/%s], "+
+					"waiting for PD microservice cluster running", pdms.Name, ns, tcName)
+			}
+		}
+	}
+
+	// Check TidbCluster Recovery
+	if err := m.checkRecoveryForTidbCluster(tc); err != nil {
+		return err
 	}
 
 	svcList := []SvcConfig{
 		{
 			Name:       "peer",
-			Port:       20160,
+			Port:       v1alpha1.DefaultTiKVServerPort,
 			Headless:   true,
 			SvcLabel:   func(l label.Label) label.Label { return l.TiKV() },
 			MemberName: controller.TiKVPeerMemberName,
@@ -111,6 +144,24 @@ func (m *tikvMemberManager) Sync(tc *v1alpha1.TidbCluster) error {
 		}
 	}
 	return m.syncStatefulSetForTidbCluster(tc)
+}
+
+func (m *tikvMemberManager) checkRecoveryForTidbCluster(tc *v1alpha1.TidbCluster) error {
+	// Check whether the cluster is in recovery mode
+	// and whether the volumes have been restored for TiKV
+	if !tc.Spec.RecoveryMode {
+		return nil
+	}
+
+	ns := tc.GetNamespace()
+	tcName := tc.GetName()
+
+	anns := tc.GetAnnotations()
+	if _, ok := anns[label.AnnTiKVVolumesReadyKey]; !ok {
+		return controller.RequeueErrorf("TidbCluster: [%s/%s], waiting for TiKV volumes ready", ns, tcName)
+	}
+
+	return nil
 }
 
 func (m *tikvMemberManager) syncServiceForTidbCluster(tc *v1alpha1.TidbCluster, svcConfig SvcConfig) error {
@@ -137,20 +188,12 @@ func (m *tikvMemberManager) syncServiceForTidbCluster(tc *v1alpha1.TidbCluster, 
 
 	oldSvc := oldSvcTmp.DeepCopy()
 
-	equal, err := controller.ServiceEqual(newSvc, oldSvc)
+	_, err = m.deps.ServiceControl.SyncComponentService(
+		tc,
+		newSvc,
+		oldSvc,
+		true)
 	if err != nil {
-		return err
-	}
-	if !equal {
-		svc := *oldSvc
-		svc.Spec = newSvc.Spec
-		// TODO add unit test
-		err = controller.SetServiceLastAppliedConfigAnnotation(&svc)
-		if err != nil {
-			return err
-		}
-		svc.Spec.ClusterIP = oldSvc.Spec.ClusterIP
-		_, err = m.deps.ServiceControl.UpdateService(tc, &svc)
 		return err
 	}
 
@@ -169,7 +212,7 @@ func (m *tikvMemberManager) syncStatefulSetForTidbCluster(tc *v1alpha1.TidbClust
 
 	oldSet := oldSetTmp.DeepCopy()
 
-	if err := m.syncTidbClusterStatus(tc, oldSet); err != nil {
+	if err := m.syncTiKVClusterStatus(tc, oldSet); err != nil {
 		return err
 	}
 
@@ -188,7 +231,7 @@ func (m *tikvMemberManager) syncStatefulSetForTidbCluster(tc *v1alpha1.TidbClust
 		m.failover.RemoveUndesiredFailures(tc)
 	}
 	if len(tc.Status.TiKV.FailureStores) > 0 &&
-		tc.Spec.TiKV.RecoverFailover &&
+		(tc.Spec.TiKV.RecoverFailover || tc.Status.TiKV.FailoverUID == tc.Spec.TiKV.GetRecoverByUID()) &&
 		shouldRecover(tc, label.TiKVLabelVal, m.deps.PodLister) {
 		m.failover.Recover(tc)
 	}
@@ -198,7 +241,7 @@ func (m *tikvMemberManager) syncStatefulSetForTidbCluster(tc *v1alpha1.TidbClust
 		return err
 	}
 	if setNotExist {
-		err = SetStatefulSetLastAppliedConfigAnnotation(newSet)
+		err = mngerutils.SetStatefulSetLastAppliedConfigAnnotation(newSet)
 		if err != nil {
 			return err
 		}
@@ -234,13 +277,23 @@ func (m *tikvMemberManager) syncStatefulSetForTidbCluster(tc *v1alpha1.TidbClust
 		}
 	}
 
+	if tc.Status.TiKV.VolReplaceInProgress {
+		// Volume Replace in Progress, so do not make any changes to Sts spec, overwrite with old pod spec
+		// config as we are not ready to upgrade yet.
+		_, podSpec, err := GetLastAppliedConfig(oldSet)
+		if err != nil {
+			return err
+		}
+		newSet.Spec.Template.Spec = *podSpec
+	}
+
 	if !templateEqual(newSet, oldSet) || tc.Status.TiKV.Phase == v1alpha1.UpgradePhase {
 		if err := m.upgrader.Upgrade(tc, oldSet, newSet); err != nil {
 			return err
 		}
 	}
 
-	return UpdateStatefulSet(m.deps.StatefulSetControl, tc, newSet, oldSet)
+	return mngerutils.UpdateStatefulSetWithPrecheck(m.deps, tc, "FailedUpdateTiKVSTS", newSet, oldSet)
 }
 
 func (m *tikvMemberManager) syncTiKVConfigMap(tc *v1alpha1.TidbCluster, set *apps.StatefulSet) (*corev1.ConfigMap, error) {
@@ -255,12 +308,22 @@ func (m *tikvMemberManager) syncTiKVConfigMap(tc *v1alpha1.TidbCluster, set *app
 
 	var inUseName string
 	if set != nil {
-		inUseName = FindConfigMapVolume(&set.Spec.Template.Spec, func(name string) bool {
+		inUseName = mngerutils.FindConfigMapVolume(&set.Spec.Template.Spec, func(name string) bool {
 			return strings.HasPrefix(name, controller.TiKVMemberName(tc.Name))
 		})
+	} else {
+		inUseName, err = mngerutils.FindConfigMapNameFromTCAnno(context.Background(), m.deps.ConfigMapLister, tc, v1alpha1.TiKVMemberType, newCm)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	err = updateConfigMapIfNeed(m.deps.ConfigMapLister, tc.BaseTiKVSpec().ConfigUpdateStrategy(), inUseName, newCm)
+	err = mngerutils.UpdateConfigMapIfNeed(m.deps.ConfigMapLister, tc.BaseTiKVSpec().ConfigUpdateStrategy(), inUseName, newCm)
+	if err != nil {
+		return nil, err
+	}
+
+	err = m.applyPiTRConfigOverride(tc, newCm)
 	if err != nil {
 		return nil, err
 	}
@@ -305,6 +368,11 @@ func getNewServiceForTidbCluster(tc *v1alpha1.TidbCluster, svcConfig SvcConfig) 
 	} else {
 		svc.Spec.Type = controller.GetServiceType(tc.Spec.Services, v1alpha1.TiKVMemberType.String())
 	}
+
+	if tc.Spec.PreferIPv6 {
+		SetServiceWhenPreferIPv6(&svc)
+	}
+
 	return &svc
 }
 
@@ -319,9 +387,11 @@ func getNewTiKVSetForTidbCluster(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap)
 	}
 
 	annoMount, annoVolume := annotationsMountVolume()
+	dataVolumeName := string(v1alpha1.GetStorageVolumeName("", v1alpha1.TiKVMemberType))
 	tikvDataVol := corev1.VolumeMount{
-		Name:      v1alpha1.TiKVMemberType.String(),
-		MountPath: tikvDataVolumeMountPath}
+		Name:      dataVolumeName,
+		MountPath: constants.TiKVDataVolumeMountPath,
+	}
 	volMounts := []corev1.VolumeMount{
 		annoMount,
 		tikvDataVol,
@@ -342,21 +412,25 @@ func getNewTiKVSetForTidbCluster(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap)
 
 	vols := []corev1.Volume{
 		annoVolume,
-		{Name: "config", VolumeSource: corev1.VolumeSource{
-			ConfigMap: &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: tikvConfigMap,
+		{
+			Name: "config", VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: tikvConfigMap,
+					},
+					Items: []corev1.KeyToPath{{Key: "config-file", Path: "tikv.toml"}},
 				},
-				Items: []corev1.KeyToPath{{Key: "config-file", Path: "tikv.toml"}},
-			}},
+			},
 		},
-		{Name: "startup-script", VolumeSource: corev1.VolumeSource{
-			ConfigMap: &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: tikvConfigMap,
+		{
+			Name: "startup-script", VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: tikvConfigMap,
+					},
+					Items: []corev1.KeyToPath{{Key: "startup-script", Path: "tikv_start_script.sh"}},
 				},
-				Items: []corev1.KeyToPath{{Key: "startup-script", Path: "tikv_start_script.sh"}},
-			}},
+			},
 		},
 	}
 	if tc.IsTLSClusterEnabled() {
@@ -425,9 +499,10 @@ func getNewTiKVSetForTidbCluster(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap)
 		return nil, fmt.Errorf("cannot parse storage request for tikv, tidbcluster %s/%s, error: %v", tc.Namespace, tc.Name, err)
 	}
 
-	tikvLabel := labelTiKV(tc)
+	stsLabels := labelTiKV(tc)
+	podLabels := util.CombineStringMap(stsLabels.Labels(), baseTiKVSpec.Labels())
 	setName := controller.TiKVMemberName(tcName)
-	podAnnotations := CombineAnnotations(controller.AnnProm(20180), baseTiKVSpec.Annotations())
+	podAnnotations := util.CombineStringMap(baseTiKVSpec.Annotations(), controller.AnnProm(v1alpha1.DefaultTiKVStatusPort, "/metrics"))
 	stsAnnotations := getStsAnnotations(tc.Annotations, label.TiKVLabelVal)
 	capacity := controller.TiKVCapacity(tc.Spec.TiKV.Limits)
 	headlessSvcName := controller.TiKVPeerMemberName(tcName)
@@ -439,36 +514,138 @@ func getNewTiKVSetForTidbCluster(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap)
 
 	var containers []corev1.Container
 	if tc.Spec.TiKV.ShouldSeparateRocksDBLog() {
+		logFile := "rocksdb.info"
+		if TiKVLessThanV50(tc.TiKVImage()) {
+			logFile = "db/LOG"
+		}
+		var rocksDBLogVolumeMount corev1.VolumeMount
+		rocksDBLogFilePath := ""
+		rocksDBLogVolumeName := tc.Spec.TiKV.RocksDBLogVolumeName
+		if rocksDBLogVolumeName == "" {
+			rocksDBLogVolumeMount = tikvDataVol
+			rocksDBLogFilePath = path.Join(tikvDataVol.MountPath, logFile)
+		} else {
+			existVolume := false
+			volMountName := fmt.Sprintf("%s-%s", v1alpha1.TiKVMemberType.String(), rocksDBLogVolumeName)
+			for _, volMount := range storageVolMounts {
+				if volMount.Name == volMountName {
+					rocksDBLogVolumeMount = volMount
+					existVolume = true
+					break
+				}
+			}
+			if !existVolume {
+				for _, volMount := range tc.Spec.TiKV.AdditionalVolumeMounts {
+					if volMount.Name == rocksDBLogVolumeName {
+						rocksDBLogVolumeMount = volMount
+						existVolume = true
+						break
+					}
+				}
+			}
+			if !existVolume {
+				return nil, fmt.Errorf("failed to get rocksDBLogVolumeName %s for cluster %s/%s", rocksDBLogVolumeName, ns, tcName)
+			}
+			rocksDBLogFilePath = path.Join(rocksDBLogVolumeMount.MountPath, logFile)
+		}
+		logTailer := tc.Spec.TiKV.GetLogTailerSpec()
 		// mount a shared volume and tail the RocksDB log to STDOUT using a sidecar.
-		rocksDBLogFilePath := path.Join(tikvDataVol.MountPath, "db/LOG")
-		containers = append(containers, corev1.Container{
-			Name:            v1alpha1.RocksDBLogTailerMemberType.String(),
+		c := corev1.Container{
+			Name:            v1alpha1.ContainerRocksDBLogTailer.String(),
 			Image:           tc.HelperImage(),
 			ImagePullPolicy: tc.HelperImagePullPolicy(),
-			Resources:       controller.ContainerResource(tc.Spec.TiKV.GetLogTailerSpec().ResourceRequirements),
-			VolumeMounts:    []corev1.VolumeMount{tikvDataVol},
+			Resources:       controller.ContainerResource(logTailer.ResourceRequirements),
+			SecurityContext: logTailer.SecurityContext,
+			VolumeMounts:    []corev1.VolumeMount{rocksDBLogVolumeMount},
 			Command: []string{
 				"sh",
 				"-c",
 				fmt.Sprintf("touch %s; tail -n0 -F %s;", rocksDBLogFilePath, rocksDBLogFilePath),
 			},
-		})
+		}
+		if logTailer.UseSidecar {
+			var sleepCmd string
+			if logTailer.SleepTimeSeconds != nil {
+				sleepCmd = fmt.Sprintf("sleep %d; ", *logTailer.SleepTimeSeconds)
+			}
+			c.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
+			// NOTE: tail cannot hanle sig TERM when it's PID is 1
+			c.Command = []string{
+				"sh",
+				"-c",
+				fmt.Sprintf(`trap "%sexit 0" TERM; touch %s; tail -n0 -F %s & wait $!`, sleepCmd, rocksDBLogFilePath, rocksDBLogFilePath),
+			}
+			initContainers = append(initContainers, c)
+		} else {
+			containers = append(containers, c)
+		}
 	}
 	if tc.Spec.TiKV.ShouldSeparateRaftLog() {
+		raftdbLogFile := "raftdb.info"
+		if TiKVLessThanV50(tc.TiKVImage()) {
+			raftdbLogFile = "raft/LOG"
+		}
+		var raftLogVolumeMount corev1.VolumeMount
+		raftLogFilePath := ""
+		raftLogVolumeName := tc.Spec.TiKV.RaftLogVolumeName
+		if raftLogVolumeName == "" {
+			raftLogVolumeMount = tikvDataVol
+			raftLogFilePath = path.Join(tikvDataVol.MountPath, raftdbLogFile)
+		} else {
+			existVolume := false
+			volMountName := fmt.Sprintf("%s-%s", v1alpha1.TiKVMemberType.String(), raftLogVolumeName)
+			for _, volMount := range storageVolMounts {
+				if volMount.Name == volMountName {
+					raftLogVolumeMount = volMount
+					existVolume = true
+					break
+				}
+			}
+			if !existVolume {
+				for _, volMount := range tc.Spec.TiKV.AdditionalVolumeMounts {
+					if volMount.Name == raftLogVolumeName {
+						raftLogVolumeMount = volMount
+						existVolume = true
+						break
+					}
+				}
+			}
+			if !existVolume {
+				return nil, fmt.Errorf("failed to get raftLogVolume %s for cluster %s/%s", raftLogVolumeName, ns, tcName)
+			}
+			raftLogFilePath = path.Join(raftLogVolumeMount.MountPath, raftdbLogFile)
+		}
+		logTailer := tc.Spec.TiKV.GetLogTailerSpec()
 		// mount a shared volume and tail the Raft log to STDOUT using a sidecar.
-		raftLogFilePath := path.Join(tikvDataVol.MountPath, "raft/LOG")
-		containers = append(containers, corev1.Container{
-			Name:            v1alpha1.RaftLogTailerMemberType.String(),
+		c := corev1.Container{
+			Name:            v1alpha1.ContainerRaftLogTailer.String(),
 			Image:           tc.HelperImage(),
 			ImagePullPolicy: tc.HelperImagePullPolicy(),
-			Resources:       controller.ContainerResource(tc.Spec.TiKV.GetLogTailerSpec().ResourceRequirements),
-			VolumeMounts:    []corev1.VolumeMount{tikvDataVol},
+			Resources:       controller.ContainerResource(logTailer.ResourceRequirements),
+			SecurityContext: logTailer.SecurityContext,
+			VolumeMounts:    []corev1.VolumeMount{raftLogVolumeMount},
 			Command: []string{
 				"sh",
 				"-c",
 				fmt.Sprintf("touch %s; tail -n0 -F %s;", raftLogFilePath, raftLogFilePath),
 			},
-		})
+		}
+		if logTailer.UseSidecar {
+			var sleepCmd string
+			if logTailer.SleepTimeSeconds != nil {
+				sleepCmd = fmt.Sprintf("sleep %d; ", *logTailer.SleepTimeSeconds)
+			}
+			c.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
+			// NOTE: tail cannot hanle sig TERM when it's PID is 1
+			c.Command = []string{
+				"sh",
+				"-c",
+				fmt.Sprintf(`trap "%sexit 0" TERM; touch %s; tail -n0 -F %s & wait $!`, sleepCmd, raftLogFilePath, raftLogFilePath),
+			}
+			initContainers = append(initContainers, c)
+		} else {
+			containers = append(containers, c)
+		}
 	}
 
 	env := []corev1.EnvVar{
@@ -497,18 +674,25 @@ func getNewTiKVSetForTidbCluster(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap)
 			Value: tc.Spec.Timezone,
 		},
 	}
+	// Get SecurityContext with backward compatibility support
+	securityContext := baseTiKVSpec.SecurityContext()
+	if securityContext == nil {
+		// For backward compatibility, use the Privileged field if SecurityContext is not set
+		securityContext = &corev1.SecurityContext{
+			Privileged: tc.TiKVContainerPrivilege(),
+		}
+	}
+
 	tikvContainer := corev1.Container{
 		Name:            v1alpha1.TiKVMemberType.String(),
 		Image:           tc.TiKVImage(),
 		ImagePullPolicy: baseTiKVSpec.ImagePullPolicy(),
 		Command:         []string{"/bin/sh", "/usr/local/bin/tikv_start_script.sh"},
-		SecurityContext: &corev1.SecurityContext{
-			Privileged: tc.TiKVContainerPrivilege(),
-		},
+		SecurityContext: securityContext,
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "server",
-				ContainerPort: int32(20160),
+				ContainerPort: v1alpha1.DefaultTiKVServerPort,
 				Protocol:      corev1.ProtocolTCP,
 			},
 		},
@@ -516,10 +700,26 @@ func getNewTiKVSetForTidbCluster(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap)
 		Resources:    controller.ContainerResource(tc.Spec.TiKV.ResourceRequirements),
 	}
 
+	if tc.Spec.TiKV.ReadinessProbe != nil {
+		tikvContainer.ReadinessProbe = &corev1.Probe{
+			ProbeHandler:        buildTiKVReadinessProbHandler(tc),
+			InitialDelaySeconds: int32(10),
+		}
+	}
+
+	if tc.Spec.TiKV.ReadinessProbe != nil {
+		if tc.Spec.TiKV.ReadinessProbe.InitialDelaySeconds != nil {
+			tikvContainer.ReadinessProbe.InitialDelaySeconds = *tc.Spec.TiKV.ReadinessProbe.InitialDelaySeconds
+		}
+		if tc.Spec.TiKV.ReadinessProbe.PeriodSeconds != nil {
+			tikvContainer.ReadinessProbe.PeriodSeconds = *tc.Spec.TiKV.ReadinessProbe.PeriodSeconds
+		}
+	}
+
 	if tc.Spec.TiKV.EnableNamedStatusPort {
 		kvStatusPort := corev1.ContainerPort{
 			Name:          "status",
-			ContainerPort: int32(20180),
+			ContainerPort: v1alpha1.DefaultTiKVStatusPort,
 			Protocol:      corev1.ProtocolTCP,
 		}
 
@@ -528,7 +728,6 @@ func getNewTiKVSetForTidbCluster(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap)
 
 	podSpec := baseTiKVSpec.BuildPodSpec()
 	if baseTiKVSpec.HostNetwork() {
-		podSpec.DNSPolicy = corev1.DNSClusterFirstWithHostNet
 		env = append(env, corev1.EnvVar{
 			Name: "POD_NAME",
 			ValueFrom: &corev1.EnvVarSource{
@@ -539,19 +738,27 @@ func getNewTiKVSetForTidbCluster(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap)
 		})
 	}
 	tikvContainer.Env = util.AppendEnv(env, baseTiKVSpec.Env())
+	tikvContainer.EnvFrom = baseTiKVSpec.EnvFrom()
 	containers = append(containers, tikvContainer)
 
 	podSpec.Volumes = append(vols, baseTiKVSpec.AdditionalVolumes()...)
 	podSpec.SecurityContext = podSecurityContext
 	podSpec.InitContainers = append(initContainers, baseTiKVSpec.InitContainers()...)
-	podSpec.Containers = append(containers, baseTiKVSpec.AdditionalContainers()...)
+
+	podSpec.Containers, err = MergePatchContainers(containers, baseTiKVSpec.AdditionalContainers())
+	if err != nil {
+		return nil, fmt.Errorf("failed to merge containers spec for TiKV of [%s/%s], error: %v", ns, tcName, err)
+	}
+
 	podSpec.ServiceAccountName = tc.Spec.TiKV.ServiceAccount
 	if podSpec.ServiceAccountName == "" {
 		podSpec.ServiceAccountName = tc.Spec.ServiceAccount
 	}
 
 	updateStrategy := apps.StatefulSetUpdateStrategy{}
-	if baseTiKVSpec.StatefulSetUpdateStrategy() == apps.OnDeleteStatefulSetStrategyType {
+	if tc.Status.TiKV.VolReplaceInProgress {
+		updateStrategy.Type = apps.OnDeleteStatefulSetStrategyType
+	} else if baseTiKVSpec.StatefulSetUpdateStrategy() == apps.OnDeleteStatefulSetStrategyType {
 		updateStrategy.Type = apps.OnDeleteStatefulSetStrategyType
 	} else {
 		updateStrategy.Type = apps.RollingUpdateStatefulSetStrategyType
@@ -564,25 +771,25 @@ func getNewTiKVSetForTidbCluster(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap)
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            setName,
 			Namespace:       ns,
-			Labels:          tikvLabel.Labels(),
+			Labels:          stsLabels.Labels(),
 			Annotations:     stsAnnotations,
 			OwnerReferences: []metav1.OwnerReference{controller.GetOwnerRef(tc)},
 		},
 		Spec: apps.StatefulSetSpec{
 			Replicas: pointer.Int32Ptr(tc.TiKVStsDesiredReplicas()),
-			Selector: tikvLabel.LabelSelector(),
+			Selector: stsLabels.LabelSelector(),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels:      tikvLabel.Labels(),
+					Labels:      podLabels,
 					Annotations: podAnnotations,
 				},
 				Spec: podSpec,
 			},
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
-				util.VolumeClaimTemplate(storageRequest, v1alpha1.TiKVMemberType.String(), tc.Spec.TiKV.StorageClassName),
+				util.VolumeClaimTemplate(storageRequest, dataVolumeName, tc.Spec.TiKV.StorageClassName),
 			},
 			ServiceName:         headlessSvcName,
-			PodManagementPolicy: apps.ParallelPodManagement,
+			PodManagementPolicy: baseTiKVSpec.PodManagementPolicy(),
 			UpdateStrategy:      updateStrategy,
 		},
 	}
@@ -633,27 +840,11 @@ func transformTiKVConfigMap(srcStr string, tc *v1alpha1.TidbCluster) string {
 }
 
 func getTikVConfigMap(tc *v1alpha1.TidbCluster) (*corev1.ConfigMap, error) {
-	config := tc.Spec.TiKV.Config
-	if config == nil {
+	if tc.Spec.TiKV.Config == nil {
 		return nil, nil
 	}
 
-	scriptModel := &TiKVStartScriptModel{
-		EnableAdvertiseStatusAddr: false,
-		DataDir:                   filepath.Join(tikvDataVolumeMountPath, tc.Spec.TiKV.DataSubDir),
-		ClusterDomain:             tc.Spec.ClusterDomain,
-	}
-	if tc.Spec.EnableDynamicConfiguration != nil && *tc.Spec.EnableDynamicConfiguration {
-		scriptModel.AdvertiseStatusAddr = "${POD_NAME}.${HEADLESS_SERVICE_NAME}.${NAMESPACE}.svc" + controller.FormatClusterDomain(tc.Spec.ClusterDomain)
-		scriptModel.EnableAdvertiseStatusAddr = true
-	}
-
-	if tc.IsHeterogeneous() {
-		scriptModel.PDAddress = tc.Scheme() + "://" + controller.PDMemberName(tc.Spec.Cluster.Name) + ":2379"
-	} else {
-		scriptModel.PDAddress = tc.Scheme() + "://${CLUSTER_NAME}-pd:2379"
-	}
-	cm, err := getTikVConfigMapForTiKVSpec(tc.Spec.TiKV, tc, scriptModel)
+	cm, err := getTikVConfigMapForTiKVSpec(tc.Spec.TiKV, tc)
 	if err != nil {
 		return nil, err
 	}
@@ -674,7 +865,7 @@ func labelTiKV(tc *v1alpha1.TidbCluster) label.Label {
 	return label.New().Instance(instanceName).TiKV()
 }
 
-func (m *tikvMemberManager) syncTidbClusterStatus(tc *v1alpha1.TidbCluster, set *apps.StatefulSet) error {
+func (m *tikvMemberManager) syncTiKVClusterStatus(tc *v1alpha1.TidbCluster, set *apps.StatefulSet) error {
 	if set == nil {
 		// skip if not created yet
 		return nil
@@ -690,19 +881,27 @@ func (m *tikvMemberManager) syncTidbClusterStatus(tc *v1alpha1.TidbCluster, set 
 		if err = endEvictLeader(m.deps, tc, helper.GetMinPodOrdinal(*set.Spec.Replicas, set)); err != nil {
 			return err
 		}
+
+		// end evict leader for all stores when upgrade is done
+		if err = endEvictLeaderForAllStore(m.deps, tc); err != nil {
+			return err
+		}
 	}
 
 	// Scaling takes precedence over upgrading.
 	if tc.TiKVStsDesiredReplicas() != *set.Spec.Replicas {
 		tc.Status.TiKV.Phase = v1alpha1.ScalePhase
 	} else if upgrading && tc.Status.PD.Phase != v1alpha1.UpgradePhase {
-		tc.Status.TiKV.Phase = v1alpha1.UpgradePhase
+		if !tc.IsComponentLeaderEvicting(v1alpha1.TiKVMemberType) { // skip upgrade if someone is evicting leader
+			tc.Status.TiKV.Phase = v1alpha1.UpgradePhase
+		}
 	} else {
 		tc.Status.TiKV.Phase = v1alpha1.NormalPhase
 	}
 
 	previousStores := tc.Status.TiKV.Stores
 	previousPeerStores := tc.Status.TiKV.PeerStores
+	previousTombstoneStores := tc.Status.TiKV.TombstoneStores
 	stores := map[string]v1alpha1.TiKVStore{}
 	peerStores := map[string]v1alpha1.TiKVStore{}
 	tombstoneStores := map[string]v1alpha1.TiKVStore{}
@@ -741,6 +940,12 @@ func (m *tikvMemberManager) syncTidbClusterStatus(tc *v1alpha1.TidbCluster, set 
 			status.LastTransitionTime = oldStore.LastTransitionTime
 		}
 
+		if oldStore.LeaderCountBeforeUpgrade != nil {
+			// TODO: if we are using a cached version of oldStore, the LeaderCountBeforeUpgrade maybe lost
+			// we need to find a better way to handle it
+			status.LeaderCountBeforeUpgrade = oldStore.LeaderCountBeforeUpgrade
+		}
+
 		// In theory, the external tikv can join the cluster, and the operator would only manage the internal tikv.
 		// So we check the store owner to make sure it.
 		if store.Store != nil {
@@ -752,7 +957,7 @@ func (m *tikvMemberManager) syncTidbClusterStatus(tc *v1alpha1.TidbCluster, set 
 		}
 	}
 
-	//this returns all tombstone stores
+	// this returns all tombstone stores
 	tombstoneStoresInfo, err := pdCli.GetTombStoneStores()
 	if err != nil {
 		tc.Status.TiKV.Synced = false
@@ -765,6 +970,12 @@ func (m *tikvMemberManager) syncTidbClusterStatus(tc *v1alpha1.TidbCluster, set 
 		status := getTiKVStore(store)
 		if status == nil {
 			continue
+		}
+
+		oldStore, exist := previousTombstoneStores[status.ID]
+		status.LastTransitionTime = metav1.Now()
+		if exist && status.State == oldStore.State {
+			status.LastTransitionTime = oldStore.LastTransitionTime
 		}
 		tombstoneStores[status.ID] = *status
 	}
@@ -779,6 +990,12 @@ func (m *tikvMemberManager) syncTidbClusterStatus(tc *v1alpha1.TidbCluster, set 
 	if c != nil {
 		tc.Status.TiKV.Image = c.Image
 	}
+
+	err = volumes.SyncVolumeStatus(m.podVolumeModifier, m.deps.PodLister, tc, v1alpha1.TiKVMemberType)
+	if err != nil {
+		return fmt.Errorf("failed to sync volume status for tikv: %v", err)
+	}
+
 	return nil
 }
 
@@ -854,7 +1071,7 @@ func (m *tikvMemberManager) setStoreLabelsForTiKV(tc *v1alpha1.TidbCluster) (int
 		nodeName := pod.Spec.NodeName
 		ls, err := getNodeLabels(m.deps.NodeLister, nodeName, storeLabels)
 		if err != nil || len(ls) == 0 {
-			klog.Warningf("node: [%s] has no node labels, skipping set store labels for Pod: [%s/%s]", nodeName, ns, podName)
+			klog.Warningf("node: [%s] has no node labels %v, skipping set store labels for Pod: [%s/%s]", nodeName, storeLabels, ns, podName)
 			continue
 		}
 
@@ -891,7 +1108,7 @@ func (m *tikvMemberManager) storeLabelsEqualNodeLabels(storeLabels []*metapb.Sto
 }
 
 func tikvStatefulSetIsUpgrading(podLister corelisters.PodLister, pdControl pdapi.PDControlInterface, set *apps.StatefulSet, tc *v1alpha1.TidbCluster) (bool, error) {
-	if statefulSetIsUpgrading(set) {
+	if mngerutils.StatefulSetIsUpgrading(set) {
 		return true, nil
 	}
 	instanceName := tc.GetInstanceName()
@@ -908,12 +1125,23 @@ func tikvStatefulSetIsUpgrading(podLister corelisters.PodLister, pdControl pdapi
 		if !exist {
 			return false, nil
 		}
-		if revisionHash != tc.Status.TiKV.StatefulSet.UpdateRevision {
+		if revisionHash != tc.Status.TiKV.StatefulSet.UpdateRevision &&
+			// In case tc.Status.TiKV.StatefulSet is stale
+			tc.Status.TiKV.StatefulSet.UpdateRevision != "" {
 			return true, nil
 		}
 	}
 
 	return false, nil
+}
+
+// TODO: Support check tikv status http request in future.
+func buildTiKVReadinessProbHandler(tc *v1alpha1.TidbCluster) corev1.ProbeHandler {
+	return corev1.ProbeHandler{
+		TCPSocket: &corev1.TCPSocketAction{
+			Port: intstr.FromInt(int(v1alpha1.DefaultTiKVServerPort)),
+		},
+	}
 }
 
 type FakeTiKVMemberManager struct {
@@ -937,4 +1165,92 @@ func (m *FakeTiKVMemberManager) Sync(tc *v1alpha1.TidbCluster) error {
 		tc.Status.ClusterID = string(uuid.NewUUID())
 	}
 	return nil
+}
+
+// applyPiTRConfigOverride checks for active PiTR restores and overrides gc.ratio-threshold if found
+func (m *tikvMemberManager) applyPiTRConfigOverride(tc *v1alpha1.TidbCluster, newCm *corev1.ConfigMap) error {
+	// Check for active PiTR restores
+	restores, err := m.deps.RestoreLister.List(labels.Everything())
+	if err != nil {
+		return err
+	}
+
+	// Filter restores that belong to this cluster and are PiTR mode
+	hasActivePiTRRestore := false
+	for _, restore := range restores {
+		if restore.Spec.BR != nil &&
+			restore.Spec.BR.Cluster == tc.Name &&
+			restore.Spec.BR.ClusterNamespace == tc.Namespace &&
+			restore.Spec.Mode == v1alpha1.RestoreModePiTR &&
+			!isRestoreDone(restore) {
+			hasActivePiTRRestore = true
+			klog.V(2).InfoS("Found active PiTR restore, will override gc.ratio-threshold",
+				"restore", klog.KObj(restore), "tidbcluster", klog.KObj(tc))
+			break
+		}
+	}
+
+	// If there's an active PiTR restore, override the gc.ratio-threshold in the config map
+	if hasActivePiTRRestore {
+		return m.overrideGCRatioThresholdInConfigMap(newCm, -1.0)
+	}
+
+	return nil
+}
+
+// overrideGCRatioThresholdInConfigMap modifies the config map data to set gc.ratio-threshold
+func (m *tikvMemberManager) overrideGCRatioThresholdInConfigMap(cm *corev1.ConfigMap, value float64) error {
+	if cm.Data == nil {
+		cm.Data = make(map[string]string)
+	}
+
+	return applyOverlay(cm, "gc.ratio-threshold", value)
+}
+
+func applyOverlay(cm *corev1.ConfigMap, key string, value any) error {
+	// NOTE: parse and marshal each time applying overlay isn't effective.
+	// Perhaps batch it when there goes many overlays.
+	// For now only one overlay will be applied so this can be fine.
+
+	overlayWrapper := v1alpha1.NewTiKVConfig()
+	overlayWrapper.Set("gc.ratio-threshold", value)
+	configOverlayContent := cm.Data["config-file-overlay"]
+	if configOverlayContent != "" {
+		if err := overlayWrapper.UnmarshalTOML([]byte(configOverlayContent)); err != nil {
+			return fmt.Errorf("failed to unmarshal TiKV config: %v", err)
+		}
+	}
+	overlayWrapper.Set(key, value)
+
+	overlayContent, err := overlayWrapper.MarshalTOML()
+	if err != nil {
+		return fmt.Errorf("failed to marshal TiKV config: %v", err)
+	}
+	cm.Data["config-file-overlay"] = string(overlayContent)
+
+	configContent := cm.Data["config-file"]
+	configFileWrapper := v1alpha1.NewTiKVConfig()
+	if configContent != "" {
+		if err := configFileWrapper.UnmarshalTOML([]byte(configContent)); err != nil {
+			return fmt.Errorf("failed to unmarshal existing TiKV config: %v", err)
+		}
+	}
+	// Always merge overlay config, regardless of whether config-file is empty
+	if err := configFileWrapper.Merge(overlayWrapper.GenericConfig); err != nil {
+		return fmt.Errorf("failed to merge overlay into existing TiKV config: %v", err)
+	}
+	overlayAppliedConfigContent, err := configFileWrapper.MarshalTOML()
+	if err != nil {
+		return fmt.Errorf("failed to marshal TiKV config: %v", err)
+	}
+	cm.Data["config-file"] = string(overlayAppliedConfigContent)
+	return nil
+}
+
+// isRestoreDone checks if a restore is completed or failed
+func isRestoreDone(restore *v1alpha1.Restore) bool {
+	if v1alpha1.IsRestoreComplete(restore) || v1alpha1.IsRestoreFailed(restore) {
+		return true
+	}
+	return false
 }

@@ -14,6 +14,8 @@
 package backup
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -24,7 +26,10 @@ import (
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/backup/testutils"
 	"github.com/pingcap/tidb-operator/pkg/controller"
+	"github.com/stretchr/testify/require"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/pointer"
 )
@@ -38,11 +43,71 @@ func newHelper(t *testing.T) *helper {
 	return &helper{*h}
 }
 
+func (h *helper) createJob(job *batchv1.Job) {
+	g := NewGomegaWithT(h.T)
+	deps := h.Deps
+	_, err := deps.KubeClientset.BatchV1().Jobs(job.GetNamespace()).Create(context.TODO(), job, metav1.CreateOptions{})
+	g.Expect(err).Should(BeNil())
+
+	g.Eventually(func() error {
+		_, err := deps.JobLister.Jobs(job.GetNamespace()).Get(job.GetName())
+		return err
+	}, time.Second*10).Should(BeNil())
+}
+
+func (h *helper) deleteJob(job *batchv1.Job) {
+	g := NewGomegaWithT(h.T)
+	deps := h.Deps
+	err := deps.KubeClientset.BatchV1().Jobs(job.GetNamespace()).Delete(context.TODO(), job.GetName(), metav1.DeleteOptions{})
+	g.Expect(err).Should(BeNil())
+
+	g.Eventually(func() error {
+		_, err := deps.JobLister.Jobs(job.GetNamespace()).Get(job.GetName())
+		if errors.IsNotFound(err) {
+			return nil
+		} else {
+			return fmt.Errorf("err: %v", err)
+		}
+	}, time.Second*10).Should(BeNil())
+}
+
+func (h *helper) getJob(namespace, name string) *batchv1.Job {
+	g := NewGomegaWithT(h.T)
+	deps := h.Deps
+	var job *batchv1.Job
+	var err error
+
+	g.Eventually(func() error {
+		job, err = deps.JobLister.Jobs(namespace).Get(name)
+		return err
+	}, time.Second*5).Should(BeNil())
+	return job
+}
+
+func (h *helper) updateJob(job *batchv1.Job, compare func(old, new *batchv1.Job) bool) {
+	g := NewGomegaWithT(h.T)
+	deps := h.Deps
+	_, err := deps.KubeClientset.BatchV1().Jobs(job.GetNamespace()).Update(context.TODO(), job, metav1.UpdateOptions{})
+	g.Expect(err).Should(BeNil())
+
+	g.Eventually(func() error {
+		newJob, err := deps.JobLister.Jobs(job.GetNamespace()).Get(job.GetName())
+		if err != nil {
+			return err
+		}
+		if compare(job, newJob) {
+			return nil
+		} else {
+			return fmt.Errorf("compare failed")
+		}
+	}, time.Second*10).Should(BeNil())
+}
+
 // TODO: refactor to reduce duplicated code with restore tests
 func (h *helper) hasCondition(ns string, name string, tp v1alpha1.BackupConditionType, reasonSub string) {
 	h.T.Helper()
 	g := NewGomegaWithT(h.T)
-	get, err := h.Deps.Clientset.PingcapV1alpha1().Backups(ns).Get(name, metav1.GetOptions{})
+	get, err := h.Deps.Clientset.PingcapV1alpha1().Backups(ns).Get(context.TODO(), name, metav1.GetOptions{})
 	g.Expect(err).Should(BeNil())
 	for _, c := range get.Status.Conditions {
 		if c.Type == tp {
@@ -153,7 +218,7 @@ func TestBackupManagerDumpling(t *testing.T) {
 
 	// create backup
 	backup := validDumplingBackup()
-	_, err = deps.Clientset.PingcapV1alpha1().Backups(backup.Namespace).Create(backup)
+	_, err = deps.Clientset.PingcapV1alpha1().Backups(backup.Namespace).Create(context.TODO(), backup, metav1.CreateOptions{})
 	g.Expect(err).Should(BeNil())
 
 	// create relate secret
@@ -162,7 +227,7 @@ func TestBackupManagerDumpling(t *testing.T) {
 	err = bm.syncBackupJob(backup)
 	g.Expect(err).Should(BeNil())
 	helper.hasCondition(backup.Namespace, backup.Name, v1alpha1.BackupScheduled, "")
-	job, err := deps.KubeClientset.BatchV1().Jobs(backup.Namespace).Get(backup.GetBackupJobName(), metav1.GetOptions{})
+	job, err := deps.KubeClientset.BatchV1().Jobs(backup.Namespace).Get(context.TODO(), backup.GetBackupJobName(), metav1.GetOptions{})
 	g.Expect(err).Should(BeNil())
 
 	// check pod env are set correctly
@@ -194,7 +259,7 @@ func TestBackupManagerBR(t *testing.T) {
 
 	// test invalid Backup spec
 	backup := invalidBackup()
-	_, err = deps.Clientset.PingcapV1alpha1().Backups(backup.Namespace).Create(backup)
+	_, err = deps.Clientset.PingcapV1alpha1().Backups(backup.Namespace).Create(context.TODO(), backup, metav1.CreateOptions{})
 	g.Expect(err).Should(BeNil())
 	err = bm.syncBackupJob(backup)
 	g.Expect(err).ShouldNot(BeNil())
@@ -202,7 +267,7 @@ func TestBackupManagerBR(t *testing.T) {
 
 	// test valid backups
 	for i, backup := range genValidBRBackups() {
-		_, err := deps.Clientset.PingcapV1alpha1().Backups(backup.Namespace).Create(backup)
+		_, err := deps.Clientset.PingcapV1alpha1().Backups(backup.Namespace).Create(context.TODO(), backup, metav1.CreateOptions{})
 		g.Expect(err).Should(BeNil())
 
 		// create relate secret
@@ -211,14 +276,14 @@ func TestBackupManagerBR(t *testing.T) {
 		// failed to get relate tc
 		err = bm.syncBackupJob(backup)
 		g.Expect(err).ShouldNot(BeNil())
-		helper.hasCondition(backup.Namespace, backup.Name, v1alpha1.BackupRetryFailed, "failed to fetch tidbcluster")
+		helper.hasCondition(backup.Namespace, backup.Name, v1alpha1.BackupRetryTheFailed, "failed to fetch tidbcluster")
 
 		// create relate tc and try again should success and job created.
-		helper.CreateTC(backup.Spec.BR.ClusterNamespace, backup.Spec.BR.Cluster)
+		helper.CreateTC(backup.Spec.BR.ClusterNamespace, backup.Spec.BR.Cluster, false, false)
 		err = bm.syncBackupJob(backup)
 		g.Expect(err).Should(BeNil())
 		helper.hasCondition(backup.Namespace, backup.Name, v1alpha1.BackupScheduled, "")
-		job, err := deps.KubeClientset.BatchV1().Jobs(backup.Namespace).Get(backup.GetBackupJobName(), metav1.GetOptions{})
+		job, err := deps.KubeClientset.BatchV1().Jobs(backup.Namespace).Get(context.TODO(), backup.GetBackupJobName(), metav1.GetOptions{})
 		g.Expect(err).Should(BeNil())
 
 		// check pod env are set correctly
@@ -247,14 +312,14 @@ func TestClean(t *testing.T) {
 	deps := helper.Deps
 
 	for _, backup := range genValidBRBackups() {
-		_, err := deps.Clientset.PingcapV1alpha1().Backups(backup.Namespace).Create(backup)
-		g.Expect(err).Should(BeNil())
-		helper.CreateSecret(backup)
-		helper.CreateTC(backup.Spec.BR.ClusterNamespace, backup.Spec.BR.Cluster)
-
 		// make the backup need to be clean
 		backup.DeletionTimestamp = &metav1.Time{Time: time.Now()}
 		backup.Spec.CleanPolicy = v1alpha1.CleanPolicyTypeDelete
+
+		_, err := deps.Clientset.PingcapV1alpha1().Backups(backup.Namespace).Create(context.TODO(), backup, metav1.CreateOptions{})
+		g.Expect(err).Should(BeNil())
+		helper.CreateSecret(backup)
+		helper.CreateTC(backup.Spec.BR.ClusterNamespace, backup.Spec.BR.Cluster, false, false)
 
 		statusUpdater := controller.NewRealBackupConditionUpdater(deps.Clientset, deps.BackupLister, deps.Recorder)
 		bc := NewBackupCleaner(deps, statusUpdater)
@@ -270,8 +335,9 @@ func TestClean(t *testing.T) {
 		err = bc.Clean(backup)
 		g.Expect(err).Should(BeNil())
 		helper.hasCondition(backup.Namespace, backup.Name, v1alpha1.BackupClean, "")
-		_, err = deps.KubeClientset.BatchV1().Jobs(backup.Namespace).Get(backup.GetCleanJobName(), metav1.GetOptions{})
+		_, err = deps.KubeClientset.BatchV1().Jobs(backup.Namespace).Get(context.TODO(), backup.GetCleanJobName(), metav1.GetOptions{})
 		g.Expect(err).Should(BeNil())
+
 		// test already have a clean job running
 		g.Eventually(func() error {
 			_, err := deps.JobLister.Jobs(backup.Namespace).Get(backup.GetCleanJobName())
@@ -279,5 +345,171 @@ func TestClean(t *testing.T) {
 		}, time.Second*10).Should(BeNil())
 		err = bc.Clean(backup)
 		g.Expect(err).Should(BeNil())
+
+		// test have a backup job completed
+		completedJob := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      backup.GetBackupJobName(),
+				Namespace: backup.Namespace,
+			},
+			Status: batchv1.JobStatus{
+				CompletionTime: &metav1.Time{},
+				Conditions: []batchv1.JobCondition{
+					{
+						Type:   batchv1.JobComplete,
+						Status: corev1.ConditionTrue,
+					},
+				},
+			},
+		}
+		helper.createJob(completedJob)
+		err = bc.Clean(backup)
+		g.Expect(err).Should(BeNil())
+		helper.hasCondition(backup.Namespace, backup.Name, v1alpha1.BackupClean, "")
+		_, err = deps.KubeClientset.BatchV1().Jobs(backup.Namespace).Get(context.TODO(), backup.GetCleanJobName(), metav1.GetOptions{})
+		g.Expect(err).Should(BeNil())  // job shouldn't be deleted
+		helper.deleteJob(completedJob) // clean job after test
+
+		// test have a backup job running
+		runningJob := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      backup.GetBackupJobName(),
+				Namespace: backup.Namespace,
+			},
+			Status: batchv1.JobStatus{},
+		}
+		helper.createJob(runningJob)
+		err = bc.Clean(backup)
+		g.Expect(err).Should(BeNil())
+		g.Eventually(func() bool {
+			_, err = deps.KubeClientset.BatchV1().Jobs(backup.Namespace).Get(context.TODO(), backup.GetBackupJobName(), metav1.GetOptions{})
+			return errors.IsNotFound(err)
+		}, time.Second*10).Should(BeTrue()) // job should be deleted
+
+		// test have a backup job deleting
+		deletingJob := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              backup.GetBackupJobName(),
+				Namespace:         backup.Namespace,
+				DeletionTimestamp: &metav1.Time{},
+			},
+		}
+		helper.createJob(deletingJob)
+		err = bc.Clean(backup)
+		g.Expect(err).Should(BeNil())
 	}
+
+}
+
+func genVolumeBackup() *v1alpha1.Backup {
+	b := &v1alpha1.Backup{
+		Spec: v1alpha1.BackupSpec{
+			FederalVolumeBackupPhase: v1alpha1.FederalVolumeBackupInitialize,
+			BR: &v1alpha1.BRConfig{
+				ClusterNamespace: "ns",
+				Cluster:          "tidb-test",
+			},
+			Mode: v1alpha1.BackupModeVolumeSnapshot,
+			StorageProvider: v1alpha1.StorageProvider{
+				S3: &v1alpha1.S3StorageProvider{
+					Bucket:   "s3",
+					Prefix:   "prefix-",
+					Endpoint: "s3://localhost:80",
+				},
+			},
+		},
+	}
+	b.Namespace = "ns"
+	b.Name = "test-volume-backup"
+	return b
+}
+
+func TestVolumeBackupInitFailed(t *testing.T) {
+	g := NewGomegaWithT(t)
+	helper := newHelper(t)
+	defer helper.Close()
+	deps := helper.Deps
+	var err error
+
+	bm := NewBackupManager(deps).(*backupManager)
+	backup := genVolumeBackup()
+	_, err = deps.Clientset.PingcapV1alpha1().Backups(backup.Namespace).Create(context.TODO(), backup, metav1.CreateOptions{})
+	g.Expect(err).Should(BeNil())
+	helper.CreateTC(backup.Spec.BR.ClusterNamespace, backup.Spec.BR.Cluster, true, false)
+
+	err = bm.syncBackupJob(backup)
+	g.Expect(err).Should(BeNil())
+
+	backup, err = deps.Clientset.PingcapV1alpha1().Backups(backup.Namespace).Get(context.TODO(), backup.Name, metav1.GetOptions{})
+	g.Expect(err).Should(BeNil())
+	g.Expect(backup.Status.Phase).ShouldNot(Equal(v1alpha1.VolumeBackupInitializeFailed))
+
+	job := helper.getJob(backup.Namespace, backup.GetVolumeBackupInitializeJobName())
+	job.Status.Conditions = append(job.Status.Conditions, batchv1.JobCondition{
+		Type:   batchv1.JobFailed,
+		Status: corev1.ConditionTrue,
+	})
+	helper.updateJob(job, func(old, new *batchv1.Job) bool {
+		for _, condition := range new.Status.Conditions {
+			if condition.Type == batchv1.JobFailed {
+				return true
+			}
+		}
+		return false
+	})
+
+	err = bm.syncBackupJob(backup)
+	g.Expect(err).ShouldNot(BeNil())
+
+	backup, err = deps.Clientset.PingcapV1alpha1().Backups(backup.Namespace).Get(context.TODO(), backup.Name, metav1.GetOptions{})
+	g.Expect(err).Should(BeNil())
+	g.Expect(backup.Status.Phase).Should(Equal(v1alpha1.VolumeBackupInitializeFailed))
+}
+
+func TestVolumeBackupAgainstInvalidTC(t *testing.T) {
+	g := NewGomegaWithT(t)
+	helper := newHelper(t)
+	defer helper.Close()
+	deps := helper.Deps
+	var err error
+
+	bm := NewBackupManager(deps).(*backupManager)
+	backup := genVolumeBackup()
+	_, err = deps.Clientset.PingcapV1alpha1().Backups(backup.Namespace).Create(context.TODO(), backup, metav1.CreateOptions{})
+	g.Expect(err).Should(BeNil())
+	helper.CreateTC(backup.Spec.BR.ClusterNamespace, backup.Spec.BR.Cluster, false, false)
+
+	err = bm.syncBackupJob(backup)
+	g.Expect(err.Error()).Should(MatchRegexp("only support volume snapshot backup across k8s clusters"))
+}
+
+func TestVolumeBackupAgainstTCWithNoTiKV(t *testing.T) {
+	g := NewGomegaWithT(t)
+	helper := newHelper(t)
+	defer helper.Close()
+	deps := helper.Deps
+	var err error
+
+	bm := NewBackupManager(deps).(*backupManager)
+	backup := genVolumeBackup()
+	_, err = deps.Clientset.PingcapV1alpha1().Backups(backup.Namespace).Create(context.TODO(), backup, metav1.CreateOptions{})
+	g.Expect(err).Should(BeNil())
+	helper.CreateTCWithNoTiKV(backup.Spec.BR.ClusterNamespace, backup.Spec.BR.Cluster, true, false)
+
+	err = bm.syncBackupJob(backup)
+	g.Expect(err.Error()).Should(MatchRegexp("not support backup TiDB cluster with no tikv replica"))
+}
+
+func TestUnmarshalPauseV2Info(t *testing.T) {
+	input := `{
+        "severity": "manual",
+        "operation_hostname": "host-01",
+        "operation_pid": 1234,
+        "operation_time": "2023-10-05T15:04:05Z",
+        "payload_type": "text/plain",
+        "payload": "SGVsbG8="
+    }`
+	var info PauseV2Info
+	err := json.Unmarshal([]byte(input), &info)
+	require.NoError(t, err)
 }

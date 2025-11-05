@@ -21,12 +21,12 @@ import (
 
 	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned"
 	"github.com/pingcap/tidb-operator/tests/pkg/webhook"
+	"github.com/pingcap/tidb-operator/tests/third_party/k8s/log"
 	flag "github.com/spf13/pflag"
 	"k8s.io/apiserver/pkg/server/healthz"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/component-base/logs"
-	"k8s.io/kubernetes/test/e2e/framework/log"
 )
 
 var (
@@ -51,32 +51,32 @@ func main() {
 
 	kubeConfig, err := clientcmd.BuildConfigFromFlags("", optKubeconfig)
 	if err != nil {
-		log.Fail(err.Error())
+		log.Failf(err.Error())
 	}
 
 	kubeCli, err := kubernetes.NewForConfig(kubeConfig)
 	if err != nil {
-		log.Fail(err.Error())
+		log.Failf(err.Error())
 	}
 
 	versionedCli, err := versioned.NewForConfig(kubeConfig)
 	if err != nil {
-		log.Fail(err.Error())
+		log.Failf(err.Error())
 	}
 
 	certBytes, err := ioutil.ReadFile(optCert)
 	if err != nil {
-		log.Fail(err.Error())
+		log.Failf(err.Error())
 	}
 
 	keyBytes, err := ioutil.ReadFile(optKey)
 	if err != nil {
-		log.Fail(err.Error())
+		log.Failf(err.Error())
 	}
 
 	cert, err := tls.X509KeyPair(certBytes, keyBytes)
 	if err != nil {
-		log.Fail(err.Error())
+		log.Failf(err.Error())
 	}
 
 	wh := webhook.NewWebhook(kubeCli, versionedCli, optWatchNamespaces)
@@ -89,6 +89,6 @@ func main() {
 	}
 	healthz.InstallHandler(http.DefaultServeMux)
 	if err := server.ListenAndServeTLS("", ""); err != nil {
-		log.Fail(err.Error())
+		log.Failf(err.Error())
 	}
 }

@@ -18,7 +18,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -28,9 +28,8 @@ import (
 	"github.com/pingcap/tidb-operator/pkg/util/crypto"
 	httputil "github.com/pingcap/tidb-operator/pkg/util/http"
 	"github.com/tikv/pd/pkg/typeutil"
-	types "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/klog"
+	corelisterv1 "k8s.io/client-go/listers/core/v1"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -40,8 +39,8 @@ const (
 )
 
 // GetTLSConfig returns *tls.Config for given TiDB cluster.
-func GetTLSConfig(kubeCli kubernetes.Interface, namespace Namespace, tcName string, secretName string) (*tls.Config, error) {
-	secret, err := kubeCli.CoreV1().Secrets(string(namespace)).Get(secretName, types.GetOptions{})
+func GetTLSConfig(secretLister corelisterv1.SecretLister, namespace Namespace, secretName string) (*tls.Config, error) {
+	secret, err := secretLister.Secrets(string(namespace)).Get(secretName)
 	if err != nil {
 		return nil, fmt.Errorf("unable to load certificates from secret %s/%s: %v", namespace, secretName, err)
 	}
@@ -65,7 +64,7 @@ type PDClient interface {
 	GetTombStoneStores() (*StoresInfo, error)
 	// GetStore gets a TiKV store for a specific store id from cluster
 	GetStore(storeID uint64) (*StoreInfo, error)
-	// storeLabelsEqualNodeLabels compares store labels with node labels
+	// SetStoreLabels compares store labels with node labels
 	// for historic reasons, PD stores TiKV labels as []*StoreLabel which is a key-value pair slice
 	SetStoreLabels(storeID uint64, labels map[string]string) (bool, error)
 	// UpdateReplicationConfig updates the replication config
@@ -85,16 +84,29 @@ type PDClient interface {
 	EndEvictLeader(storeID uint64) error
 	// GetEvictLeaderSchedulers gets schedulers of evict leader
 	GetEvictLeaderSchedulers() ([]string, error)
+	// GetEvictLeaderSchedulersForStores gets schedulers of evict leader for given stores
+	GetEvictLeaderSchedulersForStores(storeIDs ...uint64) (map[uint64]string, error)
 	// GetPDLeader returns pd leader
 	GetPDLeader() (*pdpb.Member, error)
 	// TransferPDLeader transfers pd leader to specified member
 	TransferPDLeader(name string) error
 	// GetAutoscalingPlans returns the scaling plan for the cluster
 	GetAutoscalingPlans(strategy Strategy) ([]Plan, error)
+	// GetRecoveringMark return the pd recovering mark
+	GetRecoveringMark() (bool, error)
+
+	// GetReady checks if a specific PD member is ready.
+	// NOTE: in order to call this method, a PDClient for a specific PD member (`GetPDClientForMember`) is required.
+	GetReady() (bool, error)
+
+	// GetMSMembers returns all PDMS members service-addr from cluster by specific microservice
+	GetMSMembers(service string) ([]string, error)
+	// GetMSPrimary returns the primary PDMS member service-addr from cluster by specific microservice
+	GetMSPrimary(service string) (string, error)
 }
 
 var (
-	healthPrefix           = "pd/health"
+	healthPrefix           = "pd/api/v1/health"
 	membersPrefix          = "pd/api/v1/members"
 	storesPrefix           = "pd/api/v1/stores"
 	storePrefix            = "pd/api/v1/store"
@@ -108,6 +120,12 @@ var (
 	// config API, available since PD v3.1.0.
 	evictLeaderSchedulerConfigPrefix = "pd/api/v1/scheduler-config/evict-leader-scheduler/list"
 	autoscalingPrefix                = "autoscaling"
+	recoveringMarkPrefix             = "pd/api/v1/admin/cluster/markers/snapshot-recovering"
+
+	readyPrefix = "pd/api/v2/ready"
+
+	// microservice
+	MicroservicePrefix = "pd/api/v2/ms"
 )
 
 // pdClient is default implementation of PDClient
@@ -182,7 +200,7 @@ type StoresInfo struct {
 }
 
 // MembersInfo is PD members info returned from PD RESTful interface
-//type Members map[string][]*pdpb.Member
+// type Members map[string][]*pdpb.Member
 type MembersInfo struct {
 	Header     *pdpb.ResponseHeader `json:"header,omitempty"`
 	Members    []*pdpb.Member       `json:"members,omitempty"`
@@ -190,9 +208,18 @@ type MembersInfo struct {
 	EtcdLeader *pdpb.Member         `json:"etcd_leader,omitempty"`
 }
 
+// ServiceRegistryEntry is the registry entry of PD microservice
+type ServiceRegistryEntry struct {
+	ServiceAddr    string `json:"service-addr"`
+	Version        string `json:"version"`
+	GitHash        string `json:"git-hash"`
+	DeployPath     string `json:"deploy-path"`
+	StartTimestamp int64  `json:"start-timestamp"`
+}
+
 // below copied from github.com/tikv/pd/pkg/autoscaling
 
-// Strategy within a HTTP request provides rules and resources to help make decision for auto scaling.
+// Strategy within an HTTP request provides rules and resources to help make decision for auto scaling.
 type Strategy struct {
 	Rules     []*Rule     `json:"rules"`
 	Resources []*Resource `json:"resources"`
@@ -244,13 +271,17 @@ type schedulerInfo struct {
 	StoreID uint64 `json:"store_id"`
 }
 
+type RecoveringMark struct {
+	Mark bool `json:"marked"`
+}
+
 func (c *pdClient) GetHealth() (*HealthInfo, error) {
 	apiURL := fmt.Sprintf("%s/%s", c.url, healthPrefix)
 	body, err := httputil.GetBodyOK(c.httpClient, apiURL)
 	if err != nil {
 		return nil, err
 	}
-	healths := []MemberHealth{}
+	var healths []MemberHealth
 	err = json.Unmarshal(body, &healths)
 	if err != nil {
 		return nil, err
@@ -300,6 +331,39 @@ func (c *pdClient) GetMembers() (*MembersInfo, error) {
 		return nil, err
 	}
 	return members, nil
+}
+
+func (c *pdClient) GetMSMembers(service string) ([]string, error) {
+	apiURL := fmt.Sprintf("%s/%s/members/%s", c.url, MicroservicePrefix, service)
+	body, err := httputil.GetBodyOK(c.httpClient, apiURL)
+	if err != nil {
+		return nil, err
+	}
+	var members []ServiceRegistryEntry
+	err = json.Unmarshal(body, &members)
+	if err != nil {
+		return nil, err
+	}
+	var addrs []string
+	for _, member := range members {
+		addrs = append(addrs, member.ServiceAddr)
+	}
+	return addrs, nil
+}
+
+func (c *pdClient) GetMSPrimary(service string) (string, error) {
+	apiURL := fmt.Sprintf("%s/%s/primary/%s", c.url, MicroservicePrefix, service)
+	body, err := httputil.GetBodyOK(c.httpClient, apiURL)
+	if err != nil {
+		return "", err
+	}
+	var primary string
+	err = json.Unmarshal(body, &primary)
+	if err != nil {
+		return "", err
+	}
+
+	return primary, nil
 }
 
 func (c *pdClient) getStores(apiURL string) (*StoresInfo, error) {
@@ -370,11 +434,11 @@ func (c *pdClient) DeleteStore(storeID uint64) error {
 	}
 	defer httputil.DeferClose(res.Body)
 
-	// Remove an offline store should returns http.StatusOK
+	// Remove an offline store should return http.StatusOK
 	if res.StatusCode == http.StatusOK || res.StatusCode == http.StatusNotFound {
 		return nil
 	}
-	body, err := ioutil.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		return err
 	}
@@ -398,7 +462,7 @@ func (c *pdClient) SetStoreState(storeID uint64, state string) error {
 	if res.StatusCode == http.StatusOK || res.StatusCode == http.StatusNotFound {
 		return nil
 	}
-	body, err := ioutil.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		return err
 	}
@@ -609,6 +673,32 @@ func (c *pdClient) GetEvictLeaderSchedulers() ([]string, error) {
 	return evictSchedulers, nil
 }
 
+func (c *pdClient) GetEvictLeaderSchedulersForStores(storeIDs ...uint64) (map[uint64]string, error) {
+	schedulers, err := c.GetEvictLeaderSchedulers()
+	if err != nil {
+		return nil, err
+	}
+
+	find := func(id uint64) string {
+		for _, scheduler := range schedulers {
+			sName := getLeaderEvictSchedulerStr(id)
+			if scheduler == sName {
+				return scheduler
+			}
+		}
+		return ""
+	}
+
+	result := make(map[uint64]string)
+	for _, id := range storeIDs {
+		if scheduler := find(id); scheduler != "" {
+			result[id] = scheduler
+		}
+	}
+
+	return result, nil
+}
+
 // getEvictLeaderSchedulerConfig gets the config of PD scheduler "evict-leader-scheduler"
 // It's available since PD 3.1.0.
 // In the previous versions, PD API returns 404 and this function will return an error.
@@ -647,6 +737,20 @@ func (c *pdClient) filterLeaderEvictScheduler(evictLeaderSchedulers []string) ([
 		schedulerIds = append(schedulerIds, evictLeaderSchedulers...)
 	}
 	return schedulerIds, nil
+}
+
+func (c *pdClient) GetRecoveringMark() (bool, error) {
+	apiURL := fmt.Sprintf("%s/%s", c.url, recoveringMarkPrefix)
+	body, err := httputil.GetBodyOK(c.httpClient, apiURL)
+	if err != nil {
+		return false, err
+	}
+	recoveringMark := &RecoveringMark{}
+	err = json.Unmarshal(body, recoveringMark)
+	if err != nil {
+		return false, err
+	}
+	return recoveringMark.Mark, nil
 }
 
 func (c *pdClient) GetPDLeader() (*pdpb.Member, error) {
@@ -697,6 +801,31 @@ func (c *pdClient) GetAutoscalingPlans(strategy Strategy) ([]Plan, error) {
 		return nil, err
 	}
 	return plans, nil
+}
+
+func (c *pdClient) GetReady() (bool, error) {
+	apiURL := fmt.Sprintf("%s/%s", c.url, readyPrefix)
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return false, err
+	}
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer httputil.DeferClose(res.Body)
+
+	if res.StatusCode == http.StatusNotFound {
+		// this ready API is added from v8.5.2, so we return true if the status code is 404 here
+		klog.Info("ready API is not found, assuming PD is ready")
+		return true, nil
+	}
+
+	if res.StatusCode != http.StatusOK {
+		err2 := httputil.ReadErrorBody(res.Body)
+		return false, fmt.Errorf("failed %v to get ready status: %v", res.StatusCode, err2)
+	}
+	return true, nil
 }
 
 func getLeaderEvictSchedulerInfo(storeID uint64) *schedulerInfo {

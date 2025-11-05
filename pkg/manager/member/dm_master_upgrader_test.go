@@ -17,18 +17,18 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/pingcap/tidb-operator/pkg/label"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-
-	"github.com/pingcap/tidb-operator/pkg/dmapi"
-	podinformers "k8s.io/client-go/informers/core/v1"
-
-	. "github.com/onsi/gomega"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
+	"github.com/pingcap/tidb-operator/pkg/dmapi"
+	mngerutils "github.com/pingcap/tidb-operator/pkg/manager/utils"
+
+	. "github.com/onsi/gomega"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	podinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/utils/pointer"
 )
 
@@ -79,7 +79,7 @@ func TestMasterUpgraderUpgrade(t *testing.T) {
 		if test.changeOldSet != nil {
 			test.changeOldSet(oldSet)
 		}
-		SetStatefulSetLastAppliedConfigAnnotation(oldSet)
+		mngerutils.SetStatefulSetLastAppliedConfigAnnotation(oldSet)
 
 		newSet.Spec.UpdateStrategy.RollingUpdate.Partition = pointer.Int32Ptr(3)
 
@@ -103,6 +103,26 @@ func TestMasterUpgraderUpgrade(t *testing.T) {
 			expectFn: func(g *GomegaWithT, dc *v1alpha1.DMCluster, newSet *apps.StatefulSet) {
 				g.Expect(dc.Status.Master.Phase).To(Equal(v1alpha1.UpgradePhase))
 				g.Expect(newSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(pointer.Int32Ptr(1)))
+			},
+		},
+		{
+			name: "normal upgrade with notReady pod",
+			changeFn: func(dc *v1alpha1.DMCluster) {
+				dc.Status.Master.Synced = true
+			},
+			changePods: func(pods []*corev1.Pod) {
+				for _, pod := range pods {
+					pod.Status = *new(corev1.PodStatus)
+				}
+			},
+			changeOldSet:      nil,
+			transferLeaderErr: false,
+			errExpectFn: func(g *GomegaWithT, err error) {
+				g.Expect(err).To(HaveOccurred())
+			},
+			expectFn: func(g *GomegaWithT, dc *v1alpha1.DMCluster, newSet *apps.StatefulSet) {
+				g.Expect(dc.Status.Master.Phase).To(Equal(v1alpha1.UpgradePhase))
+				g.Expect(newSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(pointer.Int32Ptr(2)))
 			},
 		},
 		{
@@ -183,22 +203,6 @@ func TestMasterUpgraderUpgrade(t *testing.T) {
 			},
 		},
 		{
-			name: "update revision equals current revision",
-			changeFn: func(dc *v1alpha1.DMCluster) {
-				dc.Status.Master.Synced = true
-				dc.Status.Master.StatefulSet.UpdateRevision = dc.Status.Master.StatefulSet.CurrentRevision
-			},
-			changePods:        nil,
-			transferLeaderErr: false,
-			errExpectFn: func(g *GomegaWithT, err error) {
-				g.Expect(err).NotTo(HaveOccurred())
-			},
-			expectFn: func(g *GomegaWithT, dc *v1alpha1.DMCluster, newSet *apps.StatefulSet) {
-				g.Expect(dc.Status.Master.Phase).To(Equal(v1alpha1.UpgradePhase))
-				g.Expect(newSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(pointer.Int32Ptr(3)))
-			},
-		},
-		{
 			name: "skip to wait all members health",
 			changeFn: func(dc *v1alpha1.DMCluster) {
 				dc.Status.Master.Synced = true
@@ -263,8 +267,8 @@ func TestMasterUpgraderUpgrade(t *testing.T) {
 		},
 	}
 
-	for _, test := range tests {
-		testFn(&test)
+	for i := range tests {
+		testFn(&tests[i])
 	}
 
 }
@@ -370,6 +374,13 @@ func getMasterPods() []*corev1.Pod {
 				Namespace: corev1.NamespaceDefault,
 				Labels:    lc,
 			},
+			Status: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{
+					{
+						Type:   corev1.PodReady,
+						Status: corev1.ConditionTrue},
+				},
+			},
 		},
 		{
 			TypeMeta: metav1.TypeMeta{Kind: "Pod", APIVersion: "v1"},
@@ -378,6 +389,13 @@ func getMasterPods() []*corev1.Pod {
 				Namespace: corev1.NamespaceDefault,
 				Labels:    lc,
 			},
+			Status: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{
+					{
+						Type:   corev1.PodReady,
+						Status: corev1.ConditionTrue},
+				},
+			},
 		},
 		{
 			TypeMeta: metav1.TypeMeta{Kind: "Pod", APIVersion: "v1"},
@@ -385,6 +403,13 @@ func getMasterPods() []*corev1.Pod {
 				Name:      DMMasterPodName(upgradeTcName, 2),
 				Namespace: corev1.NamespaceDefault,
 				Labels:    lu,
+			},
+			Status: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{
+					{
+						Type:   corev1.PodReady,
+						Status: corev1.ConditionTrue},
+				},
 			},
 		},
 	}

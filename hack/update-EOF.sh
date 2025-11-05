@@ -21,18 +21,19 @@ ROOTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
 
 cd $ROOTDIR
 
-FILELIST=($(find . -type f -not \( -path './vendor/*' \
-    -o -path './output/*' \
+FILELIST=($(find . -type f -not \( -path './output/*' \
     -o -path './_tools/*' \
     -o -path './.git/*' \
     -o -path './*/.terraform/*' \
     -o -path './images/*/bin/*' \
     -o -path './tests/images/*/bin/*' \
     -o -path '*.png' \
-    -o -path './tkctl' \
     -o -path './.idea/*' \
+    -o -path '*.iml' \
     -o -path './.DS_Store' \
     -o -path './*/.DS_Store' \
+    -o -path './data' \
+    -o -path './_artifacts/*' \
     \)))
 
 for f in ${FILELIST[@]}; do

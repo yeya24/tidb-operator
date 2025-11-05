@@ -22,33 +22,47 @@ import (
 
 	"github.com/ghodss/yaml"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/kubernetes/test/e2e/framework"
-	"k8s.io/kubernetes/test/e2e/framework/log"
+
+	framework "github.com/pingcap/tidb-operator/tests/third_party/k8s"
+	"github.com/pingcap/tidb-operator/tests/third_party/k8s/log"
+)
+
+var (
+	TiDBPreviousVersions []string = []string{"v6.5.10", "v7.1.5", "v7.5.2", "v8.1.0"}
 )
 
 const (
-	TiDBV3                        = "v3.0.20"
-	TiDBV4Prev                    = "v4.0.9"
-	TiDBV4                        = "v4.0.10"
-	TiDBNightlyVersion            = "nightly"
+	// TiDB Version
+	TiDBLatestPrev     = "v7.5.3"
+	TiDBLatest         = "v8.1.0" // different version with PDMSImage
+	TiDBNightlyVersion = "nightly"
+	// specific version
+	TiDBV7x5x0 = "v7.5.0"
+	TiDBV7x5x3 = "v7.5.3"
+
 	PrometheusImage               = "prom/prometheus"
-	PrometheusVersion             = "v2.18.1"
+	PrometheusVersion             = "v2.27.1"
 	TiDBMonitorReloaderImage      = "pingcap/tidb-monitor-reloader"
 	TiDBMonitorReloaderVersion    = "v1.0.1"
 	TiDBMonitorInitializerImage   = "pingcap/tidb-monitor-initializer"
-	TiDBMonitorInitializerVersion = "v4.0.10"
+	TiDBMonitorInitializerVersion = TiDBLatest
 	GrafanaImage                  = "grafana/grafana"
-	GrafanaVersion                = "6.1.6"
+	GrafanaVersion                = "7.5.11"
 	ThanosImage                   = "thanosio/thanos"
 	ThanosVersion                 = "v0.17.2"
+	DMV2Prev                      = TiDBLatestPrev
+	DMV2                          = TiDBLatest
+	TiDBNGMonitoringLatest        = TiDBLatest
+	HelperImage                   = "alpine:3.16.0"
+	PDMSImage                     = "v8.1.1"
 )
 
 func ListImages() []string {
 	images := []string{}
 	versions := make([]string, 0)
-	versions = append(versions, TiDBV3)
-	versions = append(versions, TiDBV4Prev)
-	versions = append(versions, TiDBV4)
+	versions = append(versions, TiDBPreviousVersions...)
+	versions = append(versions, TiDBLatestPrev)
+	versions = append(versions, TiDBLatest)
 	versions = append(versions, TiDBNightlyVersion)
 	for _, v := range versions {
 		images = append(images, fmt.Sprintf("pingcap/pd:%s", v))
@@ -64,11 +78,7 @@ func ListImages() []string {
 	framework.ExpectNoError(err, "failed to read images from values in charts/tidb-operator/values.yaml")
 
 	images = append(images, imagesFromOperator...)
-	imageKeysFromTiDBCluster := sets.NewString(".pd.image", ".tikv.image", ".tidb.image")
-	imagesFromTiDBCluster, err := readImagesFromValues(filepath.Join(framework.TestContext.RepoRoot, "charts/tidb-cluster/values.yaml"), imageKeysFromTiDBCluster)
-	framework.ExpectNoError(err, "failed to read images from values in charts/tidb-cluster/values.yaml")
 
-	images = append(images, imagesFromTiDBCluster...)
 	return sets.NewString(images...).List()
 }
 

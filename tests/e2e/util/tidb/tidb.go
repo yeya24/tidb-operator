@@ -20,6 +20,7 @@ import (
 
 	// To register MySQL driver
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
 	"github.com/pingcap/tidb-operator/tests/e2e/util/portforward"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -27,9 +28,9 @@ import (
 
 var dummyCancel = func() {}
 
-// GetTiDBDSN returns a DSN to use
-func GetTiDBDSN(fw portforward.PortForward, ns, tc, user, password, database string) (string, context.CancelFunc, error) {
-	localHost, localPort, cancel, err := portforward.ForwardOnePort(fw, ns, fmt.Sprintf("svc/%s", controller.TiDBMemberName(tc)), 4000)
+// PortForwardAndGetTiDBDSN create a portforward for TiDB and return its DSN
+func PortForwardAndGetTiDBDSN(fw portforward.PortForward, ns, tc, user, password, database string) (string, context.CancelFunc, error) {
+	localHost, localPort, cancel, err := portforward.ForwardOnePort(fw, ns, fmt.Sprintf("svc/%s", controller.TiDBMemberName(tc)), uint16(v1alpha1.DefaultTiDBServerPort))
 	if err != nil {
 		return "", dummyCancel, err
 	}
@@ -40,7 +41,7 @@ func GetTiDBDSN(fw portforward.PortForward, ns, tc, user, password, database str
 func TiDBIsConnectable(fw portforward.PortForward, ns, tc, user, password string) wait.ConditionFunc {
 	return func() (bool, error) {
 		var db *sql.DB
-		dsn, cancel, err := GetTiDBDSN(fw, ns, tc, "root", password, "test")
+		dsn, cancel, err := PortForwardAndGetTiDBDSN(fw, ns, tc, "root", password, "test")
 		if err != nil {
 			return false, err
 		}
@@ -60,7 +61,7 @@ func TiDBIsConnectable(fw portforward.PortForward, ns, tc, user, password string
 func TiDBIsInserted(fw portforward.PortForward, ns, tc, user, password, dbName, tableName string) wait.ConditionFunc {
 	return func() (bool, error) {
 		var db *sql.DB
-		dsn, cancel, err := GetTiDBDSN(fw, ns, tc, user, password, dbName)
+		dsn, cancel, err := PortForwardAndGetTiDBDSN(fw, ns, tc, user, password, dbName)
 		if err != nil {
 			return false, err
 		}

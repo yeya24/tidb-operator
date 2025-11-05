@@ -19,9 +19,9 @@ import (
 	"time"
 
 	. "github.com/onsi/gomega"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -50,6 +50,8 @@ func TestReclaimPolicyManagerSync(t *testing.T) {
 			obj = newTidbClusterForMeta()
 		case v1alpha1.DMClusterKind:
 			obj = newDMClusterForMeta()
+		case v1alpha1.TiDBNGMonitoringKind:
+			obj = newTiDBNGMonitoringForMeta()
 		}
 		pv1 := newPV("1")
 		pvc1 := newPVC(obj, "1")
@@ -65,6 +67,10 @@ func TestReclaimPolicyManagerSync(t *testing.T) {
 			obj.(*v1alpha1.TidbCluster).Spec.EnablePVReclaim = &test.enablePVRecalim
 		case v1alpha1.DMClusterKind:
 			obj.(*v1alpha1.DMCluster).Spec.EnablePVReclaim = &test.enablePVRecalim
+		case v1alpha1.TiDBNGMonitoringKind:
+			if test.enablePVRecalim {
+				return // skip because don't support enablePVRecalim
+			}
 		}
 		if test.hasDeferDeleteAnn {
 			pvc1.Annotations = map[string]string{label.AnnPVCDeferDeleting: time.Now().String()}
@@ -85,6 +91,8 @@ func TestReclaimPolicyManagerSync(t *testing.T) {
 			err = rpm.Sync(obj.(*v1alpha1.TidbCluster))
 		case v1alpha1.DMClusterKind:
 			err = rpm.SyncDM(obj.(*v1alpha1.DMCluster))
+		case v1alpha1.TiDBNGMonitoringKind:
+			err = rpm.SyncTiDBNGMonitoring(obj.(*v1alpha1.TidbNGMonitoring))
 		}
 		if test.err {
 			g.Expect(err).To(HaveOccurred())
@@ -290,6 +298,25 @@ func newTiDBMonitorForMeta() *v1alpha1.TidbMonitor {
 			Labels:    label.NewDM().Instance(controller.TestClusterName),
 		},
 		Spec: v1alpha1.TidbMonitorSpec{
+			PVReclaimPolicy: &pvp,
+		},
+	}
+}
+
+func newTiDBNGMonitoringForMeta() *v1alpha1.TidbNGMonitoring {
+	pvp := corev1.PersistentVolumeReclaimDelete
+	return &v1alpha1.TidbNGMonitoring{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "TidbNGMonitoring",
+			APIVersion: "pingcap.com/v1alpha1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      controller.TestClusterName,
+			Namespace: corev1.NamespaceDefault,
+			UID:       types.UID("test"),
+			Labels:    label.NewDM().Instance(controller.TestClusterName),
+		},
+		Spec: v1alpha1.TidbNGMonitoringSpec{
 			PVReclaimPolicy: &pvp,
 		},
 	}

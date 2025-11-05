@@ -17,13 +17,13 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
 
 	apps "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 type masterScaler struct {
@@ -46,7 +46,7 @@ func (s *masterScaler) Scale(meta metav1.Object, oldSet *apps.StatefulSet, newSe
 	} else if scaling < 0 {
 		return s.ScaleIn(meta, oldSet, newSet)
 	}
-	return s.SyncAutoScalerAnn(meta, oldSet)
+	return nil
 }
 
 func (s *masterScaler) ScaleOut(meta metav1.Object, oldSet *apps.StatefulSet, newSet *apps.StatefulSet) error {
@@ -94,11 +94,6 @@ func (s *masterScaler) ScaleIn(meta metav1.Object, oldSet *apps.StatefulSet, new
 	}
 
 	klog.Infof("scaling in dm-master statefulset %s/%s, ordinal: %d (replicas: %d, delete slots: %v)", oldSet.Namespace, oldSet.Name, ordinal, replicas, deleteSlots.List())
-
-	//if controller.PodWebhookEnabled {
-	//	setReplicasAndDeleteSlots(newSet, replicas, deleteSlots)
-	//	return nil
-	//}
 
 	// If the dm-master pod was dm-master leader during scale-in, we would evict dm-master leader first
 	// If the dm-master statefulSet would be scale-in to zero and the dm-master-0 was going to be deleted,
@@ -167,10 +162,6 @@ func (s *masterScaler) ScaleIn(meta metav1.Object, oldSet *apps.StatefulSet, new
 	return nil
 }
 
-func (s *masterScaler) SyncAutoScalerAnn(meta metav1.Object, oldSet *apps.StatefulSet) error {
-	return nil
-}
-
 type fakeMasterScaler struct{}
 
 // NewFakeMasterScaler returns a fake Scaler
@@ -194,9 +185,5 @@ func (s *fakeMasterScaler) ScaleOut(_ metav1.Object, oldSet *apps.StatefulSet, n
 
 func (s *fakeMasterScaler) ScaleIn(_ metav1.Object, oldSet *apps.StatefulSet, newSet *apps.StatefulSet) error {
 	setReplicasAndDeleteSlots(newSet, *oldSet.Spec.Replicas-1, nil)
-	return nil
-}
-
-func (s *fakeMasterScaler) SyncAutoScalerAnn(dc metav1.Object, actual *apps.StatefulSet) error {
 	return nil
 }

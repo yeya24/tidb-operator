@@ -19,6 +19,8 @@ type BackupExpansion interface{}
 
 type BackupScheduleExpansion interface{}
 
+type CompactBackupExpansion interface{}
+
 type DMClusterExpansion interface{}
 
 type DataResourceExpansion interface{}
@@ -27,8 +29,10 @@ type RestoreExpansion interface{}
 
 type TidbClusterExpansion interface{}
 
-type TidbClusterAutoScalerExpansion interface{}
+type TidbDashboardExpansion interface{}
 
 type TidbInitializerExpansion interface{}
 
 type TidbMonitorExpansion interface{}
+
+type TidbNGMonitoringExpansion interface{}

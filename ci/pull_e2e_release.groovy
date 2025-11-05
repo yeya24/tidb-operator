@@ -37,32 +37,13 @@ metadata:
 spec:
   containers:
   - name: main
-    image: gcr.io/k8s-testimages/kubekins-e2e:v20200311-1e25827-master
+    image: hub.pingcap.net/tidb-operator/kubekins-e2e:v8-go1.23.1
     command:
     - runner.sh
-    # Clean containers on TERM signal in root process to avoid cgroup leaking.
-    # https://github.com/pingcap/tidb-operator/issues/1603#issuecomment-582402196
     - exec
     - bash
     - -c
     - |
-      function clean() {
-        echo "info: clean all containers to avoid cgroup leaking"
-        docker kill `docker ps -q` || true
-        docker system prune -af || true
-      }
-      function setup_docker_mirror() {
-        cat > /etc/docker/daemon.json <<EOF
-        {
-          "registry-mirrors": [
-            "https://registry-mirror.pingcap.net"
-          ]
-        }
-      EOF
-        service docker restart
-      }
-      setup_docker_mirror
-      trap clean TERM
       sleep 1d & wait
     # we need privileged mode in order to do docker in docker
     securityContext:
@@ -122,18 +103,6 @@ spec:
     key: tidb-operator
     operator: Exists
   affinity:
-<% if (!any) { %>
-    # run on nodes prepared for tidb-operator by default
-    # https://github.com/pingcap/tidb-operator/issues/1603
-    nodeAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        nodeSelectorTerms:
-        - matchExpressions:
-          - key: ci.pingcap.com
-            operator: In
-            values:
-            - tidb-operator
-<% } %>
     podAntiAffinity:
       preferredDuringSchedulingIgnoredDuringExecution:
       - weight: 100
@@ -167,7 +136,7 @@ e2ePodResources = [
 ]
 
 def build(String name, String code, Map resources = e2ePodResources) {
-    podTemplate(yaml: buildPodYAML(resources: resources)) {
+    podTemplate(yaml: buildPodYAML(resources: resources), namespace: "jenkins-tidb-operator", cloud: "kubernetes-ng") {
         node(POD_LABEL) {
             container('main') {
                 def WORKSPACE = pwd()
@@ -176,8 +145,6 @@ def build(String name, String code, Map resources = e2ePodResources) {
                     dir("${WORKSPACE}/go/src/github.com/pingcap/tidb-operator") {
                         unstash 'tidb-operator'
                         stage("Debug Info") {
-                            println "debug host: 172.16.5.15"
-                            println "debug command: kubectl -n jenkins-ci exec -ti ${NODE_NAME} bash"
                             sh """
                             echo "====== shell env ======"
                             echo "pwd: \$(pwd)"
@@ -240,7 +207,7 @@ try {
     timeout (time: 2, unit: 'HOURS') {
         // use fixed label, so we can reuse previous workers
         // increase version in pod label when we update pod template
-        def buildPodLabel = "tidb-operator-build-v1-pingcap-docker-mirror"
+        def buildPodLabel = "tidb-operator-build-v5-pingcap-docker-mirror"
         def resources = [
             requests: [
                 cpu: "6",
@@ -252,11 +219,13 @@ try {
             ],
         ]
         podTemplate(
+            cloud: "kubernetes-ng",
+            namespace: "jenkins-tidb-operator",
             label: buildPodLabel,
             yaml: buildPodYAML(resources: resources, any: true),
             // We allow this pod to remain active for a while, later jobs can
             // reuse cache in previous created nodes.
-            idleMinutes: 180,
+            idleMinutes: 30,
         ) {
         node(buildPodLabel) {
             container("main") {
@@ -268,19 +237,35 @@ try {
                         # we run as root in our pods, this is required
                         # otherwise jenkins agent will fail because of the lack of permission
                         chown -R 1000:1000 .
+                        git config --global --add safe.directory '*'
                         """
 
                         // clean stale files because we may reuse previous created nodes
                         deleteDir()
 
-                        checkout changelog: false, poll: false, scm: [
-                                $class: 'GitSCM',
-                                branches: [[name: "${GIT_REF}"]],
-                                userRemoteConfigs: [[
-                                    refspec: '+refs/heads/*:refs/remotes/origin/* +refs/pull/*:refs/remotes/origin/pull/*',
-                                    url: "${params.GIT_URL}",
-                                ]]
+                        try {
+                            checkout changelog: false, poll: false, scm: [
+                                    $class: 'GitSCM',
+                                    branches: [[name: "${GIT_REF}"]],
+                                    userRemoteConfigs: [[
+                                            refspec: '+refs/heads/*:refs/remotes/origin/* +refs/pull/*:refs/remotes/origin/pull/*',
+                                            url: "${params.GIT_URL}",
+                                    ]]
                             ]
+                        } catch (info) {
+                            retry(3) {
+                                echo "checkout failed, retry.."
+                                sleep 10
+                                checkout changelog: false, poll: false, scm: [
+                                        $class: 'GitSCM',
+                                        branches: [[name: "${GIT_REF}"]],
+                                        userRemoteConfigs: [[
+                                                refspec: '+refs/heads/*:refs/remotes/origin/* +refs/pull/*:refs/remotes/origin/pull/*',
+                                                url: "${params.GIT_URL}",
+                                        ]]
+                                ]
+                            }
+                        }
 
                         GITHASH = sh(returnStdout: true, script: "git rev-parse HEAD").trim()
                         IMAGE_TAG = env.JOB_NAME + "-" + GITHASH.substring(0, 6)
@@ -293,7 +278,9 @@ try {
                             sh """#!/bin/bash
                             set -eu
                             echo "info: building"
-                            make build e2e-build
+                            GOARCH=arm64 make build
+                            GOARCH=amd64 make build
+                            make e2e-build
                             if [ "${GIT_REF}" == "master" ]; then
                                 echo "info: run unit tests and report coverage results for master branch"
                                 make test GOFLAGS='-race' GO_COVER=y
@@ -311,7 +298,7 @@ try {
                             docker login -u \$USERNAME --password-stdin hub.pingcap.net <<< \$PASSWORD
                             echo "info: build and push images for e2e"
                             echo "test: show docker daemon config file"
-                            cat /etc/docker/daemon.json
+                            cat /etc/docker/daemon.json || true
                             NO_BUILD=y DOCKER_REPO=hub.pingcap.net/tidb-operator-e2e IMAGE_TAG=${IMAGE_TAG} make docker-push e2e-docker-push
                             echo "info: download binaries for e2e"
                             SKIP_BUILD=y SKIP_IMAGE_BUILD=y SKIP_UP=y SKIP_TEST=y SKIP_DOWN=y ./hack/e2e.sh
@@ -334,24 +321,19 @@ try {
         if (GIT_REF ==~ /^(master|)$/ || GIT_REF ==~ /^(release-.*)$/
             || GIT_REF ==~ /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/) {
             // Upload assets if the git ref is the master branch or version tag
-            podTemplate(yaml: buildPodYAML(resources: [requests: [cpu: "1", memory: "2Gi"]])) {
+            podTemplate(yaml: buildPodYAML(resources: [requests: [cpu: "1", memory: "2Gi"]]),
+                        cloud: "kubernetes-ng", namespace: "jenkins-tidb-operator",
+            ) {
                 node(POD_LABEL) {
                     container("main") {
                         dir("${PROJECT_DIR}") {
                             unstash 'tidb-operator'
                             stage('upload tidb-operator binaries and charts'){
-                                withCredentials([
-                                    string(credentialsId: 'UCLOUD_PUBLIC_KEY', variable: 'UCLOUD_PUBLIC_KEY'),
-                                    string(credentialsId: 'UCLOUD_PRIVATE_KEY', variable: 'UCLOUD_PRIVATE_KEY'),
-                                ]) {
-                                    sh """
-                                    export UCLOUD_UFILE_PROXY_HOST=pingcap-dev.hk.ufileos.com
-                                    export UCLOUD_UFILE_BUCKET=pingcap-dev
-                                    export BUILD_BRANCH=${GIT_REF}
-                                    export GITHASH=${GITHASH}
-                                    ./ci/upload-binaries-charts.sh
-                                    """
-                                }
+                              sh """
+                              export BUILD_BRANCH=${GIT_REF}
+                              export GITHASH=${GITHASH}
+                              ./ci/upload-binaries-charts.sh
+                              """
                             }
                         }
                     }

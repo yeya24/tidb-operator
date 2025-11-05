@@ -26,6 +26,7 @@ const (
 	defaultBinlogImage  = "pingcap/tidb-binlog"
 	defaultTiFlashImage = "pingcap/tiflash"
 	defaultTiCDCImage   = "pingcap/ticdc"
+	defaultTiProxyImage = "pingcap/tiproxy"
 )
 
 var (
@@ -36,6 +37,9 @@ func SetTidbClusterDefault(tc *v1alpha1.TidbCluster) {
 	setTidbClusterSpecDefault(tc)
 	if tc.Spec.PD != nil {
 		setPdSpecDefault(tc)
+	}
+	if tc.Spec.PDMS != nil {
+		setPDMSSpecDefault(tc)
 	}
 	if tc.Spec.TiKV != nil {
 		setTikvSpecDefault(tc)
@@ -51,6 +55,9 @@ func SetTidbClusterDefault(tc *v1alpha1.TidbCluster) {
 	}
 	if tc.Spec.TiCDC != nil {
 		setTiCDCSpecDefault(tc)
+	}
+	if tc.Spec.TiProxy != nil {
+		setTiProxySpecDefault(tc)
 	}
 }
 
@@ -69,6 +76,12 @@ func setTidbClusterSpecDefault(tc *v1alpha1.TidbCluster) {
 	retainPVP := corev1.PersistentVolumeReclaimRetain
 	if tc.Spec.PVReclaimPolicy == nil {
 		tc.Spec.PVReclaimPolicy = &retainPVP
+	}
+
+	if tc.Spec.Cluster != nil {
+		if tc.Spec.Cluster.Name != "" && tc.Spec.Cluster.Namespace == "" {
+			tc.Spec.Cluster.Namespace = tc.GetNamespace()
+		}
 	}
 }
 
@@ -102,6 +115,9 @@ func setTikvSpecDefault(tc *v1alpha1.TidbCluster) {
 	if tc.Spec.TiKV.MaxFailoverCount == nil {
 		tc.Spec.TiKV.MaxFailoverCount = pointer.Int32Ptr(3)
 	}
+	if tc.Spec.TiKV.SpareVolReplaceReplicas == nil {
+		tc.Spec.TiKV.SpareVolReplaceReplicas = pointer.Int32Ptr(1)
+	}
 }
 
 func setPdSpecDefault(tc *v1alpha1.TidbCluster) {
@@ -112,6 +128,19 @@ func setPdSpecDefault(tc *v1alpha1.TidbCluster) {
 	}
 	if tc.Spec.PD.MaxFailoverCount == nil {
 		tc.Spec.PD.MaxFailoverCount = pointer.Int32Ptr(3)
+	}
+	if tc.Spec.PD.SpareVolReplaceReplicas == nil {
+		tc.Spec.PD.SpareVolReplaceReplicas = pointer.Int32Ptr(1)
+	}
+}
+
+func setPDMSSpecDefault(tc *v1alpha1.TidbCluster) {
+	for _, component := range tc.Spec.PDMS {
+		if len(tc.Spec.Version) > 0 || component.Version != nil {
+			if *component.BaseImage == "" {
+				*component.BaseImage = defaultPDImage
+			}
+		}
 	}
 }
 
@@ -138,6 +167,14 @@ func setTiCDCSpecDefault(tc *v1alpha1.TidbCluster) {
 	if len(tc.Spec.Version) > 0 || tc.Spec.TiCDC.Version != nil {
 		if tc.Spec.TiCDC.BaseImage == "" {
 			tc.Spec.TiCDC.BaseImage = defaultTiCDCImage
+		}
+	}
+}
+
+func setTiProxySpecDefault(tc *v1alpha1.TidbCluster) {
+	if len(tc.Spec.Version) > 0 || tc.Spec.TiProxy.Version != nil {
+		if tc.Spec.TiProxy.BaseImage == "" {
+			tc.Spec.TiProxy.BaseImage = defaultTiProxyImage
 		}
 	}
 }

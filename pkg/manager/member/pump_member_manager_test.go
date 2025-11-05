@@ -19,11 +19,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+	"github.com/pingcap/tidb-operator/pkg/apis/util/config"
+	"github.com/pingcap/tidb-operator/pkg/controller"
+	"github.com/pingcap/tidb-operator/pkg/manager/suspender"
+	mngerutils "github.com/pingcap/tidb-operator/pkg/manager/utils"
+	"github.com/pingcap/tidb-operator/pkg/manager/volumes"
+
 	"github.com/google/go-cmp/cmp"
 	. "github.com/onsi/gomega"
-	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
-	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/util/config"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -51,12 +55,13 @@ func TestPumpMemberManagerSyncCreate(t *testing.T) {
 	}
 
 	type testcase struct {
-		name           string
-		prepare        func(cluster *v1alpha1.TidbCluster)
-		errOnCreateSet bool
-		errOnCreateCm  bool
-		errOnCreateSvc bool
-		expectFn       func(*GomegaWithT, *result)
+		name             string
+		prepare          func(cluster *v1alpha1.TidbCluster)
+		errOnCreateSet   bool
+		errOnCreateCm    bool
+		errOnCreateSvc   bool
+		suspendComponent func() (bool, error)
+		expectFn         func(*GomegaWithT, *result)
 	}
 
 	testFn := func(test *testcase, t *testing.T) {
@@ -79,13 +84,17 @@ func TestPumpMemberManagerSyncCreate(t *testing.T) {
 		if test.errOnCreateCm {
 			ctls.generic.SetCreateOrUpdateError(errors.NewInternalError(fmt.Errorf("API server failed")), 0)
 		}
+		if test.suspendComponent != nil {
+			pmm.suspender.(*suspender.FakeSuspender).SuspendComponentFunc = func(c v1alpha1.Cluster, mt v1alpha1.MemberType) (bool, error) {
+				return test.suspendComponent()
+			}
+		}
 
 		syncErr := pmm.Sync(tc)
 		svc, getSvcErr := pmm.deps.ServiceLister.Services(ns).Get(controller.PumpPeerMemberName(tcName))
 		set, getStsErr := pmm.deps.StatefulSetLister.StatefulSets(ns).Get(controller.PumpMemberName(tcName))
 		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: controller.PumpMemberName(tcName)}}
-		key, err := client.ObjectKeyFromObject(cm)
-		g.Expect(err).To(Succeed())
+		key := client.ObjectKeyFromObject(cm)
 		getCmErr := ctls.generic.FakeCli.Get(context.TODO(), key, cm)
 		result := result{syncErr, svc, getSvcErr, set, getStsErr, cm, getCmErr}
 		test.expectFn(g, &result)
@@ -159,6 +168,20 @@ func TestPumpMemberManagerSyncCreate(t *testing.T) {
 				g.Expect(r.getSvc).To(Succeed())
 			},
 		},
+		{
+			name:             "skip create when suspend",
+			suspendComponent: func() (bool, error) { return true, nil },
+			prepare:          nil,
+			errOnCreateSet:   true,
+			errOnCreateCm:    true,
+			errOnCreateSvc:   true,
+			expectFn: func(g *GomegaWithT, r *result) {
+				g.Expect(r.sync).To(Succeed())
+				g.Expect(r.getSet).NotTo(Succeed())
+				g.Expect(r.getCm).NotTo(Succeed())
+				g.Expect(r.getSvc).NotTo(Succeed())
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -229,8 +252,7 @@ func TestPumpMemberManagerSyncUpdate(t *testing.T) {
 		svc, getSvcErr := pmm.deps.ServiceLister.Services(ns).Get(controller.PumpPeerMemberName(tcName))
 		set, getStsErr := pmm.deps.StatefulSetLister.StatefulSets(ns).Get(controller.PumpMemberName(tcName))
 		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: controller.PumpMemberName(tcName)}}
-		key, err := client.ObjectKeyFromObject(cm)
-		g.Expect(err).To(Succeed())
+		key := client.ObjectKeyFromObject(cm)
 		getCmErr := ctls.generic.FakeCli.Get(context.TODO(), key, cm)
 		result := result{syncErr, oldSvc, svc, getSvcErr, oldSet, set, getStsErr, oldCm, cm, getCmErr}
 		test.expectFn(g, &result)
@@ -255,7 +277,7 @@ func TestPumpMemberManagerSyncUpdate(t *testing.T) {
 				g.Expect(r.sync).To(Succeed())
 				g.Expect(r.svc.Spec.Ports[0].Port).NotTo(Equal(int32(8888)))
 				g.Expect(r.cm.Data["pump-config"]).To(ContainSubstring("stop-write-at-available-space"))
-				g.Expect(*r.set.Spec.Replicas).To(Equal(int32(5)))
+				g.Expect(*r.set.Spec.Replicas).To(Equal(int32(4)))
 			},
 		},
 		{
@@ -397,12 +419,13 @@ func TestSyncConfigUpdate(t *testing.T) {
 				g.Expect(r.listCm).To(Succeed())
 				g.Expect(r.cms).To(HaveLen(2))
 				g.Expect(r.getSet).To(Succeed())
-				using := FindConfigMapVolume(&r.set.Spec.Template.Spec, func(name string) bool {
+				using := mngerutils.FindConfigMapVolume(&r.set.Spec.Template.Spec, func(name string) bool {
 					return strings.HasPrefix(name, controller.PumpMemberName("test"))
 				})
 				g.Expect(using).NotTo(BeEmpty())
 				var usingCm *corev1.ConfigMap
-				for _, cm := range r.cms {
+				for i := range r.cms {
+					cm := r.cms[i]
 					if cm.Name == using {
 						usingCm = &cm
 					}
@@ -433,7 +456,13 @@ type pumpFakeControls struct {
 
 func newFakePumpMemberManager() (*pumpMemberManager, *pumpFakeControls, *pumpFakeIndexers) {
 	fakeDeps := controller.NewFakeDependencies()
-	pmm := &pumpMemberManager{deps: fakeDeps}
+	pmm := &pumpMemberManager{
+		deps:              fakeDeps,
+		scaler:            NewFakePumpScaler(),
+		binlogClient:      &fakeBinlogClient{},
+		suspender:         suspender.NewFakeSuspender(),
+		podVolumeModifier: &volumes.FakePodVolumeModifier{},
+	}
 	controls := &pumpFakeControls{
 		svc:     fakeDeps.ServiceControl.(*controller.FakeServiceControl),
 		set:     fakeDeps.StatefulSetControl.(*controller.FakeStatefulSetControl),
@@ -549,8 +578,8 @@ func TestGetNewPumpHeadlessService(t *testing.T) {
 					Ports: []corev1.ServicePort{
 						{
 							Name:       "pump",
-							Port:       8250,
-							TargetPort: intstr.FromInt(8250),
+							Port:       v1alpha1.DefaultPumpPort,
+							TargetPort: intstr.FromInt(int(v1alpha1.DefaultPumpPort)),
 							Protocol:   corev1.ProtocolTCP,
 						},
 					},
@@ -566,7 +595,8 @@ func TestGetNewPumpHeadlessService(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
+	for i := range tests {
+		tt := tests[i]
 		t.Run(tt.name, func(t *testing.T) {
 			svc := getNewPumpHeadlessService(&tt.tc)
 			if diff := cmp.Diff(tt.expected, *svc); diff != "" {
@@ -688,7 +718,8 @@ func TestGetNewPumpConfigMap(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
+	for i := range tests {
+		tt := tests[i]
 		t.Run(tt.name, func(t *testing.T) {
 			cm, err := getNewPumpConfigMap(&tt.tc)
 			g.Expect(err).To(Succeed())
@@ -707,7 +738,7 @@ func TestSyncTiDBClusterStatus(t *testing.T) {
 		updateTC func(*appsv1.StatefulSet)
 		// TODO check work as expected
 		// `upgradingFn` is unused
-		// nolint(structcheck)
+		// nolint: structcheck
 		upgradingFn func(corelisters.PodLister, *appsv1.StatefulSet, *v1alpha1.TidbCluster) (bool, error)
 		errExpectFn func(*GomegaWithT, error)
 		tcExpectFn  func(*GomegaWithT, *v1alpha1.TidbCluster)
@@ -757,4 +788,15 @@ func TestSyncTiDBClusterStatus(t *testing.T) {
 		t.Logf(tests[i].name)
 		testFn(&tests[i], t)
 	}
+}
+
+type fakeBinlogClient struct {
+}
+
+func (c *fakeBinlogClient) PumpNodeStatus(ctx context.Context) (status []*v1alpha1.PumpNodeStatus, err error) {
+	return nil, nil
+}
+
+func (c *fakeBinlogClient) Close() error {
+	return nil
 }

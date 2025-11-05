@@ -62,6 +62,7 @@ Environments:
     KUBE_WORKERS          the number of worker nodes (excludes master nodes), defaults: 3
     DOCKER_IO_MIRROR      configure mirror for docker.io
     GCR_IO_MIRROR         configure mirror for gcr.io
+    K8S_GCR_IO_MIRROR     configure mirror for k8s.gcr.io
     QUAY_IO_MIRROR        configure mirror for quay.io
     KIND_DATA_HOSTPATH    (kind only) the host path of data directory for kind cluster, defaults: none
     KIND_ETCD_DATADIR     (kind only) the host path of etcd data directory for kind cluster, defaults: none
@@ -200,10 +201,11 @@ AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
 AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
 AWS_REGION=${AWS_REGION:-}
 AWS_ZONE=${AWS_ZONE:-}
-KUBE_VERSION=${KUBE_VERSION:-v1.18.2}
+KUBE_VERSION=${KUBE_VERSION:-v1.28.0}
 KUBE_WORKERS=${KUBE_WORKERS:-3}
 DOCKER_IO_MIRROR=${DOCKER_IO_MIRROR:-}
 GCR_IO_MIRROR=${GCR_IO_MIRROR:-}
+K8S_GCR_IO_MIRROR=${K8S_GCR_IO_MIRROR:-}
 QUAY_IO_MIRROR=${QUAY_IO_MIRROR:-}
 SKIP_GINKGO=${SKIP_GINKGO:-}
 RUNNER_SUITE_NAME=${RUNNER_SUITE_NAME:-}
@@ -236,19 +238,17 @@ echo "KUBE_VERSION: $KUBE_VERSION"
 echo "KUBE_WORKERS: $KUBE_WORKERS"
 echo "DOCKER_IO_MIRROR: $DOCKER_IO_MIRROR"
 echo "GCR_IO_MIRROR: $GCR_IO_MIRROR"
+echo "K8S_GCR_IO_MIRROR: $K8S_GCR_IO_MIRROR"
 echo "QUAY_IO_MIRROR: $QUAY_IO_MIRROR"
 echo "ARTIFACTS: $ARTIFACTS"
 
-# https://github.com/kubernetes-sigs/kind/releases/tag/v0.8.1
+# https://github.com/kubernetes-sigs/kind/releases/tag/v0.19.0
 declare -A kind_node_images
-kind_node_images["v1.11.10"]="kindest/node:v1.11.10@sha256:74c8740710649a3abb169e7f348312deff88fc97d74cfb874c5095ab3866bb42"
-kind_node_images["v1.12.10"]="kindest/node:v1.12.10@sha256:faeb82453af2f9373447bb63f50bae02b8020968e0889c7fa308e19b348916cb"
-kind_node_images["v1.13.12"]="kindest/node:v1.13.12@sha256:214476f1514e47fe3f6f54d0f9e24cfb1e4cda449529791286c7161b7f9c08e7"
-kind_node_images["v1.14.10"]="kindest/node:v1.14.10@sha256:6cd43ff41ae9f02bb46c8f455d5323819aec858b99534a290517ebc181b443c6"
-kind_node_images["v1.15.11"]="kindest/node:v1.15.11@sha256:6cc31f3533deb138792db2c7d1ffc36f7456a06f1db5556ad3b6927641016f50"
-kind_node_images["v1.16.9"]="kindest/node:v1.16.9@sha256:7175872357bc85847ec4b1aba46ed1d12fa054c83ac7a8a11f5c268957fd5765"
-kind_node_images["v1.17.5"]="kindest/node:v1.17.5@sha256:ab3f9e6ec5ad8840eeb1f76c89bb7948c77bbf76bcebe1a8b59790b8ae9a283a"
-kind_node_images["v1.18.2"]="kindest/node:v1.18.2@sha256:7b27a6d0f2517ff88ba444025beae41491b016bc6af573ba467b70c5e8e0d85f"
+kind_node_images["v1.24.13"]="kindest/node:v1.24.13@sha256:cea86276e698af043af20143f4bf0509e730ec34ed3b7fa790cc0bea091bc5dd"
+kind_node_images["v1.25.9"]="kindest/node:v1.25.9@sha256:c08d6c52820aa42e533b70bce0c2901183326d86dcdcbedecc9343681db45161"
+kind_node_images["v1.26.4"]="kindest/node:v1.26.4@sha256:f4c0d87be03d6bea69f5e5dc0adb678bb498a190ee5c38422bf751541cebe92e"
+kind_node_images["v1.27.1"]="kindest/node:v1.27.1@sha256:b7d12ed662b873bd8510879c1846e87c7e676a79fefc93e17b2a52989d3ff42b"
+kind_node_images["v1.28.0"]="kindest/node:v1.28.0@sha256:dad5a6238c5e41d7cac405fae3b5eda2ad1de6f1190fa8bfc64ff5bb86173213"
 
 function e2e::image_build() {
     if [ -n "$SKIP_BUILD" ]; then
@@ -265,49 +265,14 @@ function e2e::image_build() {
     DOCKER_REPO=$DOCKER_REPO IMAGE_TAG=$IMAGE_TAG make e2e-docker
 }
 
-function e2e::__restart_docker() {
-    echo "info: restarting docker"
-    service docker restart
-    # the service can be started but the docker socket not ready, wait for ready
-    local WAIT_N=0
-    local MAX_WAIT=5
-    while true; do
-        # docker ps -q should only work if the daemon is ready
-        docker ps -q > /dev/null 2>&1 && break
-        if [[ ${WAIT_N} -lt ${MAX_WAIT} ]]; then
-            WAIT_N=$((WAIT_N+1))
-            echo "info; Waiting for docker to be ready, sleeping for ${WAIT_N} seconds."
-            sleep ${WAIT_N}
-        else
-            echo "info: Reached maximum attempts, not waiting any longer..."
-            break
-        fi
-    done
-    echo "info: done restarting docker"
-}
-
-function e2e::__configure_docker_mirror_for_dind() {
-    echo "info: configure docker.io mirror '$DOCKER_IO_MIRROR' for DinD"
-cat <<EOF > /etc/docker/daemon.json.tmp
-{
-    "registry-mirrors": ["$DOCKER_IO_MIRROR"]
-}
-EOF
-    if diff /etc/docker/daemon.json.tmp /etc/docker/daemon.json 1>/dev/null 2>&1; then
-        echo "info: already configured"
-        rm /etc/docker/daemon.json.tmp
-    else
-        mv /etc/docker/daemon.json.tmp /etc/docker/daemon.json
-        e2e::__restart_docker
-    fi
-}
-
 # TODO: review this
 function e2e::create_kindconfig() {
     local tmpfile=${1}
     cat <<EOF > $tmpfile
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  serviceSubnet: "10.234.0.0/18"
 kubeadmConfigPatches:
 - |
   kind: ClusterConfiguration
@@ -336,7 +301,7 @@ kubeadmConfigPatches:
   controllerManagerExtraArgs:
     v: "4"
 EOF
-    if [ -n "$DOCKER_IO_MIRROR" -o -n "$GCR_IO_MIRROR" -o -n "$QUAY_IO_MIRROR" ]; then
+    if [ -n "$DOCKER_IO_MIRROR" -o -n "$GCR_IO_MIRROR" -o -n "$K8S_GCR_IO_MIRROR" -o -n "$QUAY_IO_MIRROR" ]; then
 cat <<EOF >> $tmpfile
 containerdConfigPatches:
 - |-
@@ -351,6 +316,12 @@ EOF
 cat <<EOF >> $tmpfile
   [plugins."io.containerd.grpc.v1.cri".registry.mirrors."gcr.io"]
     endpoint = ["$GCR_IO_MIRROR"]
+EOF
+        fi
+        if [ -n "$K8S_GCR_IO_MIRROR" ]; then
+cat <<EOF >> $tmpfile
+  [plugins."io.containerd.grpc.v1.cri".registry.mirrors."k8s.gcr.io"]
+    endpoint = ["$K8S_GCR_IO_MIRROR"]
 EOF
         fi
         if [ -n "$QUAY_IO_MIRROR" ]; then
@@ -418,10 +389,6 @@ EOF
 hack::ensure_kind
 hack::ensure_kubectl
 hack::ensure_helm
-
-if [ -n "$DOCKER_IO_MIRROR" -a -n "${DOCKER_IN_DOCKER_ENABLED:-}" ]; then
-    e2e::__configure_docker_mirror_for_dind
-fi
 
 e2e::image_build
 
@@ -619,7 +586,7 @@ echo "info: run 'kubetest2 ${kubetest2_args[@]} -- hack/run-e2e.sh $@'"
 #     --up \
 #     --down \
 #     --test exec \
-#     --image-name kindest/node:v1.18.2@sha256:7b27a6d0f2517ff88ba444025beae41491b016bc6af573ba467b70c5e8e0d85f \
+#     --image-name kindest/node:v1.21.14@sha256:8a4e9bb3f415d2bb81629ce33ef9c76ba514c14d707f9797a01e3216376ba093 \
 #     --up-retries 3 \
 #     --cluster-name tidb-operator \
 #     --config /tmp/tmp.bZOmp7Cgh2 \

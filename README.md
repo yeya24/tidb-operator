@@ -6,7 +6,6 @@
 - **Mailing list**: [Google Group](https://groups.google.com/forum/#!forum/tidb-user)
 - [**For support, please contact PingCAP**](http://bit.ly/contact_us_via_github)
 
-[![Build Status](https://internal.pingcap.net/idc-jenkins/job/tidb-operator-master/badge/icon)](https://internal.pingcap.net/idc-jenkins/job/tidb-operator-master)
 [![codecov](https://codecov.io/gh/pingcap/tidb-operator/branch/master/graph/badge.svg)](https://codecov.io/gh/pingcap/tidb-operator)
 [![LICENSE](https://img.shields.io/github/license/pingcap/tidb-operator.svg)](https://github.com/pingcap/tidb-operator/blob/master/LICENSE)
 [![Language](https://img.shields.io/badge/Language-Go-blue.svg)](https://golang.org/)
@@ -42,7 +41,13 @@ TiDB Operator manages [TiDB](https://github.com/pingcap/tidb) clusters on [Kuber
 
 - __Automatically monitoring TiDB cluster at creating__
 
-    Automatically deploy Prometheus, Grafana for TiDB cluster monitoring.
+    Automatically deploy Prometheus, Grafana for TiDB cluster monitoring, support the following features:
+     
+    - Monitoring multiple clusters across multiple namespaces.
+    - Multiple replicas.
+    - Targets sharding.
+    - Updating configurations and rules dynamically.
+    - Thanos framework integration.
 
 - __Heterogeneous cluster__
 
@@ -65,10 +70,6 @@ All the TiDB Operator documentation is maintained in the [docs-tidb-operator rep
 
 - [English](https://www.pingcap.com/blog/)
 - [简体中文](https://pingcap.com/blog-cn/)
-
-## TiDB Monthly
-
-[TiDB Monthly](https://pingcap.com/weekly/)
 
 ## Community
 

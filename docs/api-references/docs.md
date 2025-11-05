@@ -20,8 +20,6 @@ Resource Types:
 </li><li>
 <a href="#tidbcluster">TidbCluster</a>
 </li><li>
-<a href="#tidbclusterautoscaler">TidbClusterAutoScaler</a>
-</li><li>
 <a href="#tidbinitializer">TidbInitializer</a>
 </li><li>
 <a href="#tidbmonitor">TidbMonitor</a>
@@ -59,7 +57,7 @@ string
 <td>
 <code>metadata</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#objectmeta-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta">
 Kubernetes meta/v1.ObjectMeta
 </a>
 </em>
@@ -86,7 +84,7 @@ BackupSpec
 <td>
 <code>resources</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -98,7 +96,7 @@ Kubernetes core/v1.ResourceRequirements
 <td>
 <code>env</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#envvar-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core">
 []Kubernetes core/v1.EnvVar
 </a>
 </em>
@@ -147,7 +145,20 @@ BackupType
 </em>
 </td>
 <td>
-<p>Type is the backup type for tidb cluster.</p>
+<p>Type is the backup type for tidb cluster and only used when Mode = snapshot, such as full, db, table.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>backupMode</code></br>
+<em>
+<a href="#backupmode">
+BackupMode
+</a>
+</em>
+</td>
+<td>
+<p>Mode is the backup mode, such as snapshot backup or log backup.</p>
 </td>
 </tr>
 <tr>
@@ -176,7 +187,9 @@ StorageProvider
 <p>
 (Members of <code>StorageProvider</code> are embedded into this type.)
 </p>
-<p>StorageProvider configures where and how backups should be stored.</p>
+<p>StorageProvider configures where and how backups should be stored.
+*** Note: This field should generally not be left empty, unless you are certain the storage provider
+*** can be obtained from another source, such as a schedule CR.</p>
 </td>
 </tr>
 <tr>
@@ -213,7 +226,100 @@ BRConfig
 </em>
 </td>
 <td>
-<p>BRConfig is the configs for BR</p>
+<p>BRConfig is the configs for BR
+*** Note: This field should generally not be left empty, unless you are certain the BR config
+*** can be obtained from another source, such as a schedule CR.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>commitTs</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>CommitTs is the commit ts of the backup, snapshot ts for full backup or start ts for log backup.
+Format supports TSO or datetime, e.g. &lsquo;400036290571534337&rsquo;, &lsquo;2018-05-11 01:42:23&rsquo;.
+Default is current timestamp.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>logSubcommand</code></br>
+<em>
+<a href="#logsubcommandtype">
+LogSubCommandType
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Subcommand is the subcommand for BR, such as start, stop, pause etc.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>logTruncateUntil</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>LogTruncateUntil is log backup truncate until timestamp.
+Format supports TSO or datetime, e.g. &lsquo;400036290571534337&rsquo;, &lsquo;2018-05-11 01:42:23&rsquo;.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>logStop</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>LogStop indicates that will stop the log backup.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>calcSizeLevel</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>CalcSizeLevel determines how to size calculation of snapshots for EBS volume snapshot backup</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>federalVolumeBackupPhase</code></br>
+<em>
+<a href="#federalvolumebackupphase">
+FederalVolumeBackupPhase
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>FederalVolumeBackupPhase indicates which phase to execute in federal volume backup</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>resumeGcSchedule</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ResumeGcSchedule indicates whether resume gc and pd scheduler for EBS volume snapshot backup</p>
 </td>
 </tr>
 <tr>
@@ -233,7 +339,7 @@ DumplingConfig
 <td>
 <code>tolerations</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#toleration-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core">
 []Kubernetes core/v1.Toleration
 </a>
 </em>
@@ -253,14 +359,15 @@ string
 <td>
 <em>(Optional)</em>
 <p>ToolImage specifies the tool image used in <code>Backup</code>, which supports BR and Dumpling images.
-For examples <code>spec.toolImage: pingcap/br:v4.0.8</code> or <code>spec.toolImage: pingcap/dumpling:v4.0.8</code></p>
+For examples <code>spec.toolImage: pingcap/br:v4.0.8</code> or <code>spec.toolImage: pingcap/dumpling:v4.0.8</code>
+For BR image, if it does not contain tag, Pod will use image &lsquo;ToolImage:${TiKV_Version}&rsquo;.</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>imagePullSecrets</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#localobjectreference-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core">
 []Kubernetes core/v1.LocalObjectReference
 </a>
 </em>
@@ -285,7 +392,7 @@ For examples <code>spec.toolImage: pingcap/br:v4.0.8</code> or <code>spec.toolIm
 <td>
 <code>affinity</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#affinity-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#affinity-v1-core">
 Kubernetes core/v1.Affinity
 </a>
 </em>
@@ -332,9 +439,22 @@ CleanPolicyType
 </tr>
 <tr>
 <td>
+<code>cleanOption</code></br>
+<em>
+<a href="#cleanoption">
+CleanOption
+</a>
+</em>
+</td>
+<td>
+<p>CleanOption controls the behavior of clean.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>podSecurityContext</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#podsecuritycontext-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podsecuritycontext-v1-core">
 Kubernetes core/v1.PodSecurityContext
 </a>
 </em>
@@ -342,6 +462,69 @@ Kubernetes core/v1.PodSecurityContext
 <td>
 <em>(Optional)</em>
 <p>PodSecurityContext of the component</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>priorityClassName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>PriorityClassName of Backup Job Pods</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>backoffRetryPolicy</code></br>
+<em>
+<a href="#backoffretrypolicy">
+BackoffRetryPolicy
+</a>
+</em>
+</td>
+<td>
+<p>BackoffRetryPolicy the backoff retry policy, currently only valid for snapshot backup</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>additionalVolumes</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volume-v1-core">
+[]Kubernetes core/v1.Volume
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Additional volumes of component pod.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>additionalVolumeMounts</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volumemount-v1-core">
+[]Kubernetes core/v1.VolumeMount
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Additional volume mounts of component pod.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>volumeBackupInitJobMaxActiveSeconds</code></br>
+<em>
+int
+</em>
+</td>
+<td>
+<p>VolumeBackupInitJobMaxActiveSeconds represents the deadline (in seconds) of the vbk init job</p>
 </td>
 </tr>
 </table>
@@ -394,7 +577,7 @@ string
 <td>
 <code>metadata</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#objectmeta-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta">
 Kubernetes meta/v1.ObjectMeta
 </a>
 </em>
@@ -466,6 +649,17 @@ string
 </tr>
 <tr>
 <td>
+<code>compactInterval</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>CompactInterval is to specify how long backups we want to compact.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>backupTemplate</code></br>
 <em>
 <a href="#backupspec">
@@ -475,6 +669,48 @@ BackupSpec
 </td>
 <td>
 <p>BackupTemplate is the specification of the backup structure to get scheduled.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>logBackupTemplate</code></br>
+<em>
+<a href="#backupspec">
+BackupSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>LogBackupTemplate is the specification of the log backup structure to get scheduled.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>compactBackupTemplate</code></br>
+<em>
+<a href="#compactspec">
+CompactSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>CompactBackupTemplate is the specification of the compact backup structure to get scheduled.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>minCompactStartTs</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>MinCompactStartTs specifies the minimum start timestamp for compact backup.
+If the calculated start ts is less than this value, it will be adjusted to this value.
+Format supports TSO or datetime, e.g. &lsquo;400036290571534337&rsquo;, &lsquo;2018-05-11 01:42:23&rsquo;.</p>
 </td>
 </tr>
 <tr>
@@ -505,7 +741,7 @@ string
 <td>
 <code>imagePullSecrets</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#localobjectreference-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core">
 []Kubernetes core/v1.LocalObjectReference
 </a>
 </em>
@@ -513,6 +749,37 @@ string
 <td>
 <em>(Optional)</em>
 <p>ImagePullSecrets is an optional list of references to secrets in the same namespace to use for pulling any of the images.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>br</code></br>
+<em>
+<a href="#brconfig">
+BRConfig
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>BRConfig is the configs for BR</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>StorageProvider</code></br>
+<em>
+<a href="#storageprovider">
+StorageProvider
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>StorageProvider</code> are embedded into this type.)
+</p>
+<em>(Optional)</em>
+<p>StorageProvider configures where and how backups should be stored.</p>
 </td>
 </tr>
 </table>
@@ -565,7 +832,7 @@ string
 <td>
 <code>metadata</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#objectmeta-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta">
 Kubernetes meta/v1.ObjectMeta
 </a>
 </em>
@@ -670,7 +937,7 @@ string
 <td>
 <code>pvReclaimPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#persistentvolumereclaimpolicy-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumereclaimpolicy-v1-core">
 Kubernetes core/v1.PersistentVolumeReclaimPolicy
 </a>
 </em>
@@ -683,7 +950,7 @@ Kubernetes core/v1.PersistentVolumeReclaimPolicy
 <td>
 <code>imagePullPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#pullpolicy-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#pullpolicy-v1-core">
 Kubernetes core/v1.PullPolicy
 </a>
 </em>
@@ -696,7 +963,7 @@ Kubernetes core/v1.PullPolicy
 <td>
 <code>imagePullSecrets</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#localobjectreference-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core">
 []Kubernetes core/v1.LocalObjectReference
 </a>
 </em>
@@ -704,6 +971,23 @@ Kubernetes core/v1.PullPolicy
 <td>
 <em>(Optional)</em>
 <p>ImagePullSecrets is an optional list of references to secrets in the same namespace to use for pulling any of the images.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>configUpdateStrategy</code></br>
+<em>
+<a href="#configupdatestrategy">
+ConfigUpdateStrategy
+</a>
+</em>
+</td>
+<td>
+<p>ConfigUpdateStrategy determines how the configuration change is applied to the cluster.
+UpdateStrategyInPlace will update the ConfigMap of configuration in-place and an extra rolling-update of the
+cluster component is needed to reload the configuration change.
+UpdateStrategyRollingUpdate will create a new ConfigMap with the new configuration and rolling-update the
+related components to use the new ConfigMap, that is, the new configuration will be applied automatically.</p>
 </td>
 </tr>
 <tr>
@@ -764,7 +1048,7 @@ Optional: Defaults to false</p>
 <td>
 <code>affinity</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#affinity-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#affinity-v1-core">
 Kubernetes core/v1.Affinity
 </a>
 </em>
@@ -808,7 +1092,21 @@ map[string]string
 </td>
 <td>
 <em>(Optional)</em>
-<p>Base annotations of DM cluster Pods, components may add or override selectors upon this respectively</p>
+<p>Additional annotations for the dm cluster
+Can be overrode by annotations in master spec or worker spec</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>labels</code></br>
+<em>
+map[string]string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Additional labels for the dm cluster
+Can be overrode by labels in master spec or worker spec</p>
 </td>
 </tr>
 <tr>
@@ -828,7 +1126,7 @@ Optional: Defaults to UTC</p>
 <td>
 <code>tolerations</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#toleration-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core">
 []Kubernetes core/v1.Toleration
 </a>
 </em>
@@ -840,9 +1138,37 @@ Optional: Defaults to UTC</p>
 </tr>
 <tr>
 <td>
+<code>dnsConfig</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#poddnsconfig-v1-core">
+Kubernetes core/v1.PodDNSConfig
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>DNSConfig Specifies the DNS parameters of a pod.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>dnsPolicy</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#dnspolicy-v1-core">
+Kubernetes core/v1.DNSPolicy
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>DNSPolicy Specifies the DNSPolicy parameters of a pod.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>podSecurityContext</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#podsecuritycontext-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podsecuritycontext-v1-core">
 Kubernetes core/v1.PodSecurityContext
 </a>
 </em>
@@ -850,6 +1176,76 @@ Kubernetes core/v1.PodSecurityContext
 <td>
 <em>(Optional)</em>
 <p>PodSecurityContext of the component</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>statefulSetUpdateStrategy</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#statefulsetupdatestrategytype-v1-apps">
+Kubernetes apps/v1.StatefulSetUpdateStrategyType
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>StatefulSetUpdateStrategy of DM cluster StatefulSets</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>podManagementPolicy</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podmanagementpolicytype-v1-apps">
+Kubernetes apps/v1.PodManagementPolicyType
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>PodManagementPolicy of DM cluster StatefulSets</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>topologySpreadConstraints</code></br>
+<em>
+<a href="#topologyspreadconstraint">
+[]TopologySpreadConstraint
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>TopologySpreadConstraints describes how a group of pods ought to spread across topology
+domains. Scheduler will schedule pods in a way which abides by the constraints.
+This field is is only honored by clusters that enables the EvenPodsSpread feature.
+All topologySpreadConstraints are ANDed.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>suspendAction</code></br>
+<em>
+<a href="#suspendaction">
+SuspendAction
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>SuspendAction defines the suspend actions for all component.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>preferIPv6</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>PreferIPv6 indicates whether to prefer IPv6 addresses for all components.</p>
 </td>
 </tr>
 </table>
@@ -903,7 +1299,7 @@ string
 <td>
 <code>metadata</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#objectmeta-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta">
 Kubernetes meta/v1.ObjectMeta
 </a>
 </em>
@@ -930,7 +1326,7 @@ RestoreSpec
 <td>
 <code>resources</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -942,7 +1338,7 @@ Kubernetes core/v1.ResourceRequirements
 <td>
 <code>env</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#envvar-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core">
 []Kubernetes core/v1.EnvVar
 </a>
 </em>
@@ -991,7 +1387,85 @@ BackupType
 </em>
 </td>
 <td>
-<p>Type is the backup type for tidb cluster.</p>
+<p>Type is the backup type for tidb cluster and only used when Mode = snapshot, such as full, db, table.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>restoreMode</code></br>
+<em>
+<a href="#restoremode">
+RestoreMode
+</a>
+</em>
+</td>
+<td>
+<p>Mode is the restore mode. such as snapshot or pitr.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>pitrRestoredTs</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>PitrRestoredTs is the pitr restored ts.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>prune</code></br>
+<em>
+<a href="#prunetype">
+PruneType
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Prune is the prune type for restore, it is optional and can only have two valid values: afterFailed/alreadyFailed</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>logRestoreStartTs</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>LogRestoreStartTs is the start timestamp which log restore from.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>federalVolumeRestorePhase</code></br>
+<em>
+<a href="#federalvolumerestorephase">
+FederalVolumeRestorePhase
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>FederalVolumeRestorePhase indicates which phase to execute in federal volume restore</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>volumeAZ</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>VolumeAZ indicates which AZ the volume snapshots restore to.
+it is only valid for mode of volume-snapshot</p>
 </td>
 </tr>
 <tr>
@@ -1021,6 +1495,20 @@ StorageProvider
 (Members of <code>StorageProvider</code> are embedded into this type.)
 </p>
 <p>StorageProvider configures where and how backups should be stored.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>pitrFullBackupStorageProvider</code></br>
+<em>
+<a href="#storageprovider">
+StorageProvider
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>PitrFullBackupStorageProvider configures where and how pitr dependent full backup should be stored.</p>
 </td>
 </tr>
 <tr>
@@ -1064,7 +1552,7 @@ BRConfig
 <td>
 <code>tolerations</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#toleration-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core">
 []Kubernetes core/v1.Toleration
 </a>
 </em>
@@ -1078,7 +1566,7 @@ BRConfig
 <td>
 <code>affinity</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#affinity-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#affinity-v1-core">
 Kubernetes core/v1.Affinity
 </a>
 </em>
@@ -1120,14 +1608,15 @@ string
 <td>
 <em>(Optional)</em>
 <p>ToolImage specifies the tool image used in <code>Restore</code>, which supports BR and TiDB Lightning images.
-For examples <code>spec.toolImage: pingcap/br:v4.0.8</code> or <code>spec.toolImage: pingcap/tidb-lightning:v4.0.8</code></p>
+For examples <code>spec.toolImage: pingcap/br:v4.0.8</code> or <code>spec.toolImage: pingcap/tidb-lightning:v4.0.8</code>
+For BR image, if it does not contain tag, Pod will use image &lsquo;ToolImage:${TiKV_Version}&rsquo;.</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>imagePullSecrets</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#localobjectreference-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core">
 []Kubernetes core/v1.LocalObjectReference
 </a>
 </em>
@@ -1150,9 +1639,48 @@ For examples <code>spec.toolImage: pingcap/br:v4.0.8</code> or <code>spec.toolIm
 </tr>
 <tr>
 <td>
+<code>warmup</code></br>
+<em>
+<a href="#restorewarmupmode">
+RestoreWarmupMode
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Warmup represents whether to initialize TiKV volumes after volume snapshot restore</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>warmupImage</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>WarmupImage represents using what image to initialize TiKV volumes</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>warmupStrategy</code></br>
+<em>
+<a href="#restorewarmupstrategy">
+RestoreWarmupStrategy
+</a>
+</em>
+</td>
+<td>
+<p>WarmupStrategy</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>podSecurityContext</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#podsecuritycontext-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podsecuritycontext-v1-core">
 Kubernetes core/v1.PodSecurityContext
 </a>
 </em>
@@ -1160,6 +1688,66 @@ Kubernetes core/v1.PodSecurityContext
 <td>
 <em>(Optional)</em>
 <p>PodSecurityContext of the component</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>priorityClassName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>PriorityClassName of Restore Job Pods</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>additionalVolumes</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volume-v1-core">
+[]Kubernetes core/v1.Volume
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Additional volumes of component pod.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>additionalVolumeMounts</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volumemount-v1-core">
+[]Kubernetes core/v1.VolumeMount
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Additional volume mounts of component pod.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>tolerateSingleTiKVOutage</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>TolerateSingleTiKVOutage indicates whether to tolerate a single failure of a store without data loss</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>backoffLimit</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
 </td>
 </tr>
 </table>
@@ -1212,7 +1800,7 @@ string
 <td>
 <code>metadata</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#objectmeta-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta">
 Kubernetes meta/v1.ObjectMeta
 </a>
 </em>
@@ -1276,6 +1864,20 @@ PDSpec
 </tr>
 <tr>
 <td>
+<code>pdms</code></br>
+<em>
+<a href="#pdmsspec">
+[]PDMSSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>PDMS cluster spec</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>tidb</code></br>
 <em>
 <a href="#tidbspec">
@@ -1332,6 +1934,20 @@ TiCDCSpec
 </tr>
 <tr>
 <td>
+<code>tiproxy</code></br>
+<em>
+<a href="#tiproxyspec">
+TiProxySpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>TiProxy cluster spec</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>pump</code></br>
 <em>
 <a href="#pumpspec">
@@ -1373,6 +1989,19 @@ the controller.</p>
 </tr>
 <tr>
 <td>
+<code>recoveryMode</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Whether RecoveryMode is enabled for TiDB cluster to restore
+Optional: Defaults to false</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>version</code></br>
 <em>
 string
@@ -1398,7 +2027,7 @@ string
 <td>
 <code>pvReclaimPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#persistentvolumereclaimpolicy-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumereclaimpolicy-v1-core">
 Kubernetes core/v1.PersistentVolumeReclaimPolicy
 </a>
 </em>
@@ -1411,7 +2040,7 @@ Kubernetes core/v1.PersistentVolumeReclaimPolicy
 <td>
 <code>imagePullPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#pullpolicy-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#pullpolicy-v1-core">
 Kubernetes core/v1.PullPolicy
 </a>
 </em>
@@ -1424,7 +2053,7 @@ Kubernetes core/v1.PullPolicy
 <td>
 <code>imagePullSecrets</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#localobjectreference-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core">
 []Kubernetes core/v1.LocalObjectReference
 </a>
 </em>
@@ -1466,6 +2095,19 @@ Optional: Defaults to false</p>
 </tr>
 <tr>
 <td>
+<code>enablePVCReplace</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Whether enable PVC replace to recreate the PVC with different specs
+Optional: Defaults to false</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>tlsCluster</code></br>
 <em>
 <a href="#tlscluster">
@@ -1496,7 +2138,7 @@ Optional: Defaults to false</p>
 <td>
 <code>affinity</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#affinity-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#affinity-v1-core">
 Kubernetes core/v1.Affinity
 </a>
 </em>
@@ -1541,14 +2183,28 @@ map[string]string
 </td>
 <td>
 <em>(Optional)</em>
-<p>Base annotations of TiDB cluster Pods, components may add or override selectors upon this respectively</p>
+<p>Base annotations for TiDB cluster, all Pods in the cluster should have these annotations.
+Can be overrode by annotations in the specific component spec.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>labels</code></br>
+<em>
+map[string]string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Base labels for TiDB cluster, all Pods in the cluster should have these labels.
+Can be overrode by labels in the specific component spec.</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>tolerations</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#toleration-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core">
 []Kubernetes core/v1.Toleration
 </a>
 </em>
@@ -1556,6 +2212,34 @@ map[string]string
 <td>
 <em>(Optional)</em>
 <p>Base tolerations of TiDB cluster Pods, components may add more tolerations upon this respectively</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>dnsConfig</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#poddnsconfig-v1-core">
+Kubernetes core/v1.PodDNSConfig
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>DNSConfig Specifies the DNS parameters of a pod.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>dnsPolicy</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#dnspolicy-v1-core">
+Kubernetes core/v1.DNSPolicy
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>DNSPolicy Specifies the DNSPolicy parameters of a pod.</p>
 </td>
 </tr>
 <tr>
@@ -1611,6 +2295,18 @@ Optional: Defaults to &ldquo;&rdquo;</p>
 </tr>
 <tr>
 <td>
+<code>acrossK8s</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>AcrossK8s indicates whether deploy TiDB cluster across multiple Kubernetes clusters</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>cluster</code></br>
 <em>
 <a href="#tidbclusterref">
@@ -1639,7 +2335,7 @@ TidbClusterRef
 <td>
 <code>statefulSetUpdateStrategy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#statefulsetupdatestrategytype-v1-apps">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#statefulsetupdatestrategytype-v1-apps">
 Kubernetes apps/v1.StatefulSetUpdateStrategyType
 </a>
 </em>
@@ -1651,9 +2347,23 @@ Kubernetes apps/v1.StatefulSetUpdateStrategyType
 </tr>
 <tr>
 <td>
+<code>podManagementPolicy</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podmanagementpolicytype-v1-apps">
+Kubernetes apps/v1.PodManagementPolicyType
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>PodManagementPolicy of TiDB cluster StatefulSets</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>podSecurityContext</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#podsecuritycontext-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podsecuritycontext-v1-core">
 Kubernetes core/v1.PodSecurityContext
 </a>
 </em>
@@ -1661,6 +2371,80 @@ Kubernetes core/v1.PodSecurityContext
 <td>
 <em>(Optional)</em>
 <p>PodSecurityContext of the component</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>topologySpreadConstraints</code></br>
+<em>
+<a href="#topologyspreadconstraint">
+[]TopologySpreadConstraint
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>TopologySpreadConstraints describes how a group of pods ought to spread across topology
+domains. Scheduler will schedule pods in a way which abides by the constraints.
+This field is is only honored by clusters that enables the EvenPodsSpread feature.
+All topologySpreadConstraints are ANDed.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>startScriptVersion</code></br>
+<em>
+<a href="#startscriptversion">
+StartScriptVersion
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>StartScriptVersion is the version of start script
+When PD enables microservice mode, pd and pd microservice component will use start script v2.</p>
+<p>default to &ldquo;v1&rdquo;</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>suspendAction</code></br>
+<em>
+<a href="#suspendaction">
+SuspendAction
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>SuspendAction defines the suspend actions for all component.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>preferIPv6</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>PreferIPv6 indicates whether to prefer IPv6 addresses for all components.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>startScriptV2FeatureFlags</code></br>
+<em>
+<a href="#startscriptv2featureflag">
+[]StartScriptV2FeatureFlag
+</a>
+</em>
+</td>
+<td>
+<p>Feature flags used by v2 startup script to enable various features.
+Examples of supported feature flags:
+- WaitForDnsNameIpMatch indicates whether PD and TiKV has to wait until local IP address matches the one published to external DNS
+- PreferPDAddressesOverDiscovery advises start script to use TidbClusterSpec.PDAddresses (if supplied) as argument for pd-server, tikv-server and tidb-server commands</p>
 </td>
 </tr>
 </table>
@@ -1677,122 +2461,6 @@ TidbClusterStatus
 </td>
 <td>
 <p>Most recently observed status of the tidb cluster</p>
-</td>
-</tr>
-</tbody>
-</table>
-<h3 id="tidbclusterautoscaler">TidbClusterAutoScaler</h3>
-<p>
-<p>TidbClusterAutoScaler is the control script&rsquo;s spec</p>
-</p>
-<table>
-<thead>
-<tr>
-<th>Field</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>
-<code>apiVersion</code></br>
-string</td>
-<td>
-<code>
-pingcap.com/v1alpha1
-</code>
-</td>
-</tr>
-<tr>
-<td>
-<code>kind</code></br>
-string
-</td>
-<td><code>TidbClusterAutoScaler</code></td>
-</tr>
-<tr>
-<td>
-<code>metadata</code></br>
-<em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#objectmeta-v1-meta">
-Kubernetes meta/v1.ObjectMeta
-</a>
-</em>
-</td>
-<td>
-Refer to the Kubernetes API documentation for the fields of the
-<code>metadata</code> field.
-</td>
-</tr>
-<tr>
-<td>
-<code>spec</code></br>
-<em>
-<a href="#tidbclusterautoscalerspec">
-TidbClusterAutoScalerSpec
-</a>
-</em>
-</td>
-<td>
-<p>Spec describes the state of the TidbClusterAutoScaler</p>
-<br/>
-<br/>
-<table>
-<tr>
-<td>
-<code>cluster</code></br>
-<em>
-<a href="#tidbclusterref">
-TidbClusterRef
-</a>
-</em>
-</td>
-<td>
-<p>TidbClusterRef describe the target TidbCluster</p>
-</td>
-</tr>
-<tr>
-<td>
-<code>tikv</code></br>
-<em>
-<a href="#tikvautoscalerspec">
-TikvAutoScalerSpec
-</a>
-</em>
-</td>
-<td>
-<em>(Optional)</em>
-<p>TiKV represents the auto-scaling spec for tikv</p>
-</td>
-</tr>
-<tr>
-<td>
-<code>tidb</code></br>
-<em>
-<a href="#tidbautoscalerspec">
-TidbAutoScalerSpec
-</a>
-</em>
-</td>
-<td>
-<em>(Optional)</em>
-<p>TiDB represents the auto-scaling spec for tidb</p>
-</td>
-</tr>
-</table>
-</td>
-</tr>
-<tr>
-<td>
-<code>status</code></br>
-<em>
-<a href="#tidbclusterautoscalerstatus">
-TidbClusterAutoScalerStatus
-</a>
-</em>
-</td>
-<td>
-<p>Status describe the status of the TidbClusterAutoScaler</p>
 </td>
 </tr>
 </tbody>
@@ -1830,7 +2498,7 @@ string
 <td>
 <code>metadata</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#objectmeta-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta">
 Kubernetes meta/v1.ObjectMeta
 </a>
 </em>
@@ -1880,7 +2548,7 @@ TidbClusterRef
 <td>
 <code>podSecurityContext</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#podsecuritycontext-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podsecuritycontext-v1-core">
 Kubernetes core/v1.PodSecurityContext
 </a>
 </em>
@@ -1894,7 +2562,7 @@ Kubernetes core/v1.PodSecurityContext
 <td>
 <code>imagePullPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#pullpolicy-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#pullpolicy-v1-core">
 Kubernetes core/v1.PullPolicy
 </a>
 </em>
@@ -1907,7 +2575,7 @@ Kubernetes core/v1.PullPolicy
 <td>
 <code>imagePullSecrets</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#localobjectreference-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core">
 []Kubernetes core/v1.LocalObjectReference
 </a>
 </em>
@@ -1962,13 +2630,14 @@ string
 </td>
 <td>
 <em>(Optional)</em>
+<p>passwordSecret is the name of the Kubernetes secret that is used to initialize the cluster.</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>resources</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -2000,6 +2669,32 @@ string
 <em>(Optional)</em>
 <p>TLSClientSecretName is the name of secret which stores tidb server client certificate
 Optional: Defaults to nil</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>tolerations</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core">
+[]Kubernetes core/v1.Toleration
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Tolerations of the TiDB initializer Pod</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>nodeSelector</code></br>
+<em>
+map[string]string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Node selectors of TiDB initializer Pod</p>
 </td>
 </tr>
 </table>
@@ -2053,7 +2748,7 @@ string
 <td>
 <code>metadata</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#objectmeta-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta">
 Kubernetes meta/v1.ObjectMeta
 </a>
 </em>
@@ -2087,6 +2782,8 @@ TidbMonitorSpec
 </em>
 </td>
 <td>
+<em>(Optional)</em>
+<p>monitored TiDB cluster info</p>
 </td>
 </tr>
 <tr>
@@ -2099,6 +2796,7 @@ PrometheusSpec
 </em>
 </td>
 <td>
+<p>Prometheus spec</p>
 </td>
 </tr>
 <tr>
@@ -2112,6 +2810,7 @@ GrafanaSpec
 </td>
 <td>
 <em>(Optional)</em>
+<p>Grafana spec</p>
 </td>
 </tr>
 <tr>
@@ -2124,6 +2823,7 @@ ReloaderSpec
 </em>
 </td>
 <td>
+<p>Reloader spec</p>
 </td>
 </tr>
 <tr>
@@ -2136,6 +2836,7 @@ InitializerSpec
 </em>
 </td>
 <td>
+<p>Initializer spec</p>
 </td>
 </tr>
 <tr>
@@ -2149,6 +2850,7 @@ DMMonitorSpec
 </td>
 <td>
 <em>(Optional)</em>
+<p>monitored DM cluster spec</p>
 </td>
 </tr>
 <tr>
@@ -2162,13 +2864,28 @@ ThanosSpec
 </td>
 <td>
 <em>(Optional)</em>
+<p>Thanos spec</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>prometheusReloader</code></br>
+<em>
+<a href="#prometheusreloaderspec">
+PrometheusReloaderSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>PrometheusReloader set prometheus reloader configuration</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>pvReclaimPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#persistentvolumereclaimpolicy-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumereclaimpolicy-v1-core">
 Kubernetes core/v1.PersistentVolumeReclaimPolicy
 </a>
 </em>
@@ -2181,19 +2898,20 @@ Kubernetes core/v1.PersistentVolumeReclaimPolicy
 <td>
 <code>imagePullPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#pullpolicy-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#pullpolicy-v1-core">
 Kubernetes core/v1.PullPolicy
 </a>
 </em>
 </td>
 <td>
+<p>ImagePullPolicy of TidbMonitor Pods</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>imagePullSecrets</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#localobjectreference-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core">
 []Kubernetes core/v1.LocalObjectReference
 </a>
 </em>
@@ -2212,6 +2930,8 @@ bool
 </td>
 <td>
 <em>(Optional)</em>
+<p>If Persistent enabled, storageClassName must be set to an existing storage.
+Defaults to false.</p>
 </td>
 </tr>
 <tr>
@@ -2223,6 +2943,8 @@ string
 </td>
 <td>
 <em>(Optional)</em>
+<p>The storageClassName of the persistent volume for TidbMonitor data storage.
+Defaults to Kubernetes default storage class.</p>
 </td>
 </tr>
 <tr>
@@ -2234,6 +2956,7 @@ string
 </td>
 <td>
 <em>(Optional)</em>
+<p>Size of the persistent volume.</p>
 </td>
 </tr>
 <tr>
@@ -2245,6 +2968,7 @@ map[string]string
 </td>
 <td>
 <em>(Optional)</em>
+<p>NodeSelector of the TidbMonitor.</p>
 </td>
 </tr>
 <tr>
@@ -2256,19 +2980,34 @@ map[string]string
 </td>
 <td>
 <em>(Optional)</em>
+<p>Annotations for the TidbMonitor.
+Optional: Defaults to cluster-level setting</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>labels</code></br>
+<em>
+map[string]string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Labels for the TidbMonitor.</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>tolerations</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#toleration-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core">
 []Kubernetes core/v1.Toleration
 </a>
 </em>
 </td>
 <td>
 <em>(Optional)</em>
+<p>Tolerations of the TidbMonitor.</p>
 </td>
 </tr>
 <tr>
@@ -2314,13 +3053,14 @@ default to current tidb cluster version, for example: v3.0.15</p>
 <td>
 <code>additionalContainers</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#container-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#container-v1-core">
 []Kubernetes core/v1.Container
 </a>
 </em>
 </td>
 <td>
 <em>(Optional)</em>
+<p>Additional containers of the TidbMonitor.</p>
 </td>
 </tr>
 <tr>
@@ -2374,30 +3114,85 @@ Defaults to 1.</p>
 </tr>
 <tr>
 <td>
+<code>shards</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<p>EXPERIMENTAL: Number of shards to distribute targets onto. Number of
+replicas multiplied by shards is the total number of Pods created. Note
+that scaling down shards will not reshard data onto remaining instances,
+it must be manually moved. Increasing shards will not reshard data
+either but it will continue to be available from the same instances. To
+query globally use Thanos sidecar and Thanos querier or remote write
+data to a central location. Sharding is done on the content of the
+<code>__address__</code> target meta-label.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>additionalVolumes</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#volume-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volume-v1-core">
 []Kubernetes core/v1.Volume
 </a>
 </em>
 </td>
 <td>
 <em>(Optional)</em>
-<p>Additional volumes of component pod.</p>
+<p>Additional volumes of TidbMonitor pod.</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>podSecurityContext</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#podsecuritycontext-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podsecuritycontext-v1-core">
 Kubernetes core/v1.PodSecurityContext
 </a>
 </em>
 </td>
 <td>
 <em>(Optional)</em>
-<p>PodSecurityContext of the component</p>
+<p>PodSecurityContext of TidbMonitor pod.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>enableAlertRules</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>EnableAlertRules adds alert rules to the Prometheus config even
+if <code>AlertmanagerURL</code> is not configured.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>timezone</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Time zone of TidbMonitor
+Optional: Defaults to UTC</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>preferIPv6</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>PreferIPv6 indicates whether to prefer IPv6 addresses for all components.</p>
 </td>
 </tr>
 </table>
@@ -2418,13 +3213,13 @@ TidbMonitorStatus
 </tr>
 </tbody>
 </table>
-<h3 id="autoresource">AutoResource</h3>
+<h3 id="azblobstorageprovider">AzblobStorageProvider</h3>
 <p>
 (<em>Appears on:</em>
-<a href="#basicautoscalerspec">BasicAutoScalerSpec</a>)
+<a href="#storageprovider">StorageProvider</a>)
 </p>
 <p>
-<p>AutoResource describes the resource type definitions</p>
+<p>AzblobStorageProvider represents the azure blob storage for storing backups.</p>
 </p>
 <table>
 <thead>
@@ -2436,97 +3231,83 @@ TidbMonitorStatus
 <tbody>
 <tr>
 <td>
-<code>cpu</code></br>
+<code>path</code></br>
 <em>
-k8s.io/apimachinery/pkg/api/resource.Quantity
+string
 </em>
 </td>
 <td>
-<p>CPU defines the CPU of this resource type</p>
+<p>Path is the full path where the backup is saved.
+The format of the path must be: &ldquo;<container-name>/<path-to-backup-file>&rdquo;</p>
 </td>
 </tr>
 <tr>
 <td>
-<code>memory</code></br>
+<code>container</code></br>
 <em>
-k8s.io/apimachinery/pkg/api/resource.Quantity
+string
 </em>
 </td>
 <td>
-<p>Memory defines the memory of this resource type</p>
+<p>Container in which to store the backup data.</p>
 </td>
 </tr>
 <tr>
 <td>
-<code>storage</code></br>
+<code>accessTier</code></br>
 <em>
-k8s.io/apimachinery/pkg/api/resource.Quantity
+string
 </em>
 </td>
 <td>
-<p>Storage defines the storage of this resource type</p>
+<p>Access tier of the uploaded objects.</p>
 </td>
 </tr>
 <tr>
 <td>
-<code>count</code></br>
+<code>secretName</code></br>
 <em>
-int32
+string
 </em>
 </td>
 <td>
-<p>Count defines the max availabel count of this resource type</p>
-</td>
-</tr>
-</tbody>
-</table>
-<h3 id="autorule">AutoRule</h3>
-<p>
-(<em>Appears on:</em>
-<a href="#basicautoscalerspec">BasicAutoScalerSpec</a>)
-</p>
-<p>
-<p>AutoRule describes the rules for auto-scaling with PD API</p>
-</p>
-<table>
-<thead>
-<tr>
-<th>Field</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>
-<code>max_threshold</code></br>
-<em>
-float64
-</em>
-</td>
-<td>
-<p>MaxThreshold defines the threshold to scale out</p>
+<p>SecretName is the name of secret which stores the
+azblob service account credentials.</p>
 </td>
 </tr>
 <tr>
 <td>
-<code>min_threshold</code></br>
+<code>storageAccount</code></br>
 <em>
-float64
+string
 </em>
 </td>
 <td>
-<p>MinThreshold defines the threshold to scale in, not applicable to <code>storage</code> rule</p>
+<p>StorageAccount is the storage account of the azure blob storage
+If this field is set, then use this to set backup-manager env
+Otherwise retrieve the storage account from secret</p>
 </td>
 </tr>
 <tr>
 <td>
-<code>resource_types</code></br>
+<code>sasToken</code></br>
 <em>
-[]string
+string
 </em>
 </td>
 <td>
-<p>ResourceTypes defines the resource types that can be used for scaling</p>
+<p>SasToken is the sas token of the storage account</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>prefix</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>Prefix of the data path.</p>
 </td>
 </tr>
 </tbody>
@@ -2534,7 +3315,9 @@ float64
 <h3 id="brconfig">BRConfig</h3>
 <p>
 (<em>Appears on:</em>
+<a href="#backupschedulespec">BackupScheduleSpec</a>, 
 <a href="#backupspec">BackupSpec</a>, 
+<a href="#compactspec">CompactSpec</a>, 
 <a href="#restorespec">RestoreSpec</a>)
 </p>
 <p>
@@ -2660,6 +3443,17 @@ bool
 </tr>
 <tr>
 <td>
+<code>checkRequirements</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>CheckRequirements specifies whether to check requirements</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>sendCredToTikv</code></br>
 <em>
 bool
@@ -2693,10 +3487,162 @@ bool
 </tr>
 </tbody>
 </table>
-<h3 id="backupcondition">BackupCondition</h3>
+<h3 id="backoffretrypolicy">BackoffRetryPolicy</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#backupspec">BackupSpec</a>)
+</p>
+<p>
+<p>BackoffRetryPolicy is the backoff retry policy, currently only valid for snapshot backup.
+When backup job or pod failed, it will retry in the following way:
+first time: retry after MinRetryDuration
+second time: retry after MinRetryDuration * 2
+third time: retry after MinRetryDuration * 2 * 2
+&hellip;
+as the limit:
+1. the number of retries can not exceed MaxRetryTimes
+2. the time from discovery failure can not exceed RetryTimeout</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>minRetryDuration</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>MinRetryDuration is the min retry duration, the retry duration will be MinRetryDuration &lt;&lt; (retry num -1)
+format reference, <a href="https://golang.org/pkg/time/#ParseDuration">https://golang.org/pkg/time/#ParseDuration</a></p>
+</td>
+</tr>
+<tr>
+<td>
+<code>maxRetryTimes</code></br>
+<em>
+int
+</em>
+</td>
+<td>
+<p>MaxRetryTimes is the max retry times</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>retryTimeout</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>RetryTimeout is the retry timeout
+format reference, <a href="https://golang.org/pkg/time/#ParseDuration">https://golang.org/pkg/time/#ParseDuration</a></p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="backoffretryrecord">BackoffRetryRecord</h3>
 <p>
 (<em>Appears on:</em>
 <a href="#backupstatus">BackupStatus</a>)
+</p>
+<p>
+<p>BackoffRetryRecord is the record of backoff retry</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>retryNum</code></br>
+<em>
+int
+</em>
+</td>
+<td>
+<p>RetryNum is the number of retry</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>detectFailedAt</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
+Kubernetes meta/v1.Time
+</a>
+</em>
+</td>
+<td>
+<p>DetectFailedAt is the time when detect failure</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>expectedRetryAt</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
+Kubernetes meta/v1.Time
+</a>
+</em>
+</td>
+<td>
+<p>ExpectedRetryAt is the time we calculate and expect retry after it</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>realRetryAt</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
+Kubernetes meta/v1.Time
+</a>
+</em>
+</td>
+<td>
+<p>RealRetryAt is the time when the retry was actually initiated</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>retryReason</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>Reason is the reason of retry</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>originalReason</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>OriginalReason is the original reason of backup job or pod failed</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="backupcondition">BackupCondition</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#backupstatus">BackupStatus</a>, 
+<a href="#logsubcommandstatus">LogSubCommandStatus</a>)
 </p>
 <p>
 <p>BackupCondition describes the observed state of a Backup at a certain point.</p>
@@ -2709,6 +3655,18 @@ bool
 </tr>
 </thead>
 <tbody>
+<tr>
+<td>
+<code>command</code></br>
+<em>
+<a href="#logsubcommandtype">
+LogSubCommandType
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
 <tr>
 <td>
 <code>type</code></br>
@@ -2725,7 +3683,7 @@ BackupConditionType
 <td>
 <code>status</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#conditionstatus-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#conditionstatus-v1-core">
 Kubernetes core/v1.ConditionStatus
 </a>
 </em>
@@ -2737,7 +3695,7 @@ Kubernetes core/v1.ConditionStatus
 <td>
 <code>lastTransitionTime</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
@@ -2771,10 +3729,19 @@ string
 <p>
 (<em>Appears on:</em>
 <a href="#backupcondition">BackupCondition</a>, 
-<a href="#backupstatus">BackupStatus</a>)
+<a href="#backupstatus">BackupStatus</a>, 
+<a href="#logsubcommandstatus">LogSubCommandStatus</a>)
 </p>
 <p>
 <p>BackupConditionType represents a valid condition of a Backup.</p>
+</p>
+<h3 id="backupmode">BackupMode</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#backupspec">BackupSpec</a>)
+</p>
+<p>
+<p>BackupType represents the backup mode, such as snapshot backup or log backup.</p>
 </p>
 <h3 id="backupschedulespec">BackupScheduleSpec</h3>
 <p>
@@ -2841,6 +3808,17 @@ string
 </tr>
 <tr>
 <td>
+<code>compactInterval</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>CompactInterval is to specify how long backups we want to compact.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>backupTemplate</code></br>
 <em>
 <a href="#backupspec">
@@ -2850,6 +3828,48 @@ BackupSpec
 </td>
 <td>
 <p>BackupTemplate is the specification of the backup structure to get scheduled.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>logBackupTemplate</code></br>
+<em>
+<a href="#backupspec">
+BackupSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>LogBackupTemplate is the specification of the log backup structure to get scheduled.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>compactBackupTemplate</code></br>
+<em>
+<a href="#compactspec">
+CompactSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>CompactBackupTemplate is the specification of the compact backup structure to get scheduled.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>minCompactStartTs</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>MinCompactStartTs specifies the minimum start timestamp for compact backup.
+If the calculated start ts is less than this value, it will be adjusted to this value.
+Format supports TSO or datetime, e.g. &lsquo;400036290571534337&rsquo;, &lsquo;2018-05-11 01:42:23&rsquo;.</p>
 </td>
 </tr>
 <tr>
@@ -2880,7 +3900,7 @@ string
 <td>
 <code>imagePullSecrets</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#localobjectreference-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core">
 []Kubernetes core/v1.LocalObjectReference
 </a>
 </em>
@@ -2888,6 +3908,37 @@ string
 <td>
 <em>(Optional)</em>
 <p>ImagePullSecrets is an optional list of references to secrets in the same namespace to use for pulling any of the images.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>br</code></br>
+<em>
+<a href="#brconfig">
+BRConfig
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>BRConfig is the configs for BR</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>StorageProvider</code></br>
+<em>
+<a href="#storageprovider">
+StorageProvider
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>StorageProvider</code> are embedded into this type.)
+</p>
+<em>(Optional)</em>
+<p>StorageProvider configures where and how backups should be stored.</p>
 </td>
 </tr>
 </tbody>
@@ -2921,9 +3972,44 @@ string
 </tr>
 <tr>
 <td>
+<code>lastCompact</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>LastCompact represents the last compact</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>logBackup</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>logBackup represents the name of log backup.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>logBackupStartTs</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
+Kubernetes meta/v1.Time
+</a>
+</em>
+</td>
+<td>
+<p>LogBackupStartTs represents the start time of log backup</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>lastBackupTime</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
@@ -2934,9 +4020,35 @@ Kubernetes meta/v1.Time
 </tr>
 <tr>
 <td>
+<code>lastCompactProgress</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
+Kubernetes meta/v1.Time
+</a>
+</em>
+</td>
+<td>
+<p>LastCompactProgress represents the endTs of the last compact</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>lastCompactExecutionTs</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
+Kubernetes meta/v1.Time
+</a>
+</em>
+</td>
+<td>
+<p>LastCompactExecutionTs represents the execution time of the last compact</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>allBackupCleanTime</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
@@ -2968,7 +4080,7 @@ Kubernetes meta/v1.Time
 <td>
 <code>resources</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -2980,7 +4092,7 @@ Kubernetes core/v1.ResourceRequirements
 <td>
 <code>env</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#envvar-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core">
 []Kubernetes core/v1.EnvVar
 </a>
 </em>
@@ -3029,7 +4141,20 @@ BackupType
 </em>
 </td>
 <td>
-<p>Type is the backup type for tidb cluster.</p>
+<p>Type is the backup type for tidb cluster and only used when Mode = snapshot, such as full, db, table.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>backupMode</code></br>
+<em>
+<a href="#backupmode">
+BackupMode
+</a>
+</em>
+</td>
+<td>
+<p>Mode is the backup mode, such as snapshot backup or log backup.</p>
 </td>
 </tr>
 <tr>
@@ -3058,7 +4183,9 @@ StorageProvider
 <p>
 (Members of <code>StorageProvider</code> are embedded into this type.)
 </p>
-<p>StorageProvider configures where and how backups should be stored.</p>
+<p>StorageProvider configures where and how backups should be stored.
+*** Note: This field should generally not be left empty, unless you are certain the storage provider
+*** can be obtained from another source, such as a schedule CR.</p>
 </td>
 </tr>
 <tr>
@@ -3095,7 +4222,100 @@ BRConfig
 </em>
 </td>
 <td>
-<p>BRConfig is the configs for BR</p>
+<p>BRConfig is the configs for BR
+*** Note: This field should generally not be left empty, unless you are certain the BR config
+*** can be obtained from another source, such as a schedule CR.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>commitTs</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>CommitTs is the commit ts of the backup, snapshot ts for full backup or start ts for log backup.
+Format supports TSO or datetime, e.g. &lsquo;400036290571534337&rsquo;, &lsquo;2018-05-11 01:42:23&rsquo;.
+Default is current timestamp.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>logSubcommand</code></br>
+<em>
+<a href="#logsubcommandtype">
+LogSubCommandType
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Subcommand is the subcommand for BR, such as start, stop, pause etc.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>logTruncateUntil</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>LogTruncateUntil is log backup truncate until timestamp.
+Format supports TSO or datetime, e.g. &lsquo;400036290571534337&rsquo;, &lsquo;2018-05-11 01:42:23&rsquo;.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>logStop</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>LogStop indicates that will stop the log backup.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>calcSizeLevel</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>CalcSizeLevel determines how to size calculation of snapshots for EBS volume snapshot backup</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>federalVolumeBackupPhase</code></br>
+<em>
+<a href="#federalvolumebackupphase">
+FederalVolumeBackupPhase
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>FederalVolumeBackupPhase indicates which phase to execute in federal volume backup</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>resumeGcSchedule</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ResumeGcSchedule indicates whether resume gc and pd scheduler for EBS volume snapshot backup</p>
 </td>
 </tr>
 <tr>
@@ -3115,7 +4335,7 @@ DumplingConfig
 <td>
 <code>tolerations</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#toleration-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core">
 []Kubernetes core/v1.Toleration
 </a>
 </em>
@@ -3135,14 +4355,15 @@ string
 <td>
 <em>(Optional)</em>
 <p>ToolImage specifies the tool image used in <code>Backup</code>, which supports BR and Dumpling images.
-For examples <code>spec.toolImage: pingcap/br:v4.0.8</code> or <code>spec.toolImage: pingcap/dumpling:v4.0.8</code></p>
+For examples <code>spec.toolImage: pingcap/br:v4.0.8</code> or <code>spec.toolImage: pingcap/dumpling:v4.0.8</code>
+For BR image, if it does not contain tag, Pod will use image &lsquo;ToolImage:${TiKV_Version}&rsquo;.</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>imagePullSecrets</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#localobjectreference-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core">
 []Kubernetes core/v1.LocalObjectReference
 </a>
 </em>
@@ -3167,7 +4388,7 @@ For examples <code>spec.toolImage: pingcap/br:v4.0.8</code> or <code>spec.toolIm
 <td>
 <code>affinity</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#affinity-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#affinity-v1-core">
 Kubernetes core/v1.Affinity
 </a>
 </em>
@@ -3214,9 +4435,22 @@ CleanPolicyType
 </tr>
 <tr>
 <td>
+<code>cleanOption</code></br>
+<em>
+<a href="#cleanoption">
+CleanOption
+</a>
+</em>
+</td>
+<td>
+<p>CleanOption controls the behavior of clean.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>podSecurityContext</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#podsecuritycontext-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podsecuritycontext-v1-core">
 Kubernetes core/v1.PodSecurityContext
 </a>
 </em>
@@ -3224,6 +4458,69 @@ Kubernetes core/v1.PodSecurityContext
 <td>
 <em>(Optional)</em>
 <p>PodSecurityContext of the component</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>priorityClassName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>PriorityClassName of Backup Job Pods</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>backoffRetryPolicy</code></br>
+<em>
+<a href="#backoffretrypolicy">
+BackoffRetryPolicy
+</a>
+</em>
+</td>
+<td>
+<p>BackoffRetryPolicy the backoff retry policy, currently only valid for snapshot backup</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>additionalVolumes</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volume-v1-core">
+[]Kubernetes core/v1.Volume
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Additional volumes of component pod.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>additionalVolumeMounts</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volumemount-v1-core">
+[]Kubernetes core/v1.VolumeMount
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Additional volume mounts of component pod.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>volumeBackupInitJobMaxActiveSeconds</code></br>
+<em>
+int
+</em>
+</td>
+<td>
+<p>VolumeBackupInitJobMaxActiveSeconds represents the deadline (in seconds) of the vbk init job</p>
 </td>
 </tr>
 </tbody>
@@ -3259,26 +4556,53 @@ string
 <td>
 <code>timeStarted</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
 </td>
 <td>
-<p>TimeStarted is the time at which the backup was started.</p>
+<p>TimeStarted is the time at which the backup was started.
+TODO: remove nullable, <a href="https://github.com/kubernetes/kubernetes/issues/86811">https://github.com/kubernetes/kubernetes/issues/86811</a></p>
 </td>
 </tr>
 <tr>
 <td>
 <code>timeCompleted</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
 </td>
 <td>
-<p>TimeCompleted is the time at which the backup was completed.</p>
+<p>TimeCompleted is the time at which the backup was completed.
+TODO: remove nullable, <a href="https://github.com/kubernetes/kubernetes/issues/86811">https://github.com/kubernetes/kubernetes/issues/86811</a></p>
+</td>
+</tr>
+<tr>
+<td>
+<code>timeSynced</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
+Kubernetes meta/v1.Time
+</a>
+</em>
+</td>
+<td>
+<p>TimeSynced is the time at which the backup was synced to kernel state.
+Only applied for LogBackup.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>timeTaken</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>TimeTaken is the time that backup takes, it is TimeCompleted - TimeStarted</p>
 </td>
 </tr>
 <tr>
@@ -3306,13 +4630,58 @@ int64
 </tr>
 <tr>
 <td>
+<code>incrementalBackupSizeReadable</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>the difference with IncrementalBackupSize is that its format is human readable</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>incrementalBackupSize</code></br>
+<em>
+int64
+</em>
+</td>
+<td>
+<p>IncrementalBackupSize is the incremental data size of the backup, it is only used for volume snapshot backup
+it is the real size of volume snapshot backup</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>commitTs</code></br>
 <em>
 string
 </em>
 </td>
 <td>
-<p>CommitTs is the snapshot time point of tidb cluster.</p>
+<p>CommitTs is the commit ts of the backup, snapshot ts for full backup or start ts for log backup.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>logSuccessTruncateUntil</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>LogSuccessTruncateUntil is log backup already successfully truncate until timestamp.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>logCheckpointTs</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>LogCheckpointTs is the ts of log backup process.</p>
 </td>
 </tr>
 <tr>
@@ -3338,6 +4707,45 @@ BackupConditionType
 </em>
 </td>
 <td>
+</td>
+</tr>
+<tr>
+<td>
+<code>logSubCommandStatuses</code></br>
+<em>
+<a href="#logsubcommandstatus">
+map[github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.LogSubCommandType]github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.LogSubCommandStatus
+</a>
+</em>
+</td>
+<td>
+<p>LogSubCommandStatuses is the detail status of log backup subcommands, record each command separately, but only record the last command.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>progresses</code></br>
+<em>
+<a href="#progress">
+[]Progress
+</a>
+</em>
+</td>
+<td>
+<p>Progresses is the progress of backup.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>backoffRetryStatus</code></br>
+<em>
+<a href="#backoffretryrecord">
+[]BackoffRetryRecord
+</a>
+</em>
+</td>
+<td>
+<p>BackoffRetryStatus is status of the backoff retry, it will be used when backup pod or job exited unexpectedly</p>
 </td>
 </tr>
 </tbody>
@@ -3376,7 +4784,7 @@ More info: <a href="https://prometheus.io/docs/operating/configuration/#endpoint
 <td>
 <code>username</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#secretkeyselector-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#secretkeyselector-v1-core">
 Kubernetes core/v1.SecretKeySelector
 </a>
 </em>
@@ -3390,7 +4798,7 @@ for authentication.</p>
 <td>
 <code>password</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#secretkeyselector-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#secretkeyselector-v1-core">
 Kubernetes core/v1.SecretKeySelector
 </a>
 </em>
@@ -3402,14 +4810,13 @@ for authentication.</p>
 </tr>
 </tbody>
 </table>
-<h3 id="basicautoscalerspec">BasicAutoScalerSpec</h3>
+<h3 id="batchdeleteoption">BatchDeleteOption</h3>
 <p>
 (<em>Appears on:</em>
-<a href="#tidbautoscalerspec">TidbAutoScalerSpec</a>, 
-<a href="#tikvautoscalerspec">TikvAutoScalerSpec</a>)
+<a href="#cleanoption">CleanOption</a>)
 </p>
 <p>
-<p>BasicAutoScalerSpec describes the basic spec for auto-scaling</p>
+<p>BatchDeleteOption controls the options to delete the objects in batches during the cleanup of backups</p>
 </p>
 <table>
 <thead>
@@ -3421,104 +4828,38 @@ for authentication.</p>
 <tbody>
 <tr>
 <td>
-<code>rules</code></br>
+<code>disableBatchConcurrency</code></br>
 <em>
-<a href="#autorule">
-map[k8s.io/api/core/v1.ResourceName]github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.AutoRule
-</a>
+bool
 </em>
 </td>
 <td>
-<p>Rules defines the rules for auto-scaling with PD API</p>
+<p>DisableBatchConcurrency disables the batch deletions with S3 API and the deletion will be done by goroutines.</p>
 </td>
 </tr>
 <tr>
 <td>
-<code>scaleInIntervalSeconds</code></br>
+<code>batchConcurrency</code></br>
 <em>
-int32
+uint32
 </em>
 </td>
 <td>
-<em>(Optional)</em>
-<p>ScaleInIntervalSeconds represents the duration seconds between each auto-scaling-in
-If not set, the default ScaleInIntervalSeconds will be set to 500</p>
+<p>BatchConcurrency represents the number of batch deletions in parallel.
+It is used when the storage provider supports the batch delete API, currently, S3 only.
+default is 10</p>
 </td>
 </tr>
 <tr>
 <td>
-<code>scaleOutIntervalSeconds</code></br>
+<code>routineConcurrency</code></br>
 <em>
-int32
+uint32
 </em>
 </td>
 <td>
-<em>(Optional)</em>
-<p>ScaleOutIntervalSeconds represents the duration seconds between each auto-scaling-out
-If not set, the default ScaleOutIntervalSeconds will be set to 300</p>
-</td>
-</tr>
-<tr>
-<td>
-<code>external</code></br>
-<em>
-<a href="#externalconfig">
-ExternalConfig
-</a>
-</em>
-</td>
-<td>
-<em>(Optional)</em>
-<p>External makes the auto-scaler controller able to query the external service
-to fetch the recommended replicas for TiKV/TiDB</p>
-</td>
-</tr>
-<tr>
-<td>
-<code>resources</code></br>
-<em>
-<a href="#autoresource">
-map[string]github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.AutoResource
-</a>
-</em>
-</td>
-<td>
-<em>(Optional)</em>
-<p>Resources represent the resource type definitions that can be used for TiDB/TiKV
-The key is resource_type name of the resource</p>
-</td>
-</tr>
-</tbody>
-</table>
-<h3 id="basicautoscalerstatus">BasicAutoScalerStatus</h3>
-<p>
-(<em>Appears on:</em>
-<a href="#tidbautoscalerstatus">TidbAutoScalerStatus</a>, 
-<a href="#tikvautoscalerstatus">TikvAutoScalerStatus</a>)
-</p>
-<p>
-<p>BasicAutoScalerStatus describe the basic auto-scaling status</p>
-</p>
-<table>
-<thead>
-<tr>
-<th>Field</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>
-<code>lastAutoScalingTimestamp</code></br>
-<em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
-Kubernetes meta/v1.Time
-</a>
-</em>
-</td>
-<td>
-<em>(Optional)</em>
-<p>LastAutoScalingTimestamp describes the last auto-scaling timestamp for the component(tidb/tikv)</p>
+<p>RoutineConcurrency represents the number of goroutines that used to delete objects
+default is 100</p>
 </td>
 </tr>
 </tbody>
@@ -3602,6 +4943,116 @@ Optional: Defaults to range</p>
 </tr>
 </tbody>
 </table>
+<h3 id="cdcconfigwraper">CDCConfigWraper</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#ticdcspec">TiCDCSpec</a>)
+</p>
+<p>
+<p>CDCConfigWraper simply wrapps a GenericConfig</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>GenericConfig</code></br>
+<em>
+github.com/pingcap/tidb-operator/pkg/apis/util/config.GenericConfig
+</em>
+</td>
+<td>
+<p>
+(Members of <code>GenericConfig</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="cleanoption">CleanOption</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#backupspec">BackupSpec</a>)
+</p>
+<p>
+<p>CleanOption defines the configuration for cleanup backup</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>pageSize</code></br>
+<em>
+uint64
+</em>
+</td>
+<td>
+<p>PageSize represents the number of objects to clean at a time.
+default is 10000</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>retryCount</code></br>
+<em>
+int
+</em>
+</td>
+<td>
+<p>RetryCount represents the number of retries in pod when the cleanup fails.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>backoffEnabled</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>BackoffEnabled represents whether to enable the backoff when a deletion API fails.
+It is useful when the deletion API is rate limited.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>BatchDeleteOption</code></br>
+<em>
+<a href="#batchdeleteoption">
+BatchDeleteOption
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>BatchDeleteOption</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>snapshotsDeleteRatio</code></br>
+<em>
+float64
+</em>
+</td>
+<td>
+<p>SnapshotsDeleteRatio represents the number of snapshots deleted per second</p>
+</td>
+</tr>
+</tbody>
+</table>
 <h3 id="cleanpolicytype">CleanPolicyType</h3>
 <p>
 (<em>Appears on:</em>
@@ -3609,6 +5060,9 @@ Optional: Defaults to range</p>
 </p>
 <p>
 <p>CleanPolicyType represents the clean policy of backup data in remote storage</p>
+</p>
+<h3 id="cluster">Cluster</h3>
+<p>
 </p>
 <h3 id="clusterref">ClusterRef</h3>
 <p>
@@ -3636,7 +5090,7 @@ string
 <td>
 <em>(Optional)</em>
 <p>Namespace is the namespace that TidbCluster object locates,
-default to the same namespace with TidbMonitor</p>
+default to the same namespace as TidbMonitor/TidbCluster/TidbNGMonitoring/TidbDashboard</p>
 </td>
 </tr>
 <tr>
@@ -3769,6 +5223,743 @@ FlashSecurity
 </tr>
 </tbody>
 </table>
+<h3 id="compactbackup">CompactBackup</h3>
+<p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>metadata</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta">
+Kubernetes meta/v1.ObjectMeta
+</a>
+</em>
+</td>
+<td>
+Refer to the Kubernetes API documentation for the fields of the
+<code>metadata</code> field.
+</td>
+</tr>
+<tr>
+<td>
+<code>spec</code></br>
+<em>
+<a href="#compactspec">
+CompactSpec
+</a>
+</em>
+</td>
+<td>
+<br/>
+<br/>
+<table>
+<tr>
+<td>
+<code>resources</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
+Kubernetes core/v1.ResourceRequirements
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>env</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core">
+[]Kubernetes core/v1.EnvVar
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>List of environment variables to set in the container, like v1.Container.Env.
+Note that the following builtin env vars will be overwritten by values set here
+- S3_PROVIDER
+- S3_ENDPOINT
+- AWS_REGION
+- AWS_ACL
+- AWS_STORAGE_CLASS
+- AWS_DEFAULT_REGION
+- AWS_ACCESS_KEY_ID
+- AWS_SECRET_ACCESS_KEY
+- GCS_PROJECT_ID
+- GCS_OBJECT_ACL
+- GCS_BUCKET_ACL
+- GCS_LOCATION
+- GCS_STORAGE_CLASS
+- GCS_SERVICE_ACCOUNT_JSON_KEY
+- BR_LOG_TO_TERM</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>StorageProvider</code></br>
+<em>
+<a href="#storageprovider">
+StorageProvider
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>StorageProvider</code> are embedded into this type.)
+</p>
+<p>StorageProvider configures where and how backups should be stored.
+*** Note: This field should generally not be left empty, unless you are certain the storage provider
+*** can be obtained from another source, such as a schedule CR.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>startTs</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>StartTs is the start ts of the compact backup.
+Format supports TSO or datetime, e.g. &lsquo;400036290571534337&rsquo;, &lsquo;2018-05-11 01:42:23&rsquo;.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>endTs</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>EndTs is the end ts of the compact backup.
+Format supports TSO or datetime, e.g. &lsquo;400036290571534337&rsquo;, &lsquo;2018-05-11 01:42:23&rsquo;.
+Default is current timestamp.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>concurrency</code></br>
+<em>
+int
+</em>
+</td>
+<td>
+<p>Concurrency is the concurrency of compact backup job</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>tolerations</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core">
+[]Kubernetes core/v1.Toleration
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Base tolerations of backup Pods, components may add more tolerations upon this respectively</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>toolImage</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ToolImage specifies the br image used in compact <code>Backup</code>.
+For examples <code>spec.toolImage: pingcap/br:v4.0.8</code>
+For BR image, if it does not contain tag, Pod will use the same version in tc &lsquo;BrImage:${TiKV_Version}&rsquo;.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>tikvImage</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>TikvImage specifies the tikv image used in compact <code>Backup</code>.
+For examples <code>spec.tikvImage: pingcap/tikv:v9.0.0</code>
+For TiKV image, if it does not contain tag, Pod will use the same version in tc &lsquo;TiKVImage:${TiKV_Version}&rsquo;.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>br</code></br>
+<em>
+<a href="#brconfig">
+BRConfig
+</a>
+</em>
+</td>
+<td>
+<p>BRConfig is the configs for BR
+*** Note: This field should generally not be left empty, unless you are certain the BR config
+*** can be obtained from another source, such as a schedule CR.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>imagePullSecrets</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core">
+[]Kubernetes core/v1.LocalObjectReference
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ImagePullSecrets is an optional list of references to secrets in the same namespace to use for pulling any of the images.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>affinity</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#affinity-v1-core">
+Kubernetes core/v1.Affinity
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Affinity of backup Pods</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>useKMS</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>Use KMS to decrypt the secrets</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>serviceAccount</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>Specify service account of backup</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>podSecurityContext</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podsecuritycontext-v1-core">
+Kubernetes core/v1.PodSecurityContext
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>PodSecurityContext of the component</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>priorityClassName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>PriorityClassName of Backup Job Pods</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>maxRetryTimes</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<p>BackoffRetryPolicy the backoff retry policy, currently only valid for snapshot backup</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>additionalVolumes</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volume-v1-core">
+[]Kubernetes core/v1.Volume
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Additional volumes of component pod.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>additionalVolumeMounts</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volumemount-v1-core">
+[]Kubernetes core/v1.VolumeMount
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Additional volume mounts of component pod.</p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+<tr>
+<td>
+<code>status</code></br>
+<em>
+<a href="#compactstatus">
+CompactStatus
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="compactretryrecord">CompactRetryRecord</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#compactstatus">CompactStatus</a>)
+</p>
+<p>
+<p>CompactRetryRecord is the record of compact backoff retry</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>retryNum</code></br>
+<em>
+int
+</em>
+</td>
+<td>
+<p>RetryNum is the number of retry</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>detectFailedAt</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
+Kubernetes meta/v1.Time
+</a>
+</em>
+</td>
+<td>
+<p>DetectFailedAt is the time when detect failure</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>retryReason</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>Reason is the reason of retry</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="compactspec">CompactSpec</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#backupschedulespec">BackupScheduleSpec</a>, 
+<a href="#compactbackup">CompactBackup</a>)
+</p>
+<p>
+<p>CompactSpec contains the backup specification for a tidb cluster.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>resources</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
+Kubernetes core/v1.ResourceRequirements
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>env</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core">
+[]Kubernetes core/v1.EnvVar
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>List of environment variables to set in the container, like v1.Container.Env.
+Note that the following builtin env vars will be overwritten by values set here
+- S3_PROVIDER
+- S3_ENDPOINT
+- AWS_REGION
+- AWS_ACL
+- AWS_STORAGE_CLASS
+- AWS_DEFAULT_REGION
+- AWS_ACCESS_KEY_ID
+- AWS_SECRET_ACCESS_KEY
+- GCS_PROJECT_ID
+- GCS_OBJECT_ACL
+- GCS_BUCKET_ACL
+- GCS_LOCATION
+- GCS_STORAGE_CLASS
+- GCS_SERVICE_ACCOUNT_JSON_KEY
+- BR_LOG_TO_TERM</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>StorageProvider</code></br>
+<em>
+<a href="#storageprovider">
+StorageProvider
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>StorageProvider</code> are embedded into this type.)
+</p>
+<p>StorageProvider configures where and how backups should be stored.
+*** Note: This field should generally not be left empty, unless you are certain the storage provider
+*** can be obtained from another source, such as a schedule CR.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>startTs</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>StartTs is the start ts of the compact backup.
+Format supports TSO or datetime, e.g. &lsquo;400036290571534337&rsquo;, &lsquo;2018-05-11 01:42:23&rsquo;.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>endTs</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>EndTs is the end ts of the compact backup.
+Format supports TSO or datetime, e.g. &lsquo;400036290571534337&rsquo;, &lsquo;2018-05-11 01:42:23&rsquo;.
+Default is current timestamp.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>concurrency</code></br>
+<em>
+int
+</em>
+</td>
+<td>
+<p>Concurrency is the concurrency of compact backup job</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>tolerations</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core">
+[]Kubernetes core/v1.Toleration
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Base tolerations of backup Pods, components may add more tolerations upon this respectively</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>toolImage</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ToolImage specifies the br image used in compact <code>Backup</code>.
+For examples <code>spec.toolImage: pingcap/br:v4.0.8</code>
+For BR image, if it does not contain tag, Pod will use the same version in tc &lsquo;BrImage:${TiKV_Version}&rsquo;.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>tikvImage</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>TikvImage specifies the tikv image used in compact <code>Backup</code>.
+For examples <code>spec.tikvImage: pingcap/tikv:v9.0.0</code>
+For TiKV image, if it does not contain tag, Pod will use the same version in tc &lsquo;TiKVImage:${TiKV_Version}&rsquo;.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>br</code></br>
+<em>
+<a href="#brconfig">
+BRConfig
+</a>
+</em>
+</td>
+<td>
+<p>BRConfig is the configs for BR
+*** Note: This field should generally not be left empty, unless you are certain the BR config
+*** can be obtained from another source, such as a schedule CR.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>imagePullSecrets</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core">
+[]Kubernetes core/v1.LocalObjectReference
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ImagePullSecrets is an optional list of references to secrets in the same namespace to use for pulling any of the images.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>affinity</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#affinity-v1-core">
+Kubernetes core/v1.Affinity
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Affinity of backup Pods</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>useKMS</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>Use KMS to decrypt the secrets</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>serviceAccount</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>Specify service account of backup</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>podSecurityContext</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podsecuritycontext-v1-core">
+Kubernetes core/v1.PodSecurityContext
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>PodSecurityContext of the component</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>priorityClassName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>PriorityClassName of Backup Job Pods</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>maxRetryTimes</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<p>BackoffRetryPolicy the backoff retry policy, currently only valid for snapshot backup</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>additionalVolumes</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volume-v1-core">
+[]Kubernetes core/v1.Volume
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Additional volumes of component pod.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>additionalVolumeMounts</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volumemount-v1-core">
+[]Kubernetes core/v1.VolumeMount
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Additional volume mounts of component pod.</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="compactstatus">CompactStatus</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#compactbackup">CompactBackup</a>)
+</p>
+<p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>state</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>State is the current state of the backup</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>progress</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>Progress is the detailed progress of a running backup</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>message</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>Message is the error message of the backup</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>endTs</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>endTs is the real endTs processed by the compact backup</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>backoffRetryStatus</code></br>
+<em>
+<a href="#compactretryrecord">
+[]CompactRetryRecord
+</a>
+</em>
+</td>
+<td>
+<p>RetryStatus is status of the backoff retry, it will be used when backup pod or job exited unexpectedly</p>
+</td>
+</tr>
+</tbody>
+</table>
 <h3 id="componentaccessor">ComponentAccessor</h3>
 <p>
 <p>ComponentAccessor is the interface to access component details, which respects the cluster-level properties
@@ -3777,13 +5968,20 @@ and component-level overrides</p>
 <h3 id="componentspec">ComponentSpec</h3>
 <p>
 (<em>Appears on:</em>
+<a href="#dmdiscoveryspec">DMDiscoverySpec</a>, 
+<a href="#discoveryspec">DiscoverySpec</a>, 
 <a href="#masterspec">MasterSpec</a>, 
+<a href="#ngmonitoringspec">NGMonitoringSpec</a>, 
+<a href="#pdmsspec">PDMSSpec</a>, 
 <a href="#pdspec">PDSpec</a>, 
 <a href="#pumpspec">PumpSpec</a>, 
 <a href="#ticdcspec">TiCDCSpec</a>, 
 <a href="#tidbspec">TiDBSpec</a>, 
 <a href="#tiflashspec">TiFlashSpec</a>, 
 <a href="#tikvspec">TiKVSpec</a>, 
+<a href="#tiproxyspec">TiProxySpec</a>, 
+<a href="#tidbdashboardspec">TidbDashboardSpec</a>, 
+<a href="#tidbngmonitoringspec">TidbNGMonitoringSpec</a>, 
 <a href="#workerspec">WorkerSpec</a>)
 </p>
 <p>
@@ -3826,7 +6024,7 @@ Optional: Defaults to cluster-level setting</p>
 <td>
 <code>imagePullPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#pullpolicy-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#pullpolicy-v1-core">
 Kubernetes core/v1.PullPolicy
 </a>
 </em>
@@ -3841,7 +6039,7 @@ Optional: Defaults to cluster-level setting</p>
 <td>
 <code>imagePullSecrets</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#localobjectreference-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core">
 []Kubernetes core/v1.LocalObjectReference
 </a>
 </em>
@@ -3868,7 +6066,7 @@ Optional: Defaults to cluster-level setting</p>
 <td>
 <code>affinity</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#affinity-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#affinity-v1-core">
 Kubernetes core/v1.Affinity
 </a>
 </em>
@@ -3927,7 +6125,20 @@ map[string]string
 </td>
 <td>
 <em>(Optional)</em>
-<p>Annotations of the component. Merged into the cluster-level annotations if non-empty
+<p>Annotations for the component. Merge into the cluster-level annotations if non-empty
+Optional: Defaults to cluster-level setting</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>labels</code></br>
+<em>
+map[string]string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Labels for the component. Merge into the cluster-level labels if non-empty
 Optional: Defaults to cluster-level setting</p>
 </td>
 </tr>
@@ -3935,7 +6146,7 @@ Optional: Defaults to cluster-level setting</p>
 <td>
 <code>tolerations</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#toleration-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core">
 []Kubernetes core/v1.Toleration
 </a>
 </em>
@@ -3950,7 +6161,7 @@ Optional: Defaults to cluster-level setting</p>
 <td>
 <code>podSecurityContext</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#podsecuritycontext-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podsecuritycontext-v1-core">
 Kubernetes core/v1.PodSecurityContext
 </a>
 </em>
@@ -3979,7 +6190,7 @@ Optional: Defaults to cluster-level setting</p>
 <td>
 <code>env</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#envvar-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core">
 []Kubernetes core/v1.EnvVar
 </a>
 </em>
@@ -4003,9 +6214,23 @@ Note that the following env names cannot be used and will be overridden by TiDB 
 </tr>
 <tr>
 <td>
+<code>envFrom</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envfromsource-v1-core">
+[]Kubernetes core/v1.EnvFromSource
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Extend the use scenarios for env</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>initContainers</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#container-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#container-v1-core">
 []Kubernetes core/v1.Container
 </a>
 </em>
@@ -4019,21 +6244,27 @@ Note that the following env names cannot be used and will be overridden by TiDB 
 <td>
 <code>additionalContainers</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#container-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#container-v1-core">
 []Kubernetes core/v1.Container
 </a>
 </em>
 </td>
 <td>
 <em>(Optional)</em>
-<p>Additional containers of the component.</p>
+<p>Additional containers of the component.
+If the container names in this field match with the ones generated by
+TiDB Operator, the container configurations will be merged into the
+containers generated by TiDB Operator via strategic merge patch.
+If the container names in this field do not match with the ones
+generated by TiDB Operator, the container configurations will be
+appended to the Pod container spec directly.</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>additionalVolumes</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#volume-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volume-v1-core">
 []Kubernetes core/v1.Volume
 </a>
 </em>
@@ -4047,13 +6278,41 @@ Note that the following env names cannot be used and will be overridden by TiDB 
 <td>
 <code>additionalVolumeMounts</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#volumemount-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volumemount-v1-core">
 []Kubernetes core/v1.VolumeMount
 </a>
 </em>
 </td>
 <td>
 <p>Additional volume mounts of component pod.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>dnsConfig</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#poddnsconfig-v1-core">
+Kubernetes core/v1.PodDNSConfig
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>DNSConfig Specifies the DNS parameters of a pod.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>dnsPolicy</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#dnspolicy-v1-core">
+Kubernetes core/v1.DNSPolicy
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>DNSPolicy Specifies the DNSPolicy parameters of a pod.</p>
 </td>
 </tr>
 <tr>
@@ -4078,7 +6337,7 @@ Defaults to 30 seconds.</p>
 <td>
 <code>statefulSetUpdateStrategy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#statefulsetupdatestrategytype-v1-apps">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#statefulsetupdatestrategytype-v1-apps">
 Kubernetes apps/v1.StatefulSetUpdateStrategyType
 </a>
 </em>
@@ -4090,8 +6349,87 @@ employed to update Pods in the StatefulSet when a revision is made to
 Template.</p>
 </td>
 </tr>
+<tr>
+<td>
+<code>podManagementPolicy</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podmanagementpolicytype-v1-apps">
+Kubernetes apps/v1.PodManagementPolicyType
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>PodManagementPolicy of TiDB cluster StatefulSets</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>topologySpreadConstraints</code></br>
+<em>
+<a href="#topologyspreadconstraint">
+[]TopologySpreadConstraint
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>TopologySpreadConstraints describes how a group of pods ought to spread across topology
+domains. Scheduler will schedule pods in a way which abides by the constraints.
+This field is only honored by clusters that enables the EvenPodsSpread feature.
+All topologySpreadConstraints are ANDed.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>suspendAction</code></br>
+<em>
+<a href="#suspendaction">
+SuspendAction
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>SuspendAction defines the suspend actions for all component.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>securityContext</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#securitycontext-v1-core">
+Kubernetes core/v1.SecurityContext
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>SecurityContext defines the security options the component container should be run with.
+If set, the fields of SecurityContext override the equivalent fields of PodSecurityContext.
+More info: <a href="https://kubernetes.io/docs/tasks/configure-pod-container/security-context/">https://kubernetes.io/docs/tasks/configure-pod-container/security-context/</a></p>
+</td>
+</tr>
+<tr>
+<td>
+<code>readinessProbe</code></br>
+<em>
+<a href="#probe">
+Probe
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ReadinessProbe describes actions that probe the components&rsquo; readiness.
+the default behavior is like setting type as &ldquo;tcp&rdquo;</p>
+</td>
+</tr>
 </tbody>
 </table>
+<h3 id="componentstatus">ComponentStatus</h3>
+<p>
+</p>
 <h3 id="configmapref">ConfigMapRef</h3>
 <p>
 (<em>Appears on:</em>
@@ -4136,10 +6474,14 @@ string
 <p>
 (<em>Appears on:</em>
 <a href="#componentspec">ComponentSpec</a>, 
+<a href="#dmclusterspec">DMClusterSpec</a>, 
 <a href="#tidbclusterspec">TidbClusterSpec</a>)
 </p>
 <p>
 <p>ConfigUpdateStrategy represents the strategy to update configuration</p>
+</p>
+<h3 id="containername">ContainerName</h3>
+<p>
 </p>
 <h3 id="coprocessorcache">CoprocessorCache</h3>
 <p>
@@ -4267,7 +6609,7 @@ string
 <td>
 <code>AdditionalPrinterColums</code></br>
 <em>
-[]k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1.CustomResourceColumnDefinition
+[]k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1.CustomResourceColumnDefinition
 </em>
 </td>
 <td>
@@ -4382,7 +6724,7 @@ CrdKind
 </tr>
 <tr>
 <td>
-<code>TidbClusterAutoScaler</code></br>
+<code>TiDBNGMonitoring</code></br>
 <em>
 <a href="#crdkind">
 CrdKind
@@ -4390,6 +6732,121 @@ CrdKind
 </em>
 </td>
 <td>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="customizedprobe">CustomizedProbe</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#tidbspec">TiDBSpec</a>)
+</p>
+<p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>image</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>Image is the image of the probe binary.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>binaryName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>BinaryName is the name of the probe binary.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>args</code></br>
+<em>
+[]string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Args is the arguments of the probe binary.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>initialDelaySeconds</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Number of seconds after the container has started before liveness probes are initiated.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>timeoutSeconds</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Number of seconds after which the probe times out.
+Defaults to 1 second. Minimum value is 1.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>periodSeconds</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>How often (in seconds) to perform the probe.
+Default to 10 seconds. Minimum value is 1.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>successThreshold</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Minimum consecutive successes for the probe to be considered successful after having failed.
+Defaults to 1. Must be 1 for liveness and startup. Minimum value is 1.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>failureThreshold</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Minimum consecutive failures for the probe to be considered failed after having succeeded.
+Defaults to 3. Minimum value is 1.</p>
 </td>
 </tr>
 </tbody>
@@ -4427,7 +6884,7 @@ DMClusterConditionType
 <td>
 <code>status</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#conditionstatus-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#conditionstatus-v1-core">
 Kubernetes core/v1.ConditionStatus
 </a>
 </em>
@@ -4440,7 +6897,7 @@ Kubernetes core/v1.ConditionStatus
 <td>
 <code>lastUpdateTime</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
@@ -4453,7 +6910,7 @@ Kubernetes meta/v1.Time
 <td>
 <code>lastTransitionTime</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
@@ -4594,7 +7051,7 @@ string
 <td>
 <code>pvReclaimPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#persistentvolumereclaimpolicy-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumereclaimpolicy-v1-core">
 Kubernetes core/v1.PersistentVolumeReclaimPolicy
 </a>
 </em>
@@ -4607,7 +7064,7 @@ Kubernetes core/v1.PersistentVolumeReclaimPolicy
 <td>
 <code>imagePullPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#pullpolicy-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#pullpolicy-v1-core">
 Kubernetes core/v1.PullPolicy
 </a>
 </em>
@@ -4620,7 +7077,7 @@ Kubernetes core/v1.PullPolicy
 <td>
 <code>imagePullSecrets</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#localobjectreference-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core">
 []Kubernetes core/v1.LocalObjectReference
 </a>
 </em>
@@ -4628,6 +7085,23 @@ Kubernetes core/v1.PullPolicy
 <td>
 <em>(Optional)</em>
 <p>ImagePullSecrets is an optional list of references to secrets in the same namespace to use for pulling any of the images.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>configUpdateStrategy</code></br>
+<em>
+<a href="#configupdatestrategy">
+ConfigUpdateStrategy
+</a>
+</em>
+</td>
+<td>
+<p>ConfigUpdateStrategy determines how the configuration change is applied to the cluster.
+UpdateStrategyInPlace will update the ConfigMap of configuration in-place and an extra rolling-update of the
+cluster component is needed to reload the configuration change.
+UpdateStrategyRollingUpdate will create a new ConfigMap with the new configuration and rolling-update the
+related components to use the new ConfigMap, that is, the new configuration will be applied automatically.</p>
 </td>
 </tr>
 <tr>
@@ -4688,7 +7162,7 @@ Optional: Defaults to false</p>
 <td>
 <code>affinity</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#affinity-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#affinity-v1-core">
 Kubernetes core/v1.Affinity
 </a>
 </em>
@@ -4732,7 +7206,21 @@ map[string]string
 </td>
 <td>
 <em>(Optional)</em>
-<p>Base annotations of DM cluster Pods, components may add or override selectors upon this respectively</p>
+<p>Additional annotations for the dm cluster
+Can be overrode by annotations in master spec or worker spec</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>labels</code></br>
+<em>
+map[string]string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Additional labels for the dm cluster
+Can be overrode by labels in master spec or worker spec</p>
 </td>
 </tr>
 <tr>
@@ -4752,7 +7240,7 @@ Optional: Defaults to UTC</p>
 <td>
 <code>tolerations</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#toleration-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core">
 []Kubernetes core/v1.Toleration
 </a>
 </em>
@@ -4764,9 +7252,37 @@ Optional: Defaults to UTC</p>
 </tr>
 <tr>
 <td>
+<code>dnsConfig</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#poddnsconfig-v1-core">
+Kubernetes core/v1.PodDNSConfig
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>DNSConfig Specifies the DNS parameters of a pod.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>dnsPolicy</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#dnspolicy-v1-core">
+Kubernetes core/v1.DNSPolicy
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>DNSPolicy Specifies the DNSPolicy parameters of a pod.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>podSecurityContext</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#podsecuritycontext-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podsecuritycontext-v1-core">
 Kubernetes core/v1.PodSecurityContext
 </a>
 </em>
@@ -4774,6 +7290,76 @@ Kubernetes core/v1.PodSecurityContext
 <td>
 <em>(Optional)</em>
 <p>PodSecurityContext of the component</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>statefulSetUpdateStrategy</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#statefulsetupdatestrategytype-v1-apps">
+Kubernetes apps/v1.StatefulSetUpdateStrategyType
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>StatefulSetUpdateStrategy of DM cluster StatefulSets</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>podManagementPolicy</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podmanagementpolicytype-v1-apps">
+Kubernetes apps/v1.PodManagementPolicyType
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>PodManagementPolicy of DM cluster StatefulSets</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>topologySpreadConstraints</code></br>
+<em>
+<a href="#topologyspreadconstraint">
+[]TopologySpreadConstraint
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>TopologySpreadConstraints describes how a group of pods ought to spread across topology
+domains. Scheduler will schedule pods in a way which abides by the constraints.
+This field is is only honored by clusters that enables the EvenPodsSpread feature.
+All topologySpreadConstraints are ANDed.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>suspendAction</code></br>
+<em>
+<a href="#suspendaction">
+SuspendAction
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>SuspendAction defines the suspend actions for all component.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>preferIPv6</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>PreferIPv6 indicates whether to prefer IPv6 addresses for all components.</p>
 </td>
 </tr>
 </tbody>
@@ -4852,9 +7438,24 @@ WorkerStatus
 <tbody>
 <tr>
 <td>
+<code>ComponentSpec</code></br>
+<em>
+<a href="#componentspec">
+ComponentSpec
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ComponentSpec</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>ResourceRequirements</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -4867,6 +7468,23 @@ Kubernetes core/v1.ResourceRequirements
 </tr>
 <tr>
 <td>
+<code>livenessProbe</code></br>
+<em>
+<a href="#probe">
+Probe
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>LivenessProbe describes actions that probe the discovery&rsquo;s liveness.
+the default behavior is like setting type as &ldquo;tcp&rdquo;
+NOTE: only used for TiDB Operator discovery now,
+for other components, the auto failover feature may be used instead.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>address</code></br>
 <em>
 string
@@ -4874,6 +7492,35 @@ string
 </td>
 <td>
 <p>(Deprecated) Address indicates the existed TiDB discovery address</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="dmexperimental">DMExperimental</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#masterconfig">MasterConfig</a>)
+</p>
+<p>
+<p>DM experimental config</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>openapi</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>OpenAPI was introduced in DM V5.3.0</p>
 </td>
 </tr>
 </tbody>
@@ -5148,9 +7795,24 @@ string
 <tbody>
 <tr>
 <td>
+<code>ComponentSpec</code></br>
+<em>
+<a href="#componentspec">
+ComponentSpec
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ComponentSpec</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>ResourceRequirements</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -5159,6 +7821,23 @@ Kubernetes core/v1.ResourceRequirements
 <p>
 (Members of <code>ResourceRequirements</code> are embedded into this type.)
 </p>
+</td>
+</tr>
+<tr>
+<td>
+<code>livenessProbe</code></br>
+<em>
+<a href="#probe">
+Probe
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>LivenessProbe describes actions that probe the discovery&rsquo;s liveness.
+the default behavior is like setting type as &ldquo;tcp&rdquo;
+NOTE: only used for TiDB Operator discovery now,
+for other components, the auto failover feature may be used instead.</p>
 </td>
 </tr>
 </tbody>
@@ -5199,6 +7878,68 @@ Kubernetes core/v1.ResourceRequirements
 </td>
 <td>
 <p>Deprecated. Please use <code>Spec.TableFilter</code> instead. TableFilter means Table filter expression for &lsquo;db.table&rsquo; matching</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="emptystruct">EmptyStruct</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#pdfailuremember">PDFailureMember</a>, 
+<a href="#tikvfailurestore">TiKVFailureStore</a>, 
+<a href="#unjoinedmember">UnjoinedMember</a>)
+</p>
+<p>
+<p>EmptyStruct is defined to delight controller-gen tools
+Only named struct is allowed by controller-gen</p>
+</p>
+<h3 id="evictleaderstatus">EvictLeaderStatus</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#tikvstatus">TiKVStatus</a>)
+</p>
+<p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>podCreateTime</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
+Kubernetes meta/v1.Time
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>beginTime</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
+Kubernetes meta/v1.Time
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>value</code></br>
+<em>
+string
+</em>
+</td>
+<td>
 </td>
 </tr>
 </tbody>
@@ -5248,13 +7989,15 @@ bool
 </tr>
 </tbody>
 </table>
-<h3 id="externalconfig">ExternalConfig</h3>
+<h3 id="failover">Failover</h3>
 <p>
 (<em>Appears on:</em>
-<a href="#basicautoscalerspec">BasicAutoScalerSpec</a>)
+<a href="#tiflashspec">TiFlashSpec</a>, 
+<a href="#tikvspec">TiKVSpec</a>, 
+<a href="#workerspec">WorkerSpec</a>)
 </p>
 <p>
-<p>ExternalConfig represents the external config.</p>
+<p>Failover contains the failover specification.</p>
 </p>
 <table>
 <thead>
@@ -5266,99 +8009,35 @@ bool
 <tbody>
 <tr>
 <td>
-<code>endpoint</code></br>
+<code>recoverByUID</code></br>
 <em>
-<a href="#externalendpoint">
-ExternalEndpoint
-</a>
+k8s.io/apimachinery/pkg/types.UID
 </em>
 </td>
 <td>
 <em>(Optional)</em>
-<p>ExternalEndpoint makes the auto-scaler controller able to query the
-external service to fetch the recommended replicas for TiKV/TiDB</p>
-</td>
-</tr>
-<tr>
-<td>
-<code>maxReplicas</code></br>
-<em>
-int32
-</em>
-</td>
-<td>
-<p>maxReplicas is the upper limit for the number of replicas to which the autoscaler can scale out.</p>
+<p>RecoverByUID indicates that TiDB Operator will recover the failover by this UID,
+it takes effect only when set <code>spec.recoverFailover=false</code></p>
 </td>
 </tr>
 </tbody>
 </table>
-<h3 id="externalendpoint">ExternalEndpoint</h3>
+<h3 id="federalvolumebackupphase">FederalVolumeBackupPhase</h3>
 <p>
 (<em>Appears on:</em>
-<a href="#externalconfig">ExternalConfig</a>)
+<a href="#backupspec">BackupSpec</a>)
 </p>
 <p>
-<p>ExternalEndpoint describes the external service endpoint
-which provides the ability to get the tikv/tidb auto-scaling recommended replicas</p>
+<p>FederalVolumeBackupPhase represents a phase to execute in federal volume backup</p>
 </p>
-<table>
-<thead>
-<tr>
-<th>Field</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>
-<code>host</code></br>
-<em>
-string
-</em>
-</td>
-<td>
-<p>Host indicates the external service&rsquo;s host</p>
-</td>
-</tr>
-<tr>
-<td>
-<code>port</code></br>
-<em>
-int32
-</em>
-</td>
-<td>
-<p>Port indicates the external service&rsquo;s port</p>
-</td>
-</tr>
-<tr>
-<td>
-<code>path</code></br>
-<em>
-string
-</em>
-</td>
-<td>
-<p>Path indicates the external service&rsquo;s path</p>
-</td>
-</tr>
-<tr>
-<td>
-<code>tlsSecret</code></br>
-<em>
-<a href="#secretref">
-SecretRef
-</a>
-</em>
-</td>
-<td>
-<em>(Optional)</em>
-<p>TLSSecret indicates the Secret which stores the TLS configuration. If set, the operator will use https
-to communicate to the external service</p>
-</td>
-</tr>
-</tbody>
-</table>
+<h3 id="federalvolumerestorephase">FederalVolumeRestorePhase</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#restorespec">RestoreSpec</a>)
+</p>
+<p>
+<p>FederalVolumeRestorePhase represents a phase to execute in federal volume restore</p>
+</p>
 <h3 id="filelogconfig">FileLogConfig</h3>
 <p>
 (<em>Appears on:</em>
@@ -6020,6 +8699,7 @@ string
 </em>
 </td>
 <td>
+<p>Grafana log level</p>
 </td>
 </tr>
 <tr>
@@ -6032,6 +8712,35 @@ ServiceSpec
 </em>
 </td>
 <td>
+<p>Service defines a Kubernetes service of Grafana.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>usernameSecret</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#secretkeyselector-v1-core">
+Kubernetes core/v1.SecretKeySelector
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>if <code>UsernameSecret</code> is not set, <code>username</code> will be used.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>passwordSecret</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#secretkeyselector-v1-core">
+Kubernetes core/v1.SecretKeySelector
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>if <code>passwordSecret</code> is not set, <code>password</code> will be used.</p>
 </td>
 </tr>
 <tr>
@@ -6042,6 +8751,8 @@ string
 </em>
 </td>
 <td>
+<em>(Optional)</em>
+<p>Deprecated in v1.3.0 for security concerns, planned for removal in v1.4.0. Use <code>usernameSecret</code> instead.</p>
 </td>
 </tr>
 <tr>
@@ -6052,6 +8763,8 @@ string
 </em>
 </td>
 <td>
+<em>(Optional)</em>
+<p>Deprecated in v1.3.0 for security concerns, planned for removal in v1.4.0. Use <code>passwordSecret</code> instead.</p>
 </td>
 </tr>
 <tr>
@@ -6076,6 +8789,20 @@ IngressSpec
 </td>
 <td>
 <em>(Optional)</em>
+<p>Ingress configuration of Prometheus</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>additionalVolumeMounts</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volumemount-v1-core">
+[]Kubernetes core/v1.VolumeMount
+</a>
+</em>
+</td>
+<td>
+<p>Additional volume mounts of grafana pod.</p>
 </td>
 </tr>
 </tbody>
@@ -6106,14 +8833,14 @@ string
 <td>
 <em>(Optional)</em>
 <p>Image used to tail slow log and set kernel parameters if necessary, must have <code>tail</code> and <code>sysctl</code> installed
-Optional: Defaults to busybox:1.26.2</p>
+Optional: Defaults to busybox:1.26.2. Recommended to set to 1.34.1 for new installations.</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>imagePullPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#pullpolicy-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#pullpolicy-v1-core">
 Kubernetes core/v1.PullPolicy
 </a>
 </em>
@@ -6170,8 +8897,8 @@ map[string]string
 <td>
 <code>tls</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#ingresstls-v1beta1-extensions">
-[]Kubernetes extensions/v1beta1.IngressTLS
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#ingresstls-v1-networking">
+[]Kubernetes networking/v1.IngressTLS
 </a>
 </em>
 </td>
@@ -6182,6 +8909,54 @@ port, 443. If multiple members of this list specify different hosts, they
 will be multiplexed on the same port according to the hostname specified
 through the SNI TLS extension, if the ingress controller fulfilling the
 ingress supports SNI.</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="initcontainerspec">InitContainerSpec</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#tiflashspec">TiFlashSpec</a>)
+</p>
+<p>
+<p>InitContainerSpec contains basic spec about a init container</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>ResourceRequirements</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
+Kubernetes core/v1.ResourceRequirements
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ResourceRequirements</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>securityContext</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#securitycontext-v1-core">
+Kubernetes core/v1.SecurityContext
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>SecurityContext defines the security options the init container should be run with.
+More info: <a href="https://kubernetes.io/docs/tasks/configure-pod-container/security-context/">https://kubernetes.io/docs/tasks/configure-pod-container/security-context/</a></p>
 </td>
 </tr>
 </tbody>
@@ -6379,7 +9154,7 @@ imported from v3.1.0</p>
 <td>
 <code>volume</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#volume-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volume-v1-core">
 Kubernetes core/v1.Volume
 </a>
 </em>
@@ -6391,7 +9166,7 @@ Kubernetes core/v1.Volume
 <td>
 <code>volumeMount</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#volumemount-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volumemount-v1-core">
 Kubernetes core/v1.VolumeMount
 </a>
 </em>
@@ -6577,6 +9352,111 @@ uint32
 </tr>
 </tbody>
 </table>
+<h3 id="logsubcommandstatus">LogSubCommandStatus</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#backupstatus">BackupStatus</a>)
+</p>
+<p>
+<p>LogSubCommandStatus is the log backup subcommand&rsquo;s status.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>command</code></br>
+<em>
+<a href="#logsubcommandtype">
+LogSubCommandType
+</a>
+</em>
+</td>
+<td>
+<p>Command is the log backup subcommand.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>timeStarted</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
+Kubernetes meta/v1.Time
+</a>
+</em>
+</td>
+<td>
+<p>TimeStarted is the time at which the command was started.
+TODO: remove nullable, <a href="https://github.com/kubernetes/kubernetes/issues/86811">https://github.com/kubernetes/kubernetes/issues/86811</a></p>
+</td>
+</tr>
+<tr>
+<td>
+<code>timeCompleted</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
+Kubernetes meta/v1.Time
+</a>
+</em>
+</td>
+<td>
+<p>TimeCompleted is the time at which the command was completed.
+TODO: remove nullable, <a href="https://github.com/kubernetes/kubernetes/issues/86811">https://github.com/kubernetes/kubernetes/issues/86811</a></p>
+</td>
+</tr>
+<tr>
+<td>
+<code>logTruncatingUntil</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>LogTruncatingUntil is log backup truncate until timestamp which is used to mark the truncate command.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>phase</code></br>
+<em>
+<a href="#backupconditiontype">
+BackupConditionType
+</a>
+</em>
+</td>
+<td>
+<p>Phase is the command current phase.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>conditions</code></br>
+<em>
+<a href="#backupcondition">
+[]BackupCondition
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="logsubcommandtype">LogSubCommandType</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#backupcondition">BackupCondition</a>, 
+<a href="#backupspec">BackupSpec</a>, 
+<a href="#logsubcommandstatus">LogSubCommandStatus</a>)
+</p>
+<p>
+<p>LogSubCommandType is the log backup subcommand type.</p>
+</p>
 <h3 id="logtailerspec">LogTailerSpec</h3>
 <p>
 (<em>Appears on:</em>
@@ -6598,7 +9478,7 @@ uint32
 <td>
 <code>ResourceRequirements</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -6609,13 +9489,53 @@ Kubernetes core/v1.ResourceRequirements
 </p>
 </td>
 </tr>
+<tr>
+<td>
+<code>useSidecar</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>If true, we use native sidecar feature to tail log
+It requires enable feature gate &ldquo;SidecarContainers&rdquo;
+This feature is introduced at 1.28, default enabled at 1.29, and GA at 1.33
+See <a href="https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/">https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/</a>
+and <a href="https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/">https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/</a></p>
+</td>
+</tr>
+<tr>
+<td>
+<code>sleepTimeSeconds</code></br>
+<em>
+int64
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Tailer needs to wait to flush logs to stdout after receiving sig TERM
+Default is not sleep</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>securityContext</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#securitycontext-v1-core">
+Kubernetes core/v1.SecurityContext
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>SecurityContext defines the security options the log tailer container should be run with.
+More info: <a href="https://kubernetes.io/docs/tasks/configure-pod-container/security-context/">https://kubernetes.io/docs/tasks/configure-pod-container/security-context/</a></p>
+</td>
+</tr>
 </tbody>
 </table>
 <h3 id="masterconfig">MasterConfig</h3>
-<p>
-(<em>Appears on:</em>
-<a href="#masterspec">MasterSpec</a>)
-</p>
 <p>
 <p>MasterConfig is the configuration of dm-master-server</p>
 </p>
@@ -6720,6 +9640,50 @@ DMSecurityConfig
 <p>dm-master&rsquo;s security config</p>
 </td>
 </tr>
+<tr>
+<td>
+<code>experimental</code></br>
+<em>
+<a href="#dmexperimental">
+DMExperimental
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>dm-master&rsquo;s experimental config</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="masterconfigwraper">MasterConfigWraper</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#masterspec">MasterSpec</a>)
+</p>
+<p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>GenericConfig</code></br>
+<em>
+github.com/pingcap/tidb-operator/pkg/apis/util/config.GenericConfig
+</em>
+</td>
+<td>
+<p>
+(Members of <code>GenericConfig</code> are embedded into this type.)
+</p>
+</td>
+</tr>
 </tbody>
 </table>
 <h3 id="masterfailuremember">MasterFailureMember</h3>
@@ -6782,7 +9746,7 @@ bool
 <td>
 <code>createdAt</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
@@ -6978,7 +9942,7 @@ bool
 <td>
 <code>lastTransitionTime</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
@@ -7023,8 +9987,8 @@ ServiceSpec
 <td>
 <code>externalTrafficPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#serviceexternaltrafficpolicytype-v1-core">
-Kubernetes core/v1.ServiceExternalTrafficPolicyType
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#serviceexternaltrafficpolicy-v1-core">
+Kubernetes core/v1.ServiceExternalTrafficPolicy
 </a>
 </em>
 </td>
@@ -7083,7 +10047,7 @@ ComponentSpec
 <td>
 <code>ResourceRequirements</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -7194,14 +10158,26 @@ Defaults to &ldquo;&rdquo; (volume&rsquo;s root).</p>
 <td>
 <code>config</code></br>
 <em>
-<a href="#masterconfig">
-MasterConfig
+<a href="#masterconfigwraper">
+MasterConfigWraper
 </a>
 </em>
 </td>
 <td>
 <em>(Optional)</em>
 <p>Config is the Configuration of dm-master-servers</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>startUpScriptVersion</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Start up script version</p>
 </td>
 </tr>
 </tbody>
@@ -7248,7 +10224,7 @@ MemberPhase
 <td>
 <code>statefulSet</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#statefulsetstatus-v1-apps">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#statefulsetstatus-v1-apps">
 Kubernetes apps/v1.StatefulSetStatus
 </a>
 </em>
@@ -7314,17 +10290,48 @@ string
 <td>
 </td>
 </tr>
+<tr>
+<td>
+<code>volumes</code></br>
+<em>
+<a href="#storagevolumestatus">
+map[github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.StorageVolumeName]*github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.StorageVolumeStatus
+</a>
+</em>
+</td>
+<td>
+<p>Volumes contains the status of all volumes.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>conditions</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta">
+[]Kubernetes meta/v1.Condition
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Represents the latest available observations of a component&rsquo;s state.</p>
+</td>
+</tr>
 </tbody>
 </table>
 <h3 id="memberphase">MemberPhase</h3>
 <p>
 (<em>Appears on:</em>
 <a href="#masterstatus">MasterStatus</a>, 
+<a href="#ngmonitoringstatus">NGMonitoringStatus</a>, 
+<a href="#pdmsstatus">PDMSStatus</a>, 
 <a href="#pdstatus">PDStatus</a>, 
 <a href="#pumpstatus">PumpStatus</a>, 
 <a href="#ticdcstatus">TiCDCStatus</a>, 
 <a href="#tidbstatus">TiDBStatus</a>, 
 <a href="#tikvstatus">TiKVStatus</a>, 
+<a href="#tiproxystatus">TiProxyStatus</a>, 
+<a href="#tidbdashboardstatus">TidbDashboardStatus</a>, 
 <a href="#workerstatus">WorkerStatus</a>)
 </p>
 <p>
@@ -7334,6 +10341,46 @@ string
 <p>
 <p>MemberType represents member type</p>
 </p>
+<h3 id="metadataconfig">MetadataConfig</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#remotewritespec">RemoteWriteSpec</a>)
+</p>
+<p>
+<p>Configures the sending of series metadata to remote storage.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>send</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>Whether metric metadata is sent to remote storage or not.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>sendInterval</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>How frequently metric metadata is sent to remote storage.</p>
+</td>
+</tr>
+</tbody>
+</table>
 <h3 id="monitorcomponentaccessor">MonitorComponentAccessor</h3>
 <p>
 </p>
@@ -7342,6 +10389,7 @@ string
 (<em>Appears on:</em>
 <a href="#grafanaspec">GrafanaSpec</a>, 
 <a href="#initializerspec">InitializerSpec</a>, 
+<a href="#prometheusreloaderspec">PrometheusReloaderSpec</a>, 
 <a href="#prometheusspec">PrometheusSpec</a>, 
 <a href="#reloaderspec">ReloaderSpec</a>, 
 <a href="#thanosspec">ThanosSpec</a>)
@@ -7361,7 +10409,7 @@ string
 <td>
 <code>ResourceRequirements</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -7396,13 +10444,186 @@ string
 <td>
 <code>imagePullPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#pullpolicy-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#pullpolicy-v1-core">
 Kubernetes core/v1.PullPolicy
 </a>
 </em>
 </td>
 <td>
 <em>(Optional)</em>
+</td>
+</tr>
+<tr>
+<td>
+<code>securityContext</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#securitycontext-v1-core">
+Kubernetes core/v1.SecurityContext
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>SecurityContext defines the security options the monitor container should be run with.
+More info: <a href="https://kubernetes.io/docs/tasks/configure-pod-container/security-context/">https://kubernetes.io/docs/tasks/configure-pod-container/security-context/</a></p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="ngmonitoringspec">NGMonitoringSpec</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#tidbngmonitoringspec">TidbNGMonitoringSpec</a>)
+</p>
+<p>
+<p>NGMonitoringSpec is spec of ng monitoring</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>ComponentSpec</code></br>
+<em>
+<a href="#componentspec">
+ComponentSpec
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ComponentSpec</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>ResourceRequirements</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
+Kubernetes core/v1.ResourceRequirements
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ResourceRequirements</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>baseImage</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>Base image of the component, image tag is now allowed during validation</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>storageClassName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>StorageClassName is the persistent volume for ng monitoring.
+Defaults to Kubernetes default storage class.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>storageVolumes</code></br>
+<em>
+<a href="#storagevolume">
+[]StorageVolume
+</a>
+</em>
+</td>
+<td>
+<p>StorageVolumes configures additional storage for NG Monitoring pods.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>retentionPeriod</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>Retention period to store ng monitoring data</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>config</code></br>
+<em>
+github.com/pingcap/tidb-operator/pkg/apis/util/config.GenericConfig
+</em>
+</td>
+<td>
+<p>Config is the configuration of ng monitoring</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="ngmonitoringstatus">NGMonitoringStatus</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#tidbngmonitoringstatus">TidbNGMonitoringStatus</a>)
+</p>
+<p>
+<p>NGMonitoringStatus is latest status of ng monitoring</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>synced</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>phase</code></br>
+<em>
+<a href="#memberphase">
+MemberPhase
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>statefulSet</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#statefulsetstatus-v1-apps">
+Kubernetes apps/v1.StatefulSetStatus
+</a>
+</em>
+</td>
+<td>
 </td>
 </tr>
 </tbody>
@@ -7432,6 +10653,133 @@ string
 </td>
 <td>
 <em>(Optional)</em>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="observedstoragevolumestatus">ObservedStorageVolumeStatus</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#storagevolumestatus">StorageVolumeStatus</a>)
+</p>
+<p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>boundCount</code></br>
+<em>
+int
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>BoundCount is the count of bound volumes.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>currentCount</code></br>
+<em>
+int
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>CurrentCount is the count of volumes whose capacity is equal to <code>currentCapacity</code>.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>modifiedCount</code></br>
+<em>
+int
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ModifiedCount is the count of modified volumes.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>currentCapacity</code></br>
+<em>
+k8s.io/apimachinery/pkg/api/resource.Quantity
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>CurrentCapacity is the current capacity of the volume.
+If any volume is resizing, it is the capacity before resizing.
+If all volumes are resized, it is the resized capacity and same as desired capacity.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>modifiedCapacity</code></br>
+<em>
+k8s.io/apimachinery/pkg/api/resource.Quantity
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ModifiedCapacity is the modified capacity of the volume.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>currentStorageClass</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>CurrentStorageClass is the modified capacity of the volume.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>modifiedStorageClass</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ModifiedStorageClass is the modified storage calss of the volume.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>resizedCapacity</code></br>
+<em>
+k8s.io/apimachinery/pkg/api/resource.Quantity
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>(Deprecated) ResizedCapacity is the desired capacity of the volume.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>resizedCount</code></br>
+<em>
+int
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>(Deprecated) ResizedCount is the count of volumes whose capacity is equal to <code>resizedCapacity</code>.</p>
 </td>
 </tr>
 </tbody>
@@ -7972,6 +11320,7 @@ DashboardConfig
 <h3 id="pdconfigwraper">PDConfigWraper</h3>
 <p>
 (<em>Appears on:</em>
+<a href="#pdmsspec">PDMSSpec</a>, 
 <a href="#pdspec">PDSpec</a>)
 </p>
 <p>
@@ -7988,10 +11337,13 @@ DashboardConfig
 <td>
 <code>GenericConfig</code></br>
 <em>
-github.com/pingcap/tidb-operator/pkg/util/config.GenericConfig
+github.com/pingcap/tidb-operator/pkg/apis/util/config.GenericConfig
 </em>
 </td>
 <td>
+<p>
+(Members of <code>GenericConfig</code> are embedded into this type.)
+</p>
 </td>
 </tr>
 </tbody>
@@ -8046,7 +11398,9 @@ k8s.io/apimachinery/pkg/types.UID
 <td>
 <code>pvcUIDSet</code></br>
 <em>
-map[k8s.io/apimachinery/pkg/types.UID]struct{}
+<a href="#emptystruct">
+map[k8s.io/apimachinery/pkg/types.UID]github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.EmptyStruct
+</a>
 </em>
 </td>
 <td>
@@ -8064,9 +11418,19 @@ bool
 </tr>
 <tr>
 <td>
+<code>hostDown</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
 <code>createdAt</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
@@ -8205,6 +11569,327 @@ message.</p>
 </tr>
 </tbody>
 </table>
+<h3 id="pdmsspec">PDMSSpec</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#tidbclusterspec">TidbClusterSpec</a>)
+</p>
+<p>
+<p>PDMSSpec contains details of PD microservice</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>ComponentSpec</code></br>
+<em>
+<a href="#componentspec">
+ComponentSpec
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ComponentSpec</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>ResourceRequirements</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
+Kubernetes core/v1.ResourceRequirements
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ResourceRequirements</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>name</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>Name of the PD microservice</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>serviceAccount</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>Specify a Service Account for pd ms</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>replicas</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<p>The desired ready replicas</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>baseImage</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Base image of the component, image tag is now allowed during validation</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>service</code></br>
+<em>
+<a href="#servicespec">
+ServiceSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Service defines a Kubernetes service of PD microservice cluster.
+Optional: Defaults to <code>.spec.services</code> in favor of backward compatibility</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>maxFailoverCount</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>MaxFailoverCount limit the max replicas could be added in failover, 0 means no failover.
+Optional: Defaults to 3</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>config</code></br>
+<em>
+<a href="#pdconfigwraper">
+PDConfigWraper
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Config is the configuration of PD microservice servers</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>tlsClientSecretName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>TLSClientSecretName is the name of secret which stores tidb server client certificate
+which used by Dashboard.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>mountClusterClientSecret</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>MountClusterClientSecret indicates whether to mount <code>cluster-client-secret</code> to the Pod</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>startUpScriptVersion</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Start up script version</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>storageClassName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>The storageClassName of the persistent volume for PD microservice log storage.
+Defaults to Kubernetes default storage class.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>storageVolumes</code></br>
+<em>
+<a href="#storagevolume">
+[]StorageVolume
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>StorageVolumes configure additional storage for PD microservice pods.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>startTimeout</code></br>
+<em>
+int
+</em>
+</td>
+<td>
+<p>Timeout threshold when pd get started</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="pdmsstatus">PDMSStatus</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#tidbclusterstatus">TidbClusterStatus</a>)
+</p>
+<p>
+<p>PDMSStatus is PD microservice status</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>name</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>synced</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+</td>
+</tr>
+<tr>
+<td>
+<code>phase</code></br>
+<em>
+<a href="#memberphase">
+MemberPhase
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>statefulSet</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#statefulsetstatus-v1-apps">
+Kubernetes apps/v1.StatefulSetStatus
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>volumes</code></br>
+<em>
+<a href="#storagevolumestatus">
+map[github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.StorageVolumeName]*github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.StorageVolumeStatus
+</a>
+</em>
+</td>
+<td>
+<p>Volumes contains the status of all volumes.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>members</code></br>
+<em>
+[]string
+</em>
+</td>
+<td>
+<p>Members contains other service in current TidbCluster</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>image</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>conditions</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta">
+[]Kubernetes meta/v1.Condition
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Represents the latest available observations of a component&rsquo;s state.</p>
+</td>
+</tr>
+</tbody>
+</table>
 <h3 id="pdmember">PDMember</h3>
 <p>
 (<em>Appears on:</em>
@@ -8267,13 +11952,14 @@ bool
 <td>
 <code>lastTransitionTime</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
 </td>
 <td>
-<p>Last time the health transitioned from one to another.</p>
+<p>Last time the health transitioned from one to another.
+TODO: remove nullable, <a href="https://github.com/kubernetes/kubernetes/issues/86811">https://github.com/kubernetes/kubernetes/issues/86811</a></p>
 </td>
 </tr>
 </tbody>
@@ -9095,7 +12781,7 @@ ComponentSpec
 <td>
 <code>ResourceRequirements</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -9266,6 +12952,68 @@ bool
 <p>MountClusterClientSecret indicates whether to mount <code>cluster-client-secret</code> to the Pod</p>
 </td>
 </tr>
+<tr>
+<td>
+<code>startUpScriptVersion</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Start up script version</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>startTimeout</code></br>
+<em>
+int
+</em>
+</td>
+<td>
+<p>Timeout threshold when pd get started</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>initWaitTime</code></br>
+<em>
+int
+</em>
+</td>
+<td>
+<p>Wait time before pd get started. This wait time is to allow the new DNS record to propagate,
+ensuring that the PD DNS resolves to the same IP address as the pod.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>mode</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Mode is the mode of PD cluster</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>spareVolReplaceReplicas</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>The default number of spare replicas to scale up when using VolumeReplace feature.
+In multi-az deployments with topology spread constraints you may need to set this to number of zones to avoid
+zone skew after volume replace (total replicas always whole multiples of zones).
+Optional: Defaults to 1</p>
+</td>
+</tr>
 </tbody>
 </table>
 <h3 id="pdstatus">PDStatus</h3>
@@ -9292,6 +13040,7 @@ bool
 </em>
 </td>
 <td>
+<em>(Optional)</em>
 </td>
 </tr>
 <tr>
@@ -9310,7 +13059,7 @@ MemberPhase
 <td>
 <code>statefulSet</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#statefulsetstatus-v1-apps">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#statefulsetstatus-v1-apps">
 Kubernetes apps/v1.StatefulSetStatus
 </a>
 </em>
@@ -9388,6 +13137,44 @@ string
 </em>
 </td>
 <td>
+</td>
+</tr>
+<tr>
+<td>
+<code>volumes</code></br>
+<em>
+<a href="#storagevolumestatus">
+map[github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.StorageVolumeName]*github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.StorageVolumeStatus
+</a>
+</em>
+</td>
+<td>
+<p>Volumes contains the status of all volumes.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>conditions</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta">
+[]Kubernetes meta/v1.Condition
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Represents the latest available observations of a component&rsquo;s state.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>volReplaceInProgress</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>Indicates that a Volume replace using VolumeReplacing feature is in progress.</p>
 </td>
 </tr>
 </tbody>
@@ -9835,6 +13622,68 @@ float64
 </tr>
 </tbody>
 </table>
+<h3 id="probe">Probe</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#componentspec">ComponentSpec</a>, 
+<a href="#dmdiscoveryspec">DMDiscoverySpec</a>, 
+<a href="#discoveryspec">DiscoverySpec</a>)
+</p>
+<p>
+<p>Probe contains details of probing tidb.
+default probe by TCPPort on tidb 4000 / tikv 20160 / pd 2349.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>type</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>&ldquo;tcp&rdquo; will use TCP socket to connect component port.</p>
+<p>&ldquo;command&rdquo; will probe the status api of tidb.
+This will use curl command to request tidb, before v4.0.9 there is no curl in the image,
+So do not use this before v4.0.9.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>initialDelaySeconds</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Number of seconds after the container has started before liveness probes are initiated.
+Default to 10 seconds.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>periodSeconds</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>How often (in seconds) to perform the probe.
+Default to Kubernetes default (10 seconds). Minimum value is 1.</p>
+</td>
+</tr>
+</tbody>
+</table>
 <h3 id="profile">Profile</h3>
 <p>
 <p>Profile is the configuration profiles.</p>
@@ -9893,6 +13742,59 @@ string
 </tr>
 </tbody>
 </table>
+<h3 id="progress">Progress</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#backupstatus">BackupStatus</a>, 
+<a href="#restorestatus">RestoreStatus</a>)
+</p>
+<p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>step</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>Step is the step name of progress</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>progress</code></br>
+<em>
+float64
+</em>
+</td>
+<td>
+<p>Progress is the backup progress value</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>lastTransitionTime</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
+Kubernetes meta/v1.Time
+</a>
+</em>
+</td>
+<td>
+<p>LastTransitionTime is the update time</p>
+</td>
+</tr>
+</tbody>
+</table>
 <h3 id="prometheusconfiguration">PrometheusConfiguration</h3>
 <p>
 (<em>Appears on:</em>
@@ -9919,7 +13821,7 @@ ConfigMapRef
 </em>
 </td>
 <td>
-<p>user can mount prometheus rule config with external configMap.If use this feature, the external configMap must contain <code>prometheus-config</code> key in data.</p>
+<p>User can mount prometheus config with external configMap. The external configMap must contain <code>prometheus-config</code> key in data.</p>
 </td>
 </tr>
 <tr>
@@ -9931,6 +13833,52 @@ ConfigMapRef
 </td>
 <td>
 <p>user can  use it specify prometheus command options</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>ruleConfigRef</code></br>
+<em>
+<a href="#configmapref">
+ConfigMapRef
+</a>
+</em>
+</td>
+<td>
+<p>User can mount prometheus rule config with external configMap. The external configMap must use the key with suffix <code>.rules.yml</code>.</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="prometheusreloaderspec">PrometheusReloaderSpec</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#tidbmonitorspec">TidbMonitorSpec</a>)
+</p>
+<p>
+<p>PrometheusReloaderSpec is the desired state of prometheus configuration reloader</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>MonitorContainer</code></br>
+<em>
+<a href="#monitorcontainer">
+MonitorContainer
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>MonitorContainer</code> are embedded into this type.)
+</p>
 </td>
 </tr>
 </tbody>
@@ -9974,6 +13922,7 @@ string
 </em>
 </td>
 <td>
+<p>Prometheus log level</p>
 </td>
 </tr>
 <tr>
@@ -9986,6 +13935,7 @@ ServiceSpec
 </em>
 </td>
 <td>
+<p>Service defines a Kubernetes service of Prometheus.</p>
 </td>
 </tr>
 <tr>
@@ -9997,6 +13947,21 @@ int
 </td>
 <td>
 <em>(Optional)</em>
+<p>ReserveDays defines Prometheus Configuration for <code>--storage.tsdb.retention.time</code> of units d.
+reserveDays will be used if retentionTime not defined.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>retentionTime</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Configuration for <code>--storage.tsdb.retention.time</code>, Units Supported: y, w, d, h, m, s, ms.
+If set to non empty values, it will override the value of <code>ReserveDays</code>.</p>
 </td>
 </tr>
 <tr>
@@ -10010,6 +13975,7 @@ IngressSpec
 </td>
 <td>
 <em>(Optional)</em>
+<p>Ingress configuration of Prometheus</p>
 </td>
 </tr>
 <tr>
@@ -10023,6 +13989,7 @@ PrometheusConfiguration
 </td>
 <td>
 <em>(Optional)</em>
+<p>Config is the Configuration of Prometheus include Prometheus config/Cli options/custom rules.</p>
 </td>
 </tr>
 <tr>
@@ -10033,15 +14000,16 @@ bool
 </em>
 </td>
 <td>
-<p>Disable prometheus compaction.</p>
+<p>Disable prometheus compaction.
+Defaults to false.</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>remoteWrite</code></br>
 <em>
-<a href="#*github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.remotewritespec">
-[]*github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.RemoteWriteSpec
+<a href="#remotewritespec">
+[]RemoteWriteSpec
 </a>
 </em>
 </td>
@@ -10053,7 +14021,7 @@ bool
 <td>
 <code>additionalVolumeMounts</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#volumemount-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volumemount-v1-core">
 []Kubernetes core/v1.VolumeMount
 </a>
 </em>
@@ -10316,6 +14284,62 @@ uint
 </tr>
 </tbody>
 </table>
+<h3 id="prunetype">PruneType</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#restorespec">RestoreSpec</a>)
+</p>
+<p>
+<p>PruneType represents the prune type for restore.</p>
+</p>
+<h3 id="pumpnodestatus">PumpNodeStatus</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#pumpstatus">PumpStatus</a>)
+</p>
+<p>
+<p>PumpNodeStatus represents the status saved in etcd.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>nodeId</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>host</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>state</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+</td>
+</tr>
+</tbody>
+</table>
 <h3 id="pumpspec">PumpSpec</h3>
 <p>
 (<em>Appears on:</em>
@@ -10351,7 +14375,7 @@ ComponentSpec
 <td>
 <code>ResourceRequirements</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -10413,7 +14437,7 @@ Defaults to Kubernetes default storage class.</p>
 <td>
 <code>config</code></br>
 <em>
-github.com/pingcap/tidb-operator/pkg/util/config.GenericConfig
+github.com/pingcap/tidb-operator/pkg/apis/util/config.GenericConfig
 </em>
 </td>
 <td>
@@ -10466,12 +14490,51 @@ MemberPhase
 <td>
 <code>statefulSet</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#statefulsetstatus-v1-apps">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#statefulsetstatus-v1-apps">
 Kubernetes apps/v1.StatefulSetStatus
 </a>
 </em>
 </td>
 <td>
+</td>
+</tr>
+<tr>
+<td>
+<code>members</code></br>
+<em>
+<a href="#pumpnodestatus">
+[]PumpNodeStatus
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>volumes</code></br>
+<em>
+<a href="#storagevolumestatus">
+map[github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.StorageVolumeName]*github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.StorageVolumeStatus
+</a>
+</em>
+</td>
+<td>
+<p>Volumes contains the status of all volumes.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>conditions</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta">
+[]Kubernetes meta/v1.Condition
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Represents the latest available observations of a component&rsquo;s state.</p>
 </td>
 </tr>
 </tbody>
@@ -10506,6 +14569,18 @@ int
 </tr>
 <tr>
 <td>
+<code>minShards</code></br>
+<em>
+int
+</em>
+</td>
+<td>
+<p>MinShards is the minimum number of shards, i.e. amount of concurrency.
+Only valid in Prometheus versions 2.6.0 and newer.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>maxShards</code></br>
 <em>
 int
@@ -10517,7 +14592,7 @@ int
 </tr>
 <tr>
 <td>
-<code>maxSamplesPperSend</code></br>
+<code>maxSamplesPerSend</code></br>
 <em>
 int
 </em>
@@ -10688,7 +14763,7 @@ string
 <td>
 <code>action</code></br>
 <em>
-github.com/prometheus/prometheus/config.RelabelAction
+github.com/prometheus/prometheus/model/relabel.Action
 </em>
 </td>
 <td>
@@ -10744,6 +14819,10 @@ ServiceSpec
 </table>
 <h3 id="remotewritespec">RemoteWriteSpec</h3>
 <p>
+(<em>Appears on:</em>
+<a href="#prometheusspec">PrometheusSpec</a>)
+</p>
+<p>
 <p>RemoteWriteSpec defines the remote_write configuration for prometheus.</p>
 </p>
 <table>
@@ -10767,9 +14846,23 @@ string
 </tr>
 <tr>
 <td>
+<code>name</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>The name of the remote write queue, must be unique if specified. The
+name is used in metrics and logging in order to differentiate queues.
+Only valid in Prometheus versions 2.15.0 and newer.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>remoteTimeout</code></br>
 <em>
-github.com/prometheus/common/model.Duration
+string
 </em>
 </td>
 <td>
@@ -10867,6 +14960,34 @@ QueueConfig
 <em>(Optional)</em>
 </td>
 </tr>
+<tr>
+<td>
+<code>metadataConfig</code></br>
+<em>
+<a href="#metadataconfig">
+MetadataConfig
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>MetadataConfig configures the sending of series metadata to remote storage.
+Only valid in Prometheus versions 2.23.0 and newer.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>headers</code></br>
+<em>
+map[string]string
+</em>
+</td>
+<td>
+<p>Custom HTTP headers to be sent along with each remote write request.
+Be aware that headers that are set by Prometheus itself can&rsquo;t be overwritten.
+Only valid in Prometheus versions 2.25.0 and newer.</p>
+</td>
+</tr>
 </tbody>
 </table>
 <h3 id="restorecondition">RestoreCondition</h3>
@@ -10901,7 +15022,7 @@ RestoreConditionType
 <td>
 <code>status</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#conditionstatus-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#conditionstatus-v1-core">
 Kubernetes core/v1.ConditionStatus
 </a>
 </em>
@@ -10913,7 +15034,7 @@ Kubernetes core/v1.ConditionStatus
 <td>
 <code>lastTransitionTime</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
@@ -10952,6 +15073,14 @@ string
 <p>
 <p>RestoreConditionType represents a valid condition of a Restore.</p>
 </p>
+<h3 id="restoremode">RestoreMode</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#restorespec">RestoreSpec</a>)
+</p>
+<p>
+<p>RestoreMode represents the restore mode, such as snapshot or pitr.</p>
+</p>
 <h3 id="restorespec">RestoreSpec</h3>
 <p>
 (<em>Appears on:</em>
@@ -10972,7 +15101,7 @@ string
 <td>
 <code>resources</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -10984,7 +15113,7 @@ Kubernetes core/v1.ResourceRequirements
 <td>
 <code>env</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#envvar-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core">
 []Kubernetes core/v1.EnvVar
 </a>
 </em>
@@ -11033,7 +15162,85 @@ BackupType
 </em>
 </td>
 <td>
-<p>Type is the backup type for tidb cluster.</p>
+<p>Type is the backup type for tidb cluster and only used when Mode = snapshot, such as full, db, table.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>restoreMode</code></br>
+<em>
+<a href="#restoremode">
+RestoreMode
+</a>
+</em>
+</td>
+<td>
+<p>Mode is the restore mode. such as snapshot or pitr.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>pitrRestoredTs</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>PitrRestoredTs is the pitr restored ts.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>prune</code></br>
+<em>
+<a href="#prunetype">
+PruneType
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Prune is the prune type for restore, it is optional and can only have two valid values: afterFailed/alreadyFailed</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>logRestoreStartTs</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>LogRestoreStartTs is the start timestamp which log restore from.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>federalVolumeRestorePhase</code></br>
+<em>
+<a href="#federalvolumerestorephase">
+FederalVolumeRestorePhase
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>FederalVolumeRestorePhase indicates which phase to execute in federal volume restore</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>volumeAZ</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>VolumeAZ indicates which AZ the volume snapshots restore to.
+it is only valid for mode of volume-snapshot</p>
 </td>
 </tr>
 <tr>
@@ -11063,6 +15270,20 @@ StorageProvider
 (Members of <code>StorageProvider</code> are embedded into this type.)
 </p>
 <p>StorageProvider configures where and how backups should be stored.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>pitrFullBackupStorageProvider</code></br>
+<em>
+<a href="#storageprovider">
+StorageProvider
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>PitrFullBackupStorageProvider configures where and how pitr dependent full backup should be stored.</p>
 </td>
 </tr>
 <tr>
@@ -11106,7 +15327,7 @@ BRConfig
 <td>
 <code>tolerations</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#toleration-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core">
 []Kubernetes core/v1.Toleration
 </a>
 </em>
@@ -11120,7 +15341,7 @@ BRConfig
 <td>
 <code>affinity</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#affinity-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#affinity-v1-core">
 Kubernetes core/v1.Affinity
 </a>
 </em>
@@ -11162,14 +15383,15 @@ string
 <td>
 <em>(Optional)</em>
 <p>ToolImage specifies the tool image used in <code>Restore</code>, which supports BR and TiDB Lightning images.
-For examples <code>spec.toolImage: pingcap/br:v4.0.8</code> or <code>spec.toolImage: pingcap/tidb-lightning:v4.0.8</code></p>
+For examples <code>spec.toolImage: pingcap/br:v4.0.8</code> or <code>spec.toolImage: pingcap/tidb-lightning:v4.0.8</code>
+For BR image, if it does not contain tag, Pod will use image &lsquo;ToolImage:${TiKV_Version}&rsquo;.</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>imagePullSecrets</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#localobjectreference-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core">
 []Kubernetes core/v1.LocalObjectReference
 </a>
 </em>
@@ -11192,9 +15414,48 @@ For examples <code>spec.toolImage: pingcap/br:v4.0.8</code> or <code>spec.toolIm
 </tr>
 <tr>
 <td>
+<code>warmup</code></br>
+<em>
+<a href="#restorewarmupmode">
+RestoreWarmupMode
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Warmup represents whether to initialize TiKV volumes after volume snapshot restore</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>warmupImage</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>WarmupImage represents using what image to initialize TiKV volumes</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>warmupStrategy</code></br>
+<em>
+<a href="#restorewarmupstrategy">
+RestoreWarmupStrategy
+</a>
+</em>
+</td>
+<td>
+<p>WarmupStrategy</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>podSecurityContext</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#podsecuritycontext-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podsecuritycontext-v1-core">
 Kubernetes core/v1.PodSecurityContext
 </a>
 </em>
@@ -11202,6 +15463,66 @@ Kubernetes core/v1.PodSecurityContext
 <td>
 <em>(Optional)</em>
 <p>PodSecurityContext of the component</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>priorityClassName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>PriorityClassName of Restore Job Pods</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>additionalVolumes</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volume-v1-core">
+[]Kubernetes core/v1.Volume
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Additional volumes of component pod.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>additionalVolumeMounts</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volumemount-v1-core">
+[]Kubernetes core/v1.VolumeMount
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Additional volume mounts of component pod.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>tolerateSingleTiKVOutage</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>TolerateSingleTiKVOutage indicates whether to tolerate a single failure of a store without data loss</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>backoffLimit</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
 </td>
 </tr>
 </tbody>
@@ -11226,7 +15547,7 @@ Kubernetes core/v1.PodSecurityContext
 <td>
 <code>timeStarted</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
@@ -11239,13 +15560,24 @@ Kubernetes meta/v1.Time
 <td>
 <code>timeCompleted</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
 </td>
 <td>
 <p>TimeCompleted is the time at which the restore was completed.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>timeTaken</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>TimeTaken is the time that restore takes, it is TimeCompleted - TimeStarted</p>
 </td>
 </tr>
 <tr>
@@ -11284,8 +15616,37 @@ RestoreConditionType
 <td>
 </td>
 </tr>
+<tr>
+<td>
+<code>progresses</code></br>
+<em>
+<a href="#progress">
+[]Progress
+</a>
+</em>
+</td>
+<td>
+<p>Progresses is the progress of restore.</p>
+</td>
+</tr>
 </tbody>
 </table>
+<h3 id="restorewarmupmode">RestoreWarmupMode</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#restorespec">RestoreSpec</a>)
+</p>
+<p>
+<p>RestoreWarmupMode represents when to initialize TiKV volumes</p>
+</p>
+<h3 id="restorewarmupstrategy">RestoreWarmupStrategy</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#restorespec">RestoreSpec</a>)
+</p>
+<p>
+<p>RestoreWarmupStrategy represents how to initialize TiKV volumes</p>
+</p>
 <h3 id="s3storageprovider">S3StorageProvider</h3>
 <p>
 (<em>Appears on:</em>
@@ -11424,7 +15785,18 @@ string
 </em>
 </td>
 <td>
-<p>Options Rclone options for backup and restore with mydumper and lightning.</p>
+<p>Options Rclone options for backup and restore with dumpling and lightning.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>forcePathStyle</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>ForcePathStyle for the backup and restore to connect s3 with path style(true) or virtual host(false).</p>
 </td>
 </tr>
 </tbody>
@@ -11483,7 +15855,7 @@ SecretOrConfigMap
 <td>
 <code>keySecret</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#secretkeyselector-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#secretkeyselector-v1-core">
 Kubernetes core/v1.SecretKeySelector
 </a>
 </em>
@@ -11516,6 +15888,49 @@ bool
 </tr>
 </tbody>
 </table>
+<h3 id="scalepolicy">ScalePolicy</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#tidbspec">TiDBSpec</a>, 
+<a href="#tiflashspec">TiFlashSpec</a>, 
+<a href="#tikvspec">TiKVSpec</a>)
+</p>
+<p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>scaleInParallelism</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ScaleInParallelism configures max scale in replicas for TiKV stores.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>scaleOutParallelism</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ScaleOutParallelism configures max scale out replicas for TiKV stores.</p>
+</td>
+</tr>
+</tbody>
+</table>
 <h3 id="secretorconfigmap">SecretOrConfigMap</h3>
 <p>
 (<em>Appears on:</em>
@@ -11536,7 +15951,7 @@ bool
 <td>
 <code>secret</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#secretkeyselector-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#secretkeyselector-v1-core">
 Kubernetes core/v1.SecretKeySelector
 </a>
 </em>
@@ -11549,51 +15964,13 @@ Kubernetes core/v1.SecretKeySelector
 <td>
 <code>configMap</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#configmapkeyselector-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#configmapkeyselector-v1-core">
 Kubernetes core/v1.ConfigMapKeySelector
 </a>
 </em>
 </td>
 <td>
 <p>ConfigMap containing data to use for the targets.</p>
-</td>
-</tr>
-</tbody>
-</table>
-<h3 id="secretref">SecretRef</h3>
-<p>
-(<em>Appears on:</em>
-<a href="#externalendpoint">ExternalEndpoint</a>)
-</p>
-<p>
-<p>SecretRef indicates to secret ref</p>
-</p>
-<table>
-<thead>
-<tr>
-<th>Field</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>
-<code>name</code></br>
-<em>
-string
-</em>
-</td>
-<td>
-</td>
-</tr>
-<tr>
-<td>
-<code>namespace</code></br>
-<em>
-string
-</em>
-</td>
-<td>
 </td>
 </tr>
 </tbody>
@@ -11748,10 +16125,12 @@ string
 (<em>Appears on:</em>
 <a href="#grafanaspec">GrafanaSpec</a>, 
 <a href="#masterservicespec">MasterServiceSpec</a>, 
+<a href="#pdmsspec">PDMSSpec</a>, 
 <a href="#pdspec">PDSpec</a>, 
 <a href="#prometheusspec">PrometheusSpec</a>, 
 <a href="#reloaderspec">ReloaderSpec</a>, 
-<a href="#tidbservicespec">TiDBServiceSpec</a>)
+<a href="#tidbservicespec">TiDBServiceSpec</a>, 
+<a href="#tidbdashboardspec">TidbDashboardSpec</a>)
 </p>
 <p>
 <p>ServiceSpec specifies the service object in k8s</p>
@@ -11768,7 +16147,7 @@ string
 <td>
 <code>type</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#servicetype-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#servicetype-v1-core">
 Kubernetes core/v1.ServiceType
 </a>
 </em>
@@ -11786,7 +16165,19 @@ map[string]string
 </td>
 <td>
 <em>(Optional)</em>
-<p>Additional annotations of the kubernetes service object</p>
+<p>Additional annotations for the service</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>labels</code></br>
+<em>
+map[string]string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Additional labels for the service</p>
 </td>
 </tr>
 <tr>
@@ -11828,6 +16219,19 @@ string
 </tr>
 <tr>
 <td>
+<code>port</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>The port that will be exposed by this service.</p>
+<p>NOTE: only used for TiDB</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>loadBalancerSourceRanges</code></br>
 <em>
 []string
@@ -11843,8 +16247,43 @@ More info: <a href="https://kubernetes.io/docs/concepts/services-networking/serv
 Optional: Defaults to omitted</p>
 </td>
 </tr>
+<tr>
+<td>
+<code>loadBalancerClass</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>loadBalancerClass is the class of the load balancer implementation this Service belongs to.
+If specified, the value of this field must be a label-style identifier, with an optional prefix,
+e.g. &ldquo;internal-vip&rdquo; or &ldquo;example.com/internal-vip&rdquo;. Unprefixed names are reserved for end-users.
+This field can only be set when the Service type is &lsquo;LoadBalancer&rsquo;. If not set, the default load
+balancer implementation is used, today this is typically done through the cloud provider integration,
+but should apply for any default implementation. If set, it is assumed that a load balancer
+implementation is watching for Services with a matching class. Any default load balancer
+implementation (e.g. cloud providers) should ignore Services that set this field.
+This field can only be set when creating or updating a Service to type &lsquo;LoadBalancer&rsquo;.
+Once set, it can not be changed. This field will be wiped when a service is updated to a non &lsquo;LoadBalancer&rsquo; type.</p>
+</td>
+</tr>
 </tbody>
 </table>
+<h3 id="startscriptv2featureflag">StartScriptV2FeatureFlag</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#tidbclusterspec">TidbClusterSpec</a>)
+</p>
+<p>
+</p>
+<h3 id="startscriptversion">StartScriptVersion</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#tidbclusterspec">TidbClusterSpec</a>)
+</p>
+<p>
+</p>
 <h3 id="status">Status</h3>
 <p>
 (<em>Appears on:</em>
@@ -12022,7 +16461,7 @@ int
 <td>
 <code>resources</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -12051,7 +16490,9 @@ More info: <a href="https://kubernetes.io/docs/concepts/storage/persistent-volum
 <h3 id="storageprovider">StorageProvider</h3>
 <p>
 (<em>Appears on:</em>
+<a href="#backupschedulespec">BackupScheduleSpec</a>, 
 <a href="#backupspec">BackupSpec</a>, 
+<a href="#compactspec">CompactSpec</a>, 
 <a href="#restorespec">RestoreSpec</a>)
 </p>
 <p>
@@ -12091,6 +16532,18 @@ GcsStorageProvider
 </tr>
 <tr>
 <td>
+<code>azblob</code></br>
+<em>
+<a href="#azblobstorageprovider">
+AzblobStorageProvider
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
 <code>local</code></br>
 <em>
 <a href="#localstorageprovider">
@@ -12106,13 +16559,21 @@ LocalStorageProvider
 <h3 id="storagevolume">StorageVolume</h3>
 <p>
 (<em>Appears on:</em>
+<a href="#ngmonitoringspec">NGMonitoringSpec</a>, 
+<a href="#pdmsspec">PDMSSpec</a>, 
 <a href="#pdspec">PDSpec</a>, 
+<a href="#ticdcspec">TiCDCSpec</a>, 
 <a href="#tidbspec">TiDBSpec</a>, 
-<a href="#tikvspec">TiKVSpec</a>)
+<a href="#tikvspec">TiKVSpec</a>, 
+<a href="#tiproxyspec">TiProxySpec</a>, 
+<a href="#tidbdashboardspec">TidbDashboardSpec</a>)
 </p>
 <p>
-<p>StorageVolume configures additional storage for PD/TiDB/TiKV pods.
-If <code>StorageClassName</code> not set, default to the <code>spec.[pd|tidb|tikv].storageClassName</code></p>
+<p>StorageVolume configures additional PVC template for StatefulSets and volumeMount for pods that mount this PVC.
+Note:
+If <code>MountPath</code> is not set, volumeMount will not be generated. (You may not want to set this field when you inject volumeMount
+in somewhere else such as Mutating Admission Webhook)
+If <code>StorageClassName</code> is not set, default to the <code>spec.${component}.storageClassName</code></p>
 </p>
 <table>
 <thead>
@@ -12157,6 +16618,98 @@ string
 <code>mountPath</code></br>
 <em>
 string
+</em>
+</td>
+<td>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="storagevolumename">StorageVolumeName</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#storagevolumestatus">StorageVolumeStatus</a>)
+</p>
+<p>
+<p>StorageVolumeName is the volume name which is same as <code>volumes.name</code> in Pod spec.</p>
+</p>
+<h3 id="storagevolumestatus">StorageVolumeStatus</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#masterstatus">MasterStatus</a>, 
+<a href="#pdmsstatus">PDMSStatus</a>, 
+<a href="#pdstatus">PDStatus</a>, 
+<a href="#pumpstatus">PumpStatus</a>, 
+<a href="#ticdcstatus">TiCDCStatus</a>, 
+<a href="#tidbstatus">TiDBStatus</a>, 
+<a href="#tikvstatus">TiKVStatus</a>, 
+<a href="#tiproxystatus">TiProxyStatus</a>, 
+<a href="#workerstatus">WorkerStatus</a>)
+</p>
+<p>
+<p>StorageVolumeStatus is the actual status for a storage</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>ObservedStorageVolumeStatus</code></br>
+<em>
+<a href="#observedstoragevolumestatus">
+ObservedStorageVolumeStatus
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ObservedStorageVolumeStatus</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>name</code></br>
+<em>
+<a href="#storagevolumename">
+StorageVolumeName
+</a>
+</em>
+</td>
+<td>
+<p>Name is the volume name which is same as <code>volumes.name</code> in Pod spec.</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="suspendaction">SuspendAction</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#componentspec">ComponentSpec</a>, 
+<a href="#dmclusterspec">DMClusterSpec</a>, 
+<a href="#tidbclusterspec">TidbClusterSpec</a>)
+</p>
+<p>
+<p>SuspendAction defines the suspend actions for a component.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>suspendStatefulSet</code></br>
+<em>
+bool
 </em>
 </td>
 <td>
@@ -12313,7 +16866,7 @@ MonitorContainer
 <td>
 <code>objectStorageConfig</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#secretkeyselector-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#secretkeyselector-v1-core">
 Kubernetes core/v1.SecretKeySelector
 </a>
 </em>
@@ -12351,7 +16904,7 @@ does not bind against the Pod IP.</p>
 <td>
 <code>tracingConfig</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#secretkeyselector-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#secretkeyselector-v1-core">
 Kubernetes core/v1.SecretKeySelector
 </a>
 </em>
@@ -12436,7 +16989,7 @@ string
 <td>
 <code>additionalVolumeMounts</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#volumemount-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volumemount-v1-core">
 []Kubernetes core/v1.VolumeMount
 </a>
 </em>
@@ -12483,15 +17036,42 @@ string
 <td>
 </td>
 </tr>
+<tr>
+<td>
+<code>version</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>isOwner</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>ready</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+</td>
+</tr>
 </tbody>
 </table>
 <h3 id="ticdcconfig">TiCDCConfig</h3>
 <p>
-(<em>Appears on:</em>
-<a href="#ticdcspec">TiCDCSpec</a>)
-</p>
-<p>
-<p>TiCDCConfig is the configuration of tidbcdc</p>
+<p>TiCDCConfig is the configuration of tidbcdc
+ref <a href="https://github.com/pingcap/ticdc/blob/a28d9e43532edc4a0380f0ef87314631bf18d866/pkg/config/config.go#L176">https://github.com/pingcap/ticdc/blob/a28d9e43532edc4a0380f0ef87314631bf18d866/pkg/config/config.go#L176</a></p>
 </p>
 <table>
 <thead>
@@ -12590,7 +17170,7 @@ ComponentSpec
 <td>
 <code>ResourceRequirements</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -12652,14 +17232,57 @@ string
 <td>
 <code>config</code></br>
 <em>
-<a href="#ticdcconfig">
-TiCDCConfig
+<a href="#cdcconfigwraper">
+CDCConfigWraper
 </a>
 </em>
 </td>
 <td>
 <em>(Optional)</em>
 <p>Config is the Configuration of tidbcdc servers</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>storageVolumes</code></br>
+<em>
+<a href="#storagevolume">
+[]StorageVolume
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>StorageVolumes configure additional storage for TiCDC pods.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>storageClassName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>The storageClassName of the persistent volume for TiCDC data storage.
+Defaults to Kubernetes default storage class.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>gracefulShutdownTimeout</code></br>
+<em>
+<a href="https://godoc.org/k8s.io/apimachinery/pkg/apis/meta/v1#Duration">
+Kubernetes meta/v1.Duration
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>GracefulShutdownTimeout is the timeout of gracefully shutdown a TiCDC pod.
+Encoded in the format of Go Duration.
+Defaults to 10m</p>
 </td>
 </tr>
 </tbody>
@@ -12706,7 +17329,7 @@ MemberPhase
 <td>
 <code>statefulSet</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#statefulsetstatus-v1-apps">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#statefulsetstatus-v1-apps">
 Kubernetes apps/v1.StatefulSetStatus
 </a>
 </em>
@@ -12724,6 +17347,33 @@ map[string]github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.TiCDCCaptu
 </em>
 </td>
 <td>
+</td>
+</tr>
+<tr>
+<td>
+<code>volumes</code></br>
+<em>
+<a href="#storagevolumestatus">
+map[github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.StorageVolumeName]*github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.StorageVolumeStatus
+</a>
+</em>
+</td>
+<td>
+<p>Volumes contains the status of all volumes.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>conditions</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta">
+[]Kubernetes meta/v1.Condition
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Represents the latest available observations of a component&rsquo;s state.</p>
 </td>
 </tr>
 </tbody>
@@ -13397,10 +18047,13 @@ map[string]string
 <td>
 <code>GenericConfig</code></br>
 <em>
-github.com/pingcap/tidb-operator/pkg/util/config.GenericConfig
+github.com/pingcap/tidb-operator/pkg/apis/util/config.GenericConfig
 </em>
 </td>
 <td>
+<p>
+(Members of <code>GenericConfig</code> are embedded into this type.)
+</p>
 </td>
 </tr>
 </tbody>
@@ -13435,9 +18088,36 @@ string
 <td>
 <code>createdAt</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="tidbinitializer">TiDBInitializer</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#tidbspec">TiDBSpec</a>)
+</p>
+<p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>createPassword</code></br>
+<em>
+bool
 </em>
 </td>
 <td>
@@ -13485,7 +18165,7 @@ bool
 <td>
 <code>lastTransitionTime</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
@@ -13503,40 +18183,6 @@ string
 </td>
 <td>
 <p>Node hosting pod of this TiDB member.</p>
-</td>
-</tr>
-</tbody>
-</table>
-<h3 id="tidbprobe">TiDBProbe</h3>
-<p>
-(<em>Appears on:</em>
-<a href="#tidbspec">TiDBSpec</a>)
-</p>
-<p>
-<p>TiDBProbe contains details of probing tidb.
-default probe by TCPPort on 4000.</p>
-</p>
-<table>
-<thead>
-<tr>
-<th>Field</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>
-<code>type</code></br>
-<em>
-string
-</em>
-</td>
-<td>
-<em>(Optional)</em>
-<p>&ldquo;tcp&rdquo; will use TCP socket to connetct port 4000</p>
-<p>&ldquo;command&rdquo; will probe the status api of tidb.
-This will use curl command to request tidb, before v4.0.9 there is no curl in the image,
-So do not use this before v4.0.9.</p>
 </td>
 </tr>
 </tbody>
@@ -13567,14 +18213,17 @@ ServiceSpec
 </em>
 </td>
 <td>
+<p>
+(Members of <code>ServiceSpec</code> are embedded into this type.)
+</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>externalTrafficPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#serviceexternaltrafficpolicytype-v1-core">
-Kubernetes core/v1.ServiceExternalTrafficPolicyType
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#serviceexternaltrafficpolicy-v1-core">
+Kubernetes core/v1.ServiceExternalTrafficPolicy
 </a>
 </em>
 </td>
@@ -13627,7 +18276,7 @@ Optional: Defaults to 0</p>
 <td>
 <code>additionalPorts</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#serviceport-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#serviceport-v1-core">
 []Kubernetes core/v1.ServicePort
 </a>
 </em>
@@ -13660,7 +18309,7 @@ Optional: Defaults to omitted</p>
 <td>
 <code>ResourceRequirements</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -13687,7 +18336,7 @@ Use <code>spec.helper.image</code> instead</p>
 <td>
 <code>imagePullPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#pullpolicy-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#pullpolicy-v1-core">
 Kubernetes core/v1.PullPolicy
 </a>
 </em>
@@ -13695,6 +18344,50 @@ Kubernetes core/v1.PullPolicy
 <td>
 <p>(Deprecated) ImagePullPolicy of the component. Override the cluster-level imagePullPolicy if present
 Use <code>spec.helper.imagePullPolicy</code> instead</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>useSidecar</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>If true, we use native sidecar feature to tail log
+It requires enable feature gate &ldquo;SidecarContainers&rdquo;
+This feature is introduced at 1.28, default enabled at 1.29, and GA at 1.33
+See <a href="https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/">https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/</a>
+and <a href="https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/">https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/</a></p>
+</td>
+</tr>
+<tr>
+<td>
+<code>sleepTimeSeconds</code></br>
+<em>
+int64
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Tailer needs to wait to flush logs to stdout after receiving sig TERM
+Default is not sleep</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>securityContext</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#securitycontext-v1-core">
+Kubernetes core/v1.SecurityContext
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>SecurityContext defines the security options the slowlog tailer container should be run with.
+More info: <a href="https://kubernetes.io/docs/tasks/configure-pod-container/security-context/">https://kubernetes.io/docs/tasks/configure-pod-container/security-context/</a></p>
 </td>
 </tr>
 </tbody>
@@ -13734,7 +18427,7 @@ ComponentSpec
 <td>
 <code>ResourceRequirements</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -13876,6 +18569,19 @@ Optional: Defaults to nil</p>
 </tr>
 <tr>
 <td>
+<code>tokenBasedAuthEnabled</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Whether enable <code>tidb_auth_token</code> authentication method. The tidb_auth_token authentication method is used only for the internal operation of TiDB Cloud.
+Optional: Defaults to false</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>plugins</code></br>
 <em>
 []string
@@ -13904,7 +18610,7 @@ TiDBConfigWraper
 <td>
 <code>lifecycle</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#lifecycle-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#lifecycle-v1-core">
 Kubernetes core/v1.Lifecycle
 </a>
 </em>
@@ -13945,17 +18651,90 @@ Defaults to Kubernetes default storage class.</p>
 </tr>
 <tr>
 <td>
-<code>readinessProbe</code></br>
+<code>initializer</code></br>
 <em>
-<a href="#tidbprobe">
-TiDBProbe
+<a href="#tidbinitializer">
+TiDBInitializer
 </a>
 </em>
 </td>
 <td>
 <em>(Optional)</em>
-<p>ReadinessProbe describes actions that probe the tidb&rsquo;s readiness.
-the default behavior is like setting type as &ldquo;tcp&rdquo;</p>
+<p>Initializer is the init configurations of TiDB</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>bootstrapSQLConfigMapName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>BootstrapSQLConfigMapName is the name of the ConfigMap which contains the bootstrap SQL file with the key <code>bootstrap-sql</code>,
+which will only be executed when a TiDB cluster bootstrap on the first time.
+The field should be set ONLY when create a TC, since it only take effect on the first time bootstrap.
+Only v6.5.1+ supports this feature.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>scalePolicy</code></br>
+<em>
+<a href="#scalepolicy">
+ScalePolicy
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ScalePolicy is the scale configuration for TiDB.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>customizedStartupProbe</code></br>
+<em>
+<a href="#customizedprobe">
+CustomizedProbe
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>CustomizedStartupProbe is the customized startup probe for TiDB.
+You can provide your own startup probe for TiDB.
+The image will be an init container, and the tidb-server container will copy the probe binary from it, and execute it.
+The probe binary in the image should be placed under the root directory, i.e., <code>/your-probe</code>.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>arguments</code></br>
+<em>
+[]string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Arguments is the extra command line arguments for TiDB server.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>serverLabels</code></br>
+<em>
+map[string]string
+</em>
+</td>
+<td>
+<p>ServerLabels defines the server labels of the TiDB server.
+Using both this field and config file to manage the labels is an undefined behavior.
+Note these label keys are managed by TiDB Operator, it will be set automatically and you can not modify them:
+- region, topology.kubernetes.io/region
+- zone, topology.kubernetes.io/zone
+- host</p>
 </td>
 </tr>
 </tbody>
@@ -13992,7 +18771,7 @@ MemberPhase
 <td>
 <code>statefulSet</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#statefulsetstatus-v1-apps">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#statefulsetstatus-v1-apps">
 Kubernetes apps/v1.StatefulSetStatus
 </a>
 </em>
@@ -14044,6 +18823,54 @@ string
 <td>
 </td>
 </tr>
+<tr>
+<td>
+<code>passwordInitialized</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>volumes</code></br>
+<em>
+<a href="#storagevolumestatus">
+map[github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.StorageVolumeName]*github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.StorageVolumeStatus
+</a>
+</em>
+</td>
+<td>
+<p>Volumes contains the status of all volumes.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>conditions</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta">
+[]Kubernetes meta/v1.Condition
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Represents the latest available observations of a component&rsquo;s state.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>volReplaceInProgress</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>Indicates that a Volume replace using VolumeReplacing feature is in progress.</p>
+</td>
+</tr>
 </tbody>
 </table>
 <h3 id="tidbtlsclient">TiDBTLSClient</h3>
@@ -14087,6 +18914,32 @@ kubectl create secret generic <clusterName>-tidb-client-secret &ndash;namespace=
 4. Set Enabled to <code>true</code>.</p>
 </td>
 </tr>
+<tr>
+<td>
+<code>disableClientAuthn</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>DisableClientAuthn will skip client&rsquo;s certificate validation from the TiDB server.
+Optional: defaults to false</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>skipInternalClientCA</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>SkipInternalClientCA will skip TiDB server&rsquo;s certificate validation for internal components like Initializer, Dashboard, etc.
+Optional: defaults to false</p>
+</td>
+</tr>
 </tbody>
 </table>
 <h3 id="tiflashcommonconfigwraper">TiFlashCommonConfigWraper</h3>
@@ -14108,10 +18961,13 @@ kubectl create secret generic <clusterName>-tidb-client-secret &ndash;namespace=
 <td>
 <code>GenericConfig</code></br>
 <em>
-github.com/pingcap/tidb-operator/pkg/util/config.GenericConfig
+github.com/pingcap/tidb-operator/pkg/apis/util/config.GenericConfig
 </em>
 </td>
 <td>
+<p>
+(Members of <code>GenericConfig</code> are embedded into this type.)
+</p>
 </td>
 </tr>
 </tbody>
@@ -14218,10 +19074,13 @@ TiFlashProxyConfigWraper
 <td>
 <code>GenericConfig</code></br>
 <em>
-github.com/pingcap/tidb-operator/pkg/util/config.GenericConfig
+github.com/pingcap/tidb-operator/pkg/apis/util/config.GenericConfig
 </em>
 </td>
 <td>
+<p>
+(Members of <code>GenericConfig</code> are embedded into this type.)
+</p>
 </td>
 </tr>
 </tbody>
@@ -14261,7 +19120,7 @@ ComponentSpec
 <td>
 <code>ResourceRequirements</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -14317,6 +19176,9 @@ bool
 <em>(Optional)</em>
 <p>Whether create the TiFlash container in privileged mode, it is highly discouraged to enable this in
 critical environment.
+NOTE: This field is deprecated. Use SecurityContext.Privileged instead.
+For backward compatibility, when SecurityContext is not set, this field will be used.
+When SecurityContext is set, this field is ignored.
 Optional: defaults to false</p>
 </td>
 </tr>
@@ -14363,6 +19225,20 @@ TiFlashConfigWraper
 </tr>
 <tr>
 <td>
+<code>initializer</code></br>
+<em>
+<a href="#initcontainerspec">
+InitContainerSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Initializer is the configurations of the init container for TiFlash</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>logTailer</code></br>
 <em>
 <a href="#logtailerspec">
@@ -14385,6 +19261,34 @@ bool
 <td>
 <em>(Optional)</em>
 <p>RecoverFailover indicates that Operator can recover the failover Pods</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>failover</code></br>
+<em>
+<a href="#failover">
+Failover
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Failover is the configurations of failover</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>scalePolicy</code></br>
+<em>
+<a href="#scalepolicy">
+ScalePolicy
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ScalePolicy is the scale configuration for TiFlash</p>
 </td>
 </tr>
 </tbody>
@@ -15392,10 +20296,13 @@ TiKVBackupConfig
 <td>
 <code>GenericConfig</code></br>
 <em>
-github.com/pingcap/tidb-operator/pkg/util/config.GenericConfig
+github.com/pingcap/tidb-operator/pkg/apis/util/config.GenericConfig
 </em>
 </td>
 <td>
+<p>
+(Members of <code>GenericConfig</code> are embedded into this type.)
+</p>
 </td>
 </tr>
 </tbody>
@@ -16083,9 +20990,41 @@ string
 </tr>
 <tr>
 <td>
+<code>pvcUIDSet</code></br>
+<em>
+<a href="#emptystruct">
+map[k8s.io/apimachinery/pkg/types.UID]github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.EmptyStruct
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>storeDeleted</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>hostDown</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
 <code>createdAt</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
@@ -18188,7 +23127,7 @@ ComponentSpec
 <td>
 <code>ResourceRequirements</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -18244,6 +23183,9 @@ bool
 <em>(Optional)</em>
 <p>Whether create the TiKV container in privileged mode, it is highly discouraged to enable this in
 critical environment.
+NOTE: This field is deprecated. Use SecurityContext.Privileged instead.
+For backward compatibility, when SecurityContext is not set, this field will be used.
+When SecurityContext is set, this field is ignored.
 Optional: defaults to false</p>
 </td>
 </tr>
@@ -18284,6 +23226,30 @@ bool
 <em>(Optional)</em>
 <p>Whether output the Raft log in a separate sidecar container
 Optional: Defaults to false</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>rocksDBLogVolumeName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Optional volume name configuration for rocksdb log.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>raftLogVolumeName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Optional volume name configuration for raft log.</p>
 </td>
 </tr>
 <tr>
@@ -18360,6 +23326,20 @@ bool
 </tr>
 <tr>
 <td>
+<code>failover</code></br>
+<em>
+<a href="#failover">
+Failover
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Failover is the configurations of failover</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>mountClusterClientSecret</code></br>
 <em>
 bool
@@ -18380,7 +23360,23 @@ string
 <td>
 <em>(Optional)</em>
 <p>EvictLeaderTimeout indicates the timeout to evict tikv leader, in the format of Go Duration.
-Defaults to 10m</p>
+Defaults to 1500min</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>waitLeaderTransferBackTimeout</code></br>
+<em>
+<a href="https://godoc.org/k8s.io/apimachinery/pkg/apis/meta/v1#Duration">
+Kubernetes meta/v1.Duration
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>WaitLeaderTransferBackTimeout indicates the timeout to wait for leader transfer back before
+the next tikv upgrade.</p>
+<p>Defaults to 400s</p>
 </td>
 </tr>
 <tr>
@@ -18419,6 +23415,35 @@ bool
 <td>
 <p>EnableNamedStatusPort enables status port(20180) in the Pod spec.
 If you set it to <code>true</code> for an existing cluster, the TiKV cluster will be rolling updated.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>scalePolicy</code></br>
+<em>
+<a href="#scalepolicy">
+ScalePolicy
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ScalePolicy is the scale configuration for TiKV</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>spareVolReplaceReplicas</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>The default number of spare replicas to scale up when using VolumeReplace feature.
+In multi-az deployments with topology spread constraints you may need to set this to number of zones to avoid
+zone skew after volume replace (total replicas always whole multiples of zones).
+Optional: Defaults to 1</p>
 </td>
 </tr>
 </tbody>
@@ -18475,7 +23500,7 @@ bool
 <td>
 <code>statefulSet</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#statefulsetstatus-v1-apps">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#statefulsetstatus-v1-apps">
 Kubernetes apps/v1.StatefulSetStatus
 </a>
 </em>
@@ -18505,6 +23530,7 @@ map[string]github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.TiKVStore
 </em>
 </td>
 <td>
+<p>key: store id</p>
 </td>
 </tr>
 <tr>
@@ -18533,12 +23559,72 @@ map[string]github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.TiKVFailur
 </tr>
 <tr>
 <td>
+<code>failoverUID</code></br>
+<em>
+k8s.io/apimachinery/pkg/types.UID
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
 <code>image</code></br>
 <em>
 string
 </em>
 </td>
 <td>
+</td>
+</tr>
+<tr>
+<td>
+<code>evictLeader</code></br>
+<em>
+<a href="#evictleaderstatus">
+map[string]*github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.EvictLeaderStatus
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>volumes</code></br>
+<em>
+<a href="#storagevolumestatus">
+map[github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.StorageVolumeName]*github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.StorageVolumeStatus
+</a>
+</em>
+</td>
+<td>
+<p>Volumes contains the status of all volumes.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>conditions</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta">
+[]Kubernetes meta/v1.Condition
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Represents the latest available observations of a component&rsquo;s state.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>volReplaceInProgress</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>Indicates that a Volume replace using VolumeReplacing feature is in progress.</p>
 </td>
 </tr>
 </tbody>
@@ -18834,13 +23920,27 @@ string
 <td>
 <code>lastTransitionTime</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
 </td>
 <td>
-<p>Last time the health transitioned from one to another.</p>
+<p>Last time the health transitioned from one to another.
+TODO: remove nullable, <a href="https://github.com/kubernetes/kubernetes/issues/86811">https://github.com/kubernetes/kubernetes/issues/86811</a></p>
+</td>
+</tr>
+<tr>
+<td>
+<code>leaderCountBeforeUpgrade</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<p>LeaderCountBeforeUpgrade records the leader count before upgrade.</p>
+<p>It is set when evicting leader and used to wait for most leaders to transfer back after upgrade.
+It is unset after leader transfer is completed.</p>
 </td>
 </tr>
 </tbody>
@@ -19120,13 +24220,19 @@ int32
 </tr>
 </tbody>
 </table>
-<h3 id="tidbautoscalerspec">TidbAutoScalerSpec</h3>
+<h3 id="tiproxycertlayout">TiProxyCertLayout</h3>
 <p>
 (<em>Appears on:</em>
-<a href="#tidbclusterautoscalerspec">TidbClusterAutoScalerSpec</a>)
+<a href="#tiproxyspec">TiProxySpec</a>)
 </p>
 <p>
-<p>TidbAutoScalerSpec describes the spec for tidb auto-scaling</p>
+</p>
+<h3 id="tiproxyconfigwraper">TiProxyConfigWraper</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#tiproxyspec">TiProxySpec</a>)
+</p>
+<p>
 </p>
 <table>
 <thead>
@@ -19138,61 +24244,26 @@ int32
 <tbody>
 <tr>
 <td>
-<code>BasicAutoScalerSpec</code></br>
+<code>GenericConfig</code></br>
 <em>
-<a href="#basicautoscalerspec">
-BasicAutoScalerSpec
-</a>
+github.com/pingcap/tidb-operator/pkg/apis/util/config.GenericConfig
 </em>
 </td>
 <td>
 <p>
-(Members of <code>BasicAutoScalerSpec</code> are embedded into this type.)
+(Members of <code>GenericConfig</code> are embedded into this type.)
 </p>
 </td>
 </tr>
 </tbody>
 </table>
-<h3 id="tidbautoscalerstatus">TidbAutoScalerStatus</h3>
+<h3 id="tiproxymember">TiProxyMember</h3>
 <p>
 (<em>Appears on:</em>
-<a href="#tidbclusterautoscalerstatus">TidbClusterAutoScalerStatus</a>)
+<a href="#tiproxystatus">TiProxyStatus</a>)
 </p>
 <p>
-<p>TidbAutoScalerStatus describe the auto-scaling status of tidb</p>
-</p>
-<table>
-<thead>
-<tr>
-<th>Field</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>
-<code>BasicAutoScalerStatus</code></br>
-<em>
-<a href="#basicautoscalerstatus">
-BasicAutoScalerStatus
-</a>
-</em>
-</td>
-<td>
-<p>
-(Members of <code>BasicAutoScalerStatus</code> are embedded into this type.)
-</p>
-</td>
-</tr>
-</tbody>
-</table>
-<h3 id="tidbclusterautoscalerref">TidbClusterAutoScalerRef</h3>
-<p>
-(<em>Appears on:</em>
-<a href="#tidbclusterstatus">TidbClusterStatus</a>)
-</p>
-<p>
-<p>TidbClusterAutoScalerRef indicates to the target auto-scaler ref</p>
+<p>TiProxyMember is TiProxy member</p>
 </p>
 <table>
 <thead>
@@ -19214,23 +24285,49 @@ string
 </tr>
 <tr>
 <td>
-<code>namespace</code></br>
+<code>health</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>info</code></br>
 <em>
 string
 </em>
 </td>
 <td>
+<em>(Optional)</em>
+<p>Additional healthinfo if it is healthy.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>lastTransitionTime</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
+Kubernetes meta/v1.Time
+</a>
+</em>
+</td>
+<td>
+<p>Last time the health transitioned from one to another.
+TODO: remove nullable, <a href="https://github.com/kubernetes/kubernetes/issues/86811">https://github.com/kubernetes/kubernetes/issues/86811</a></p>
 </td>
 </tr>
 </tbody>
 </table>
-<h3 id="tidbclusterautoscalerspec">TidbClusterAutoScalerSpec</h3>
+<h3 id="tiproxyspec">TiProxySpec</h3>
 <p>
 (<em>Appears on:</em>
-<a href="#tidbclusterautoscaler">TidbClusterAutoScaler</a>)
+<a href="#tidbclusterspec">TidbClusterSpec</a>)
 </p>
 <p>
-<p>TidbAutoScalerSpec describes the state of the TidbClusterAutoScaler</p>
+<p>TiProxySpec contains details of TiProxy members</p>
 </p>
 <table>
 <thead>
@@ -19242,54 +24339,173 @@ string
 <tbody>
 <tr>
 <td>
-<code>cluster</code></br>
+<code>ComponentSpec</code></br>
 <em>
-<a href="#tidbclusterref">
-TidbClusterRef
+<a href="#componentspec">
+ComponentSpec
 </a>
 </em>
 </td>
 <td>
-<p>TidbClusterRef describe the target TidbCluster</p>
+<p>
+(Members of <code>ComponentSpec</code> are embedded into this type.)
+</p>
 </td>
 </tr>
 <tr>
 <td>
-<code>tikv</code></br>
+<code>ResourceRequirements</code></br>
 <em>
-<a href="#tikvautoscalerspec">
-TikvAutoScalerSpec
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
+Kubernetes core/v1.ResourceRequirements
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ResourceRequirements</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>serviceAccount</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>Specify a Service Account for TiProxy</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>replicas</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<p>The desired ready replicas</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>sslEnableTiDB</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>Whether enable SSL connection between tiproxy and TiDB server</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>tlsClientSecretName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>TLSClientSecretName is the name of secret which stores tidb server client certificate
+used by TiProxy to check health status.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>certLayout</code></br>
+<em>
+<a href="#tiproxycertlayout">
+TiProxyCertLayout
 </a>
 </em>
 </td>
 <td>
 <em>(Optional)</em>
-<p>TiKV represents the auto-scaling spec for tikv</p>
+<p>TiProxyCertLayout is the certificate layout of TiProxy that determines how tidb-operator mount cert secrets
+and how configure TLS configurations for tiproxy.</p>
 </td>
 </tr>
 <tr>
 <td>
-<code>tidb</code></br>
+<code>baseImage</code></br>
 <em>
-<a href="#tidbautoscalerspec">
-TidbAutoScalerSpec
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Base image of the component, image tag is now allowed during validation</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>config</code></br>
+<em>
+<a href="#tiproxyconfigwraper">
+TiProxyConfigWraper
 </a>
 </em>
 </td>
 <td>
 <em>(Optional)</em>
-<p>TiDB represents the auto-scaling spec for tidb</p>
+<p>Config is the Configuration of tiproxy-servers</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>storageVolumes</code></br>
+<em>
+<a href="#storagevolume">
+[]StorageVolume
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>StorageVolumes configure additional storage for TiProxy pods.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>storageClassName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>The storageClassName of the persistent volume for TiProxy data storage.
+Defaults to Kubernetes default storage class.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>serverLabels</code></br>
+<em>
+map[string]string
+</em>
+</td>
+<td>
+<p>ServerLabels defines the server labels of the TiProxy.
+Using both this field and config file to manage the labels is an undefined behavior.
+Note these label keys are managed by TiDB Operator, it will be set automatically and you can not modify them:
+- region, topology.kubernetes.io/region
+- zone, topology.kubernetes.io/zone
+- host</p>
 </td>
 </tr>
 </tbody>
 </table>
-<h3 id="tidbclusterautoscalerstatus">TidbClusterAutoScalerStatus</h3>
+<h3 id="tiproxystatus">TiProxyStatus</h3>
 <p>
 (<em>Appears on:</em>
-<a href="#tidbclusterautoscaler">TidbClusterAutoScaler</a>)
+<a href="#tidbclusterstatus">TidbClusterStatus</a>)
 </p>
 <p>
-<p>TidbClusterAutoScalerStatus describe the whole status</p>
+<p>TiProxyStatus is TiProxy status</p>
 </p>
 <table>
 <thead>
@@ -19301,30 +24517,74 @@ TidbAutoScalerSpec
 <tbody>
 <tr>
 <td>
-<code>tikv</code></br>
+<code>synced</code></br>
 <em>
-<a href="#tikvautoscalerstatus">
-map[string]github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.TikvAutoScalerStatus
-</a>
+bool
 </em>
 </td>
 <td>
-<em>(Optional)</em>
-<p>Tikv describes the status of each group for the tikv in the last auto-scaling reconciliation</p>
 </td>
 </tr>
 <tr>
 <td>
-<code>tidb</code></br>
+<code>phase</code></br>
 <em>
-<a href="#tidbautoscalerstatus">
-map[string]github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.TidbAutoScalerStatus
+<a href="#memberphase">
+MemberPhase
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>members</code></br>
+<em>
+<a href="#tiproxymember">
+map[string]github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.TiProxyMember
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>statefulSet</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#statefulsetstatus-v1-apps">
+Kubernetes apps/v1.StatefulSetStatus
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>volumes</code></br>
+<em>
+<a href="#storagevolumestatus">
+map[github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.StorageVolumeName]*github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.StorageVolumeStatus
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>conditions</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta">
+[]Kubernetes meta/v1.Condition
 </a>
 </em>
 </td>
 <td>
 <em>(Optional)</em>
-<p>Tidb describes the status of each group for the tidb in the last auto-scaling reconciliation</p>
+<p>Represents the latest available observations of a component&rsquo;s state.</p>
 </td>
 </tr>
 </tbody>
@@ -19362,7 +24622,7 @@ TidbClusterConditionType
 <td>
 <code>status</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#conditionstatus-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#conditionstatus-v1-core">
 Kubernetes core/v1.ConditionStatus
 </a>
 </em>
@@ -19375,7 +24635,7 @@ Kubernetes core/v1.ConditionStatus
 <td>
 <code>lastUpdateTime</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
@@ -19388,7 +24648,7 @@ Kubernetes meta/v1.Time
 <td>
 <code>lastTransitionTime</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
@@ -19435,10 +24695,11 @@ string
 <h3 id="tidbclusterref">TidbClusterRef</h3>
 <p>
 (<em>Appears on:</em>
-<a href="#tidbclusterautoscalerspec">TidbClusterAutoScalerSpec</a>, 
 <a href="#tidbclusterspec">TidbClusterSpec</a>, 
+<a href="#tidbdashboardspec">TidbDashboardSpec</a>, 
 <a href="#tidbinitializerspec">TidbInitializerSpec</a>, 
-<a href="#tidbmonitorspec">TidbMonitorSpec</a>)
+<a href="#tidbmonitorspec">TidbMonitorSpec</a>, 
+<a href="#tidbngmonitoringspec">TidbNGMonitoringSpec</a>)
 </p>
 <p>
 <p>TidbClusterRef reference to a TidbCluster</p>
@@ -19461,7 +24722,7 @@ string
 <td>
 <em>(Optional)</em>
 <p>Namespace is the namespace that TidbCluster object locates,
-default to the same namespace with TidbMonitor</p>
+default to the same namespace as TidbMonitor/TidbCluster/TidbNGMonitoring/TidbDashboard</p>
 </td>
 </tr>
 <tr>
@@ -19545,6 +24806,20 @@ PDSpec
 </tr>
 <tr>
 <td>
+<code>pdms</code></br>
+<em>
+<a href="#pdmsspec">
+[]PDMSSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>PDMS cluster spec</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>tidb</code></br>
 <em>
 <a href="#tidbspec">
@@ -19601,6 +24876,20 @@ TiCDCSpec
 </tr>
 <tr>
 <td>
+<code>tiproxy</code></br>
+<em>
+<a href="#tiproxyspec">
+TiProxySpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>TiProxy cluster spec</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>pump</code></br>
 <em>
 <a href="#pumpspec">
@@ -19642,6 +24931,19 @@ the controller.</p>
 </tr>
 <tr>
 <td>
+<code>recoveryMode</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Whether RecoveryMode is enabled for TiDB cluster to restore
+Optional: Defaults to false</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>version</code></br>
 <em>
 string
@@ -19667,7 +24969,7 @@ string
 <td>
 <code>pvReclaimPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#persistentvolumereclaimpolicy-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumereclaimpolicy-v1-core">
 Kubernetes core/v1.PersistentVolumeReclaimPolicy
 </a>
 </em>
@@ -19680,7 +24982,7 @@ Kubernetes core/v1.PersistentVolumeReclaimPolicy
 <td>
 <code>imagePullPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#pullpolicy-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#pullpolicy-v1-core">
 Kubernetes core/v1.PullPolicy
 </a>
 </em>
@@ -19693,7 +24995,7 @@ Kubernetes core/v1.PullPolicy
 <td>
 <code>imagePullSecrets</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#localobjectreference-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core">
 []Kubernetes core/v1.LocalObjectReference
 </a>
 </em>
@@ -19735,6 +25037,19 @@ Optional: Defaults to false</p>
 </tr>
 <tr>
 <td>
+<code>enablePVCReplace</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Whether enable PVC replace to recreate the PVC with different specs
+Optional: Defaults to false</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>tlsCluster</code></br>
 <em>
 <a href="#tlscluster">
@@ -19765,7 +25080,7 @@ Optional: Defaults to false</p>
 <td>
 <code>affinity</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#affinity-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#affinity-v1-core">
 Kubernetes core/v1.Affinity
 </a>
 </em>
@@ -19810,14 +25125,28 @@ map[string]string
 </td>
 <td>
 <em>(Optional)</em>
-<p>Base annotations of TiDB cluster Pods, components may add or override selectors upon this respectively</p>
+<p>Base annotations for TiDB cluster, all Pods in the cluster should have these annotations.
+Can be overrode by annotations in the specific component spec.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>labels</code></br>
+<em>
+map[string]string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Base labels for TiDB cluster, all Pods in the cluster should have these labels.
+Can be overrode by labels in the specific component spec.</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>tolerations</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#toleration-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core">
 []Kubernetes core/v1.Toleration
 </a>
 </em>
@@ -19825,6 +25154,34 @@ map[string]string
 <td>
 <em>(Optional)</em>
 <p>Base tolerations of TiDB cluster Pods, components may add more tolerations upon this respectively</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>dnsConfig</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#poddnsconfig-v1-core">
+Kubernetes core/v1.PodDNSConfig
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>DNSConfig Specifies the DNS parameters of a pod.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>dnsPolicy</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#dnspolicy-v1-core">
+Kubernetes core/v1.DNSPolicy
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>DNSPolicy Specifies the DNSPolicy parameters of a pod.</p>
 </td>
 </tr>
 <tr>
@@ -19880,6 +25237,18 @@ Optional: Defaults to &ldquo;&rdquo;</p>
 </tr>
 <tr>
 <td>
+<code>acrossK8s</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>AcrossK8s indicates whether deploy TiDB cluster across multiple Kubernetes clusters</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>cluster</code></br>
 <em>
 <a href="#tidbclusterref">
@@ -19908,7 +25277,7 @@ TidbClusterRef
 <td>
 <code>statefulSetUpdateStrategy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#statefulsetupdatestrategytype-v1-apps">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#statefulsetupdatestrategytype-v1-apps">
 Kubernetes apps/v1.StatefulSetUpdateStrategyType
 </a>
 </em>
@@ -19920,9 +25289,23 @@ Kubernetes apps/v1.StatefulSetUpdateStrategyType
 </tr>
 <tr>
 <td>
+<code>podManagementPolicy</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podmanagementpolicytype-v1-apps">
+Kubernetes apps/v1.PodManagementPolicyType
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>PodManagementPolicy of TiDB cluster StatefulSets</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>podSecurityContext</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#podsecuritycontext-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podsecuritycontext-v1-core">
 Kubernetes core/v1.PodSecurityContext
 </a>
 </em>
@@ -19930,6 +25313,80 @@ Kubernetes core/v1.PodSecurityContext
 <td>
 <em>(Optional)</em>
 <p>PodSecurityContext of the component</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>topologySpreadConstraints</code></br>
+<em>
+<a href="#topologyspreadconstraint">
+[]TopologySpreadConstraint
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>TopologySpreadConstraints describes how a group of pods ought to spread across topology
+domains. Scheduler will schedule pods in a way which abides by the constraints.
+This field is is only honored by clusters that enables the EvenPodsSpread feature.
+All topologySpreadConstraints are ANDed.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>startScriptVersion</code></br>
+<em>
+<a href="#startscriptversion">
+StartScriptVersion
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>StartScriptVersion is the version of start script
+When PD enables microservice mode, pd and pd microservice component will use start script v2.</p>
+<p>default to &ldquo;v1&rdquo;</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>suspendAction</code></br>
+<em>
+<a href="#suspendaction">
+SuspendAction
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>SuspendAction defines the suspend actions for all component.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>preferIPv6</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>PreferIPv6 indicates whether to prefer IPv6 addresses for all components.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>startScriptV2FeatureFlags</code></br>
+<em>
+<a href="#startscriptv2featureflag">
+[]StartScriptV2FeatureFlag
+</a>
+</em>
+</td>
+<td>
+<p>Feature flags used by v2 startup script to enable various features.
+Examples of supported feature flags:
+- WaitForDnsNameIpMatch indicates whether PD and TiKV has to wait until local IP address matches the one published to external DNS
+- PreferPDAddressesOverDiscovery advises start script to use TidbClusterSpec.PDAddresses (if supplied) as argument for pd-server, tikv-server and tidb-server commands</p>
 </td>
 </tr>
 </tbody>
@@ -19966,6 +25423,18 @@ string
 <em>
 <a href="#pdstatus">
 PDStatus
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>pdms</code></br>
+<em>
+<a href="#pdmsstatus">
+map[string]*github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.PDMSStatus
 </a>
 </em>
 </td>
@@ -20022,34 +25491,22 @@ TiFlashStatus
 </tr>
 <tr>
 <td>
+<code>tiproxy</code></br>
+<em>
+<a href="#tiproxystatus">
+TiProxyStatus
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
 <code>ticdc</code></br>
 <em>
 <a href="#ticdcstatus">
 TiCDCStatus
-</a>
-</em>
-</td>
-<td>
-</td>
-</tr>
-<tr>
-<td>
-<code>monitor</code></br>
-<em>
-<a href="#tidbmonitorref">
-TidbMonitorRef
-</a>
-</em>
-</td>
-<td>
-</td>
-</tr>
-<tr>
-<td>
-<code>auto-scaler</code></br>
-<em>
-<a href="#tidbclusterautoscalerref">
-TidbClusterAutoScalerRef
 </a>
 </em>
 </td>
@@ -20068,6 +25525,504 @@ TidbClusterAutoScalerRef
 <td>
 <em>(Optional)</em>
 <p>Represents the latest available observations of a tidb cluster&rsquo;s state.</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="tidbdashboard">TidbDashboard</h3>
+<p>
+<p>TidbDashboard contains the spec and status of tidb dashboard.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>metadata</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta">
+Kubernetes meta/v1.ObjectMeta
+</a>
+</em>
+</td>
+<td>
+Refer to the Kubernetes API documentation for the fields of the
+<code>metadata</code> field.
+</td>
+</tr>
+<tr>
+<td>
+<code>spec</code></br>
+<em>
+<a href="#tidbdashboardspec">
+TidbDashboardSpec
+</a>
+</em>
+</td>
+<td>
+<p>Spec contains all spec about tidb dashboard.</p>
+<br/>
+<br/>
+<table>
+<tr>
+<td>
+<code>ComponentSpec</code></br>
+<em>
+<a href="#componentspec">
+ComponentSpec
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ComponentSpec</code> are embedded into this type.)
+</p>
+<p>ComponentSpec is common spec.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>ResourceRequirements</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
+Kubernetes core/v1.ResourceRequirements
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ResourceRequirements</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>clusters</code></br>
+<em>
+<a href="#tidbclusterref">
+[]TidbClusterRef
+</a>
+</em>
+</td>
+<td>
+<p>Clusters reference TiDB cluster.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>pvReclaimPolicy</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumereclaimpolicy-v1-core">
+Kubernetes core/v1.PersistentVolumeReclaimPolicy
+</a>
+</em>
+</td>
+<td>
+<p>Persistent volume reclaim policy applied to the PVs that consumed by tidb dashboard.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>baseImage</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>Base image of the component (image tag is now allowed during validation).</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>storageClassName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>StorageClassName is the default PVC storage class for tidb dashboard.
+Defaults to Kubernetes default storage class.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>storageVolumes</code></br>
+<em>
+<a href="#storagevolume">
+[]StorageVolume
+</a>
+</em>
+</td>
+<td>
+<p>StorageVolumes configures additional PVC for tidb dashboard.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>pathPrefix</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>PathPrefix is public URL path prefix for reverse proxies.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>service</code></br>
+<em>
+<a href="#servicespec">
+ServiceSpec
+</a>
+</em>
+</td>
+<td>
+<p>Service defines a Kubernetes service of tidb dashboard web access.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>telemetry</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Telemetry is whether to enable telemetry.
+When enabled, usage data will be sent to PingCAP for improving user experience.
+Optional: Defaults to true</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>experimental</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Experimental is whether to enable experimental features.
+When enabled, experimental TiDB Dashboard features will be available.
+These features are incomplete or not well tested. Suggest not to enable in
+production.
+Optional: Defaults to false</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>preferIPv6</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>PreferIPv6 indicates whether to prefer IPv6 addresses for all components.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>listenOnLocalhostOnly</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ListenOnLocalhostOnly whether to expose dashboard to 0.0.0.0 or limit it to localhost only
+which means it will be accessible only via port-forwarding
+Optional: Defaults to false</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>disableKeyVisualizer</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>DisableKeyVisualizer is whether to disable Key Visualizer.
+Optional: Defaults to false</p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+<tr>
+<td>
+<code>status</code></br>
+<em>
+<a href="#tidbdashboardstatus">
+TidbDashboardStatus
+</a>
+</em>
+</td>
+<td>
+<p>Status is most recently observed status of tidb dashboard.</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="tidbdashboardspec">TidbDashboardSpec</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#tidbdashboard">TidbDashboard</a>)
+</p>
+<p>
+<p>TidbDashboardSpec is spec of tidb dashboard.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>ComponentSpec</code></br>
+<em>
+<a href="#componentspec">
+ComponentSpec
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ComponentSpec</code> are embedded into this type.)
+</p>
+<p>ComponentSpec is common spec.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>ResourceRequirements</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
+Kubernetes core/v1.ResourceRequirements
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ResourceRequirements</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>clusters</code></br>
+<em>
+<a href="#tidbclusterref">
+[]TidbClusterRef
+</a>
+</em>
+</td>
+<td>
+<p>Clusters reference TiDB cluster.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>pvReclaimPolicy</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumereclaimpolicy-v1-core">
+Kubernetes core/v1.PersistentVolumeReclaimPolicy
+</a>
+</em>
+</td>
+<td>
+<p>Persistent volume reclaim policy applied to the PVs that consumed by tidb dashboard.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>baseImage</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>Base image of the component (image tag is now allowed during validation).</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>storageClassName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>StorageClassName is the default PVC storage class for tidb dashboard.
+Defaults to Kubernetes default storage class.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>storageVolumes</code></br>
+<em>
+<a href="#storagevolume">
+[]StorageVolume
+</a>
+</em>
+</td>
+<td>
+<p>StorageVolumes configures additional PVC for tidb dashboard.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>pathPrefix</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>PathPrefix is public URL path prefix for reverse proxies.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>service</code></br>
+<em>
+<a href="#servicespec">
+ServiceSpec
+</a>
+</em>
+</td>
+<td>
+<p>Service defines a Kubernetes service of tidb dashboard web access.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>telemetry</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Telemetry is whether to enable telemetry.
+When enabled, usage data will be sent to PingCAP for improving user experience.
+Optional: Defaults to true</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>experimental</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Experimental is whether to enable experimental features.
+When enabled, experimental TiDB Dashboard features will be available.
+These features are incomplete or not well tested. Suggest not to enable in
+production.
+Optional: Defaults to false</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>preferIPv6</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>PreferIPv6 indicates whether to prefer IPv6 addresses for all components.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>listenOnLocalhostOnly</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ListenOnLocalhostOnly whether to expose dashboard to 0.0.0.0 or limit it to localhost only
+which means it will be accessible only via port-forwarding
+Optional: Defaults to false</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>disableKeyVisualizer</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>DisableKeyVisualizer is whether to disable Key Visualizer.
+Optional: Defaults to false</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="tidbdashboardstatus">TidbDashboardStatus</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#tidbdashboard">TidbDashboard</a>)
+</p>
+<p>
+<p>TidbDashboardStatus is status of tidb dashboard.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>synced</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>phase</code></br>
+<em>
+<a href="#memberphase">
+MemberPhase
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
+<code>statefulSet</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#statefulsetstatus-v1-apps">
+Kubernetes apps/v1.StatefulSetStatus
+</a>
+</em>
+</td>
+<td>
 </td>
 </tr>
 </tbody>
@@ -20114,7 +26069,7 @@ TidbClusterRef
 <td>
 <code>podSecurityContext</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#podsecuritycontext-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podsecuritycontext-v1-core">
 Kubernetes core/v1.PodSecurityContext
 </a>
 </em>
@@ -20128,7 +26083,7 @@ Kubernetes core/v1.PodSecurityContext
 <td>
 <code>imagePullPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#pullpolicy-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#pullpolicy-v1-core">
 Kubernetes core/v1.PullPolicy
 </a>
 </em>
@@ -20141,7 +26096,7 @@ Kubernetes core/v1.PullPolicy
 <td>
 <code>imagePullSecrets</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#localobjectreference-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core">
 []Kubernetes core/v1.LocalObjectReference
 </a>
 </em>
@@ -20196,13 +26151,14 @@ string
 </td>
 <td>
 <em>(Optional)</em>
+<p>passwordSecret is the name of the Kubernetes secret that is used to initialize the cluster.</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>resources</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -20236,6 +26192,32 @@ string
 Optional: Defaults to nil</p>
 </td>
 </tr>
+<tr>
+<td>
+<code>tolerations</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core">
+[]Kubernetes core/v1.Toleration
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Tolerations of the TiDB initializer Pod</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>nodeSelector</code></br>
+<em>
+map[string]string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Node selectors of TiDB initializer Pod</p>
+</td>
+</tr>
 </tbody>
 </table>
 <h3 id="tidbinitializerstatus">TidbInitializerStatus</h3>
@@ -20257,7 +26239,7 @@ Optional: Defaults to nil</p>
 <td>
 <code>JobStatus</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#jobstatus-v1-batch">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#jobstatus-v1-batch">
 Kubernetes batch/v1.JobStatus
 </a>
 </em>
@@ -20279,60 +26261,6 @@ InitializePhase
 </td>
 <td>
 <p>Phase is a user readable state inferred from the underlying Job status and TidbCluster status</p>
-</td>
-</tr>
-</tbody>
-</table>
-<h3 id="tidbmonitorref">TidbMonitorRef</h3>
-<p>
-(<em>Appears on:</em>
-<a href="#tidbclusterstatus">TidbClusterStatus</a>)
-</p>
-<p>
-<p>TidbMonitorRef reference to a TidbMonitor</p>
-</p>
-<table>
-<thead>
-<tr>
-<th>Field</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>
-<code>namespace</code></br>
-<em>
-string
-</em>
-</td>
-<td>
-<em>(Optional)</em>
-<p>Namespace is the namespace that TidbMonitor object locates,
-default to the same namespace with TidbClusterAutoScaler</p>
-</td>
-</tr>
-<tr>
-<td>
-<code>name</code></br>
-<em>
-string
-</em>
-</td>
-<td>
-<p>Name is the name of TidbMonitor object</p>
-</td>
-</tr>
-<tr>
-<td>
-<code>grafanaEnabled</code></br>
-<em>
-bool
-</em>
-</td>
-<td>
-<em>(Optional)</em>
-<p>GrafanaEnabled indicate whether the grafana is enabled for this target tidbmonitor</p>
 </td>
 </tr>
 </tbody>
@@ -20363,6 +26291,8 @@ bool
 </em>
 </td>
 <td>
+<em>(Optional)</em>
+<p>monitored TiDB cluster info</p>
 </td>
 </tr>
 <tr>
@@ -20375,6 +26305,7 @@ PrometheusSpec
 </em>
 </td>
 <td>
+<p>Prometheus spec</p>
 </td>
 </tr>
 <tr>
@@ -20388,6 +26319,7 @@ GrafanaSpec
 </td>
 <td>
 <em>(Optional)</em>
+<p>Grafana spec</p>
 </td>
 </tr>
 <tr>
@@ -20400,6 +26332,7 @@ ReloaderSpec
 </em>
 </td>
 <td>
+<p>Reloader spec</p>
 </td>
 </tr>
 <tr>
@@ -20412,6 +26345,7 @@ InitializerSpec
 </em>
 </td>
 <td>
+<p>Initializer spec</p>
 </td>
 </tr>
 <tr>
@@ -20425,6 +26359,7 @@ DMMonitorSpec
 </td>
 <td>
 <em>(Optional)</em>
+<p>monitored DM cluster spec</p>
 </td>
 </tr>
 <tr>
@@ -20438,13 +26373,28 @@ ThanosSpec
 </td>
 <td>
 <em>(Optional)</em>
+<p>Thanos spec</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>prometheusReloader</code></br>
+<em>
+<a href="#prometheusreloaderspec">
+PrometheusReloaderSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>PrometheusReloader set prometheus reloader configuration</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>pvReclaimPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#persistentvolumereclaimpolicy-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumereclaimpolicy-v1-core">
 Kubernetes core/v1.PersistentVolumeReclaimPolicy
 </a>
 </em>
@@ -20457,19 +26407,20 @@ Kubernetes core/v1.PersistentVolumeReclaimPolicy
 <td>
 <code>imagePullPolicy</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#pullpolicy-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#pullpolicy-v1-core">
 Kubernetes core/v1.PullPolicy
 </a>
 </em>
 </td>
 <td>
+<p>ImagePullPolicy of TidbMonitor Pods</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>imagePullSecrets</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#localobjectreference-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core">
 []Kubernetes core/v1.LocalObjectReference
 </a>
 </em>
@@ -20488,6 +26439,8 @@ bool
 </td>
 <td>
 <em>(Optional)</em>
+<p>If Persistent enabled, storageClassName must be set to an existing storage.
+Defaults to false.</p>
 </td>
 </tr>
 <tr>
@@ -20499,6 +26452,8 @@ string
 </td>
 <td>
 <em>(Optional)</em>
+<p>The storageClassName of the persistent volume for TidbMonitor data storage.
+Defaults to Kubernetes default storage class.</p>
 </td>
 </tr>
 <tr>
@@ -20510,6 +26465,7 @@ string
 </td>
 <td>
 <em>(Optional)</em>
+<p>Size of the persistent volume.</p>
 </td>
 </tr>
 <tr>
@@ -20521,6 +26477,7 @@ map[string]string
 </td>
 <td>
 <em>(Optional)</em>
+<p>NodeSelector of the TidbMonitor.</p>
 </td>
 </tr>
 <tr>
@@ -20532,19 +26489,34 @@ map[string]string
 </td>
 <td>
 <em>(Optional)</em>
+<p>Annotations for the TidbMonitor.
+Optional: Defaults to cluster-level setting</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>labels</code></br>
+<em>
+map[string]string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Labels for the TidbMonitor.</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>tolerations</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#toleration-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core">
 []Kubernetes core/v1.Toleration
 </a>
 </em>
 </td>
 <td>
 <em>(Optional)</em>
+<p>Tolerations of the TidbMonitor.</p>
 </td>
 </tr>
 <tr>
@@ -20590,13 +26562,14 @@ default to current tidb cluster version, for example: v3.0.15</p>
 <td>
 <code>additionalContainers</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#container-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#container-v1-core">
 []Kubernetes core/v1.Container
 </a>
 </em>
 </td>
 <td>
 <em>(Optional)</em>
+<p>Additional containers of the TidbMonitor.</p>
 </td>
 </tr>
 <tr>
@@ -20650,30 +26623,85 @@ Defaults to 1.</p>
 </tr>
 <tr>
 <td>
+<code>shards</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<p>EXPERIMENTAL: Number of shards to distribute targets onto. Number of
+replicas multiplied by shards is the total number of Pods created. Note
+that scaling down shards will not reshard data onto remaining instances,
+it must be manually moved. Increasing shards will not reshard data
+either but it will continue to be available from the same instances. To
+query globally use Thanos sidecar and Thanos querier or remote write
+data to a central location. Sharding is done on the content of the
+<code>__address__</code> target meta-label.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>additionalVolumes</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#volume-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#volume-v1-core">
 []Kubernetes core/v1.Volume
 </a>
 </em>
 </td>
 <td>
 <em>(Optional)</em>
-<p>Additional volumes of component pod.</p>
+<p>Additional volumes of TidbMonitor pod.</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>podSecurityContext</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#podsecuritycontext-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podsecuritycontext-v1-core">
 Kubernetes core/v1.PodSecurityContext
 </a>
 </em>
 </td>
 <td>
 <em>(Optional)</em>
-<p>PodSecurityContext of the component</p>
+<p>PodSecurityContext of TidbMonitor pod.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>enableAlertRules</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>EnableAlertRules adds alert rules to the Prometheus config even
+if <code>AlertmanagerURL</code> is not configured.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>timezone</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Time zone of TidbMonitor
+Optional: Defaults to UTC</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>preferIPv6</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>PreferIPv6 indicates whether to prefer IPv6 addresses for all components.</p>
 </td>
 </tr>
 </tbody>
@@ -20706,15 +26734,23 @@ DeploymentStorageStatus
 <p>Storage status for deployment</p>
 </td>
 </tr>
+<tr>
+<td>
+<code>statefulSet</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#statefulsetstatus-v1-apps">
+Kubernetes apps/v1.StatefulSetStatus
+</a>
+</em>
+</td>
+<td>
+</td>
+</tr>
 </tbody>
 </table>
-<h3 id="tikvautoscalerspec">TikvAutoScalerSpec</h3>
+<h3 id="tidbngmonitoring">TidbNGMonitoring</h3>
 <p>
-(<em>Appears on:</em>
-<a href="#tidbclusterautoscalerspec">TidbClusterAutoScalerSpec</a>)
-</p>
-<p>
-<p>TikvAutoScalerSpec describes the spec for tikv auto-scaling</p>
+<p>TidbNGMonitoring contains the spec and status of tidb ng monitor</p>
 </p>
 <table>
 <thead>
@@ -20726,28 +26762,146 @@ DeploymentStorageStatus
 <tbody>
 <tr>
 <td>
-<code>BasicAutoScalerSpec</code></br>
+<code>metadata</code></br>
 <em>
-<a href="#basicautoscalerspec">
-BasicAutoScalerSpec
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta">
+Kubernetes meta/v1.ObjectMeta
+</a>
+</em>
+</td>
+<td>
+Refer to the Kubernetes API documentation for the fields of the
+<code>metadata</code> field.
+</td>
+</tr>
+<tr>
+<td>
+<code>spec</code></br>
+<em>
+<a href="#tidbngmonitoringspec">
+TidbNGMonitoringSpec
+</a>
+</em>
+</td>
+<td>
+<p>Spec contains all spec about tidb ng monitor</p>
+<br/>
+<br/>
+<table>
+<tr>
+<td>
+<code>ComponentSpec</code></br>
+<em>
+<a href="#componentspec">
+ComponentSpec
 </a>
 </em>
 </td>
 <td>
 <p>
-(Members of <code>BasicAutoScalerSpec</code> are embedded into this type.)
+(Members of <code>ComponentSpec</code> are embedded into this type.)
 </p>
+<p>ComponentSpec is common spec.
+NOTE: the same field will be overridden by component&rsquo;s spec.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>clusters</code></br>
+<em>
+<a href="#tidbclusterref">
+[]TidbClusterRef
+</a>
+</em>
+</td>
+<td>
+<p>Clusters reference TiDB cluster</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>paused</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>Paused pause controller if it is true</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>pvReclaimPolicy</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumereclaimpolicy-v1-core">
+Kubernetes core/v1.PersistentVolumeReclaimPolicy
+</a>
+</em>
+</td>
+<td>
+<p>Persistent volume reclaim policy applied to the PVs that consumed by tidb ng monitoring</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>clusterDomain</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>ClusterDomain is the Kubernetes Cluster Domain of tidb ng monitoring</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>ngMonitoring</code></br>
+<em>
+<a href="#ngmonitoringspec">
+NGMonitoringSpec
+</a>
+</em>
+</td>
+<td>
+<p>NGMonitoring is spec of ng monitoring</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>preferIPv6</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>PreferIPv6 indicates whether to prefer IPv6 addresses for all components.</p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+<tr>
+<td>
+<code>status</code></br>
+<em>
+<a href="#tidbngmonitoringstatus">
+TidbNGMonitoringStatus
+</a>
+</em>
+</td>
+<td>
+<p>Status is most recently observed status of tidb ng monitor</p>
 </td>
 </tr>
 </tbody>
 </table>
-<h3 id="tikvautoscalerstatus">TikvAutoScalerStatus</h3>
+<h3 id="tidbngmonitoringspec">TidbNGMonitoringSpec</h3>
 <p>
 (<em>Appears on:</em>
-<a href="#tidbclusterautoscalerstatus">TidbClusterAutoScalerStatus</a>)
+<a href="#tidbngmonitoring">TidbNGMonitoring</a>)
 </p>
 <p>
-<p>TikvAutoScalerStatus describe the auto-scaling status of tikv</p>
+<p>TidbNGMonitoringSpec is spec of tidb ng monitoring</p>
 </p>
 <table>
 <thead>
@@ -20759,17 +26913,252 @@ BasicAutoScalerSpec
 <tbody>
 <tr>
 <td>
-<code>BasicAutoScalerStatus</code></br>
+<code>ComponentSpec</code></br>
 <em>
-<a href="#basicautoscalerstatus">
-BasicAutoScalerStatus
+<a href="#componentspec">
+ComponentSpec
 </a>
 </em>
 </td>
 <td>
 <p>
-(Members of <code>BasicAutoScalerStatus</code> are embedded into this type.)
+(Members of <code>ComponentSpec</code> are embedded into this type.)
 </p>
+<p>ComponentSpec is common spec.
+NOTE: the same field will be overridden by component&rsquo;s spec.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>clusters</code></br>
+<em>
+<a href="#tidbclusterref">
+[]TidbClusterRef
+</a>
+</em>
+</td>
+<td>
+<p>Clusters reference TiDB cluster</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>paused</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>Paused pause controller if it is true</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>pvReclaimPolicy</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumereclaimpolicy-v1-core">
+Kubernetes core/v1.PersistentVolumeReclaimPolicy
+</a>
+</em>
+</td>
+<td>
+<p>Persistent volume reclaim policy applied to the PVs that consumed by tidb ng monitoring</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>clusterDomain</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>ClusterDomain is the Kubernetes Cluster Domain of tidb ng monitoring</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>ngMonitoring</code></br>
+<em>
+<a href="#ngmonitoringspec">
+NGMonitoringSpec
+</a>
+</em>
+</td>
+<td>
+<p>NGMonitoring is spec of ng monitoring</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>preferIPv6</code></br>
+<em>
+bool
+</em>
+</td>
+<td>
+<p>PreferIPv6 indicates whether to prefer IPv6 addresses for all components.</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="tidbngmonitoringstatus">TidbNGMonitoringStatus</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#tidbngmonitoring">TidbNGMonitoring</a>)
+</p>
+<p>
+<p>TidbNGMonitoringStatus is status of tidb ng monitoring</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>ngMonitoring</code></br>
+<em>
+<a href="#ngmonitoringstatus">
+NGMonitoringStatus
+</a>
+</em>
+</td>
+<td>
+<p>NGMonitoring is status of ng monitoring</p>
+</td>
+</tr>
+</tbody>
+</table>
+<h3 id="topologyspreadconstraint">TopologySpreadConstraint</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#componentspec">ComponentSpec</a>, 
+<a href="#dmclusterspec">DMClusterSpec</a>, 
+<a href="#tidbclusterspec">TidbClusterSpec</a>)
+</p>
+<p>
+<p>TopologySpreadConstraint specifies how to spread matching pods among the given topology.
+It is a minimal version of corev1.TopologySpreadConstraint to avoid to add too many fields of API
+Refer to <a href="https://kubernetes.io/docs/concepts/workloads/pods/pod-topology-spread-constraints">https://kubernetes.io/docs/concepts/workloads/pods/pod-topology-spread-constraints</a></p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>topologyKey</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>TopologyKey is the key of node labels. Nodes that have a label with this key
+and identical values are considered to be in the same topology.
+We consider each <key, value> as a &ldquo;bucket&rdquo;, and try to put balanced number
+of pods into each bucket.
+WhenUnsatisfiable is default set to DoNotSchedule
+LabelSelector is generated by component type
+See pkg/apis/pingcap/v1alpha1/tidbcluster_component.go#TopologySpreadConstraints()</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>maxSkew</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>MaxSkew describes the degree to which pods may be unevenly distributed.
+When <code>whenUnsatisfiable=DoNotSchedule</code>, it is the maximum permitted difference
+between the number of matching pods in the target topology and the global minimum.
+The global minimum is the minimum number of matching pods in an eligible domain
+or zero if the number of eligible domains is less than MinDomains.
+For example, in a 3-zone cluster, MaxSkew is set to 1, and pods with the same
+labelSelector spread as 2/2/1:
+In this case, the global minimum is 1.
+| zone1 | zone2 | zone3 |
+|  P P  |  P P  |   P   |
+- if MaxSkew is 1, incoming pod can only be scheduled to zone3 to become 2/2/2;
+scheduling it onto zone1(zone2) would make the ActualSkew(3-1) on zone1(zone2)
+violate MaxSkew(1).
+- if MaxSkew is 2, incoming pod can be scheduled onto any zone.
+When <code>whenUnsatisfiable=ScheduleAnyway</code>, it is used to give higher precedence
+to topologies that satisfy it.
+Default value is 1.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>minDomains</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>MinDomains indicates a minimum number of eligible domains.
+When the number of eligible domains with matching topology keys is less than minDomains,
+Pod Topology Spread treats &ldquo;global minimum&rdquo; as 0, and then the calculation of Skew is performed.
+And when the number of eligible domains with matching topology keys equals or greater than minDomains,
+this value has no effect on scheduling.
+As a result, when the number of eligible domains is less than minDomains,
+scheduler won&rsquo;t schedule more than maxSkew Pods to those domains.
+If value is nil, the constraint behaves as if MinDomains is equal to 1.
+Valid values are integers greater than 0.
+When value is not nil, WhenUnsatisfiable must be DoNotSchedule.</p>
+<p>For example, in a 3-zone cluster, MaxSkew is set to 2, MinDomains is set to 5 and pods with the same
+labelSelector spread as 2/2/2:
+| zone1 | zone2 | zone3 |
+|  P P  |  P P  |  P P  |
+The number of domains is less than 5(MinDomains), so &ldquo;global minimum&rdquo; is treated as 0.
+In this situation, new pod with the same labelSelector cannot be scheduled,
+because computed skew will be 3(3 - 0) if new Pod is scheduled to any of the three zones,
+it will violate MaxSkew.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>nodeAffinityPolicy</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#nodeinclusionpolicy-v1-core">
+Kubernetes core/v1.NodeInclusionPolicy
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>NodeAffinityPolicy indicates how we will treat Pod&rsquo;s nodeAffinity/nodeSelector
+when calculating pod topology spread skew. Options are:
+- Honor: only nodes matching nodeAffinity/nodeSelector are included in the calculations.
+- Ignore: nodeAffinity/nodeSelector are ignored. All nodes are included in the calculations.</p>
+<p>If this value is nil, the behavior is equivalent to the Honor policy.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>matchLabels</code></br>
+<em>
+github.com/pingcap/tidb-operator/pkg/apis/label.Label
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>MatchLabels is used to overwrite generated corev1.TopologySpreadConstraints.LabelSelector
+corev1.TopologySpreadConstraint generated in component_spec.go will set a
+LabelSelector automatically with some KV.
+Historically, it is l[&ldquo;comp&rdquo;] = &ldquo;&rdquo; for component tiproxy. And we will use
+MatchLabels to keep l[&ldquo;comp&rdquo;] = &ldquo;&rdquo; for old clusters with tiproxy</p>
 </td>
 </tr>
 </tbody>
@@ -20855,7 +27244,9 @@ k8s.io/apimachinery/pkg/types.UID
 <td>
 <code>pvcUIDSet</code></br>
 <em>
-map[k8s.io/apimachinery/pkg/types.UID]struct{}
+<a href="#emptystruct">
+map[k8s.io/apimachinery/pkg/types.UID]github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.EmptyStruct
+</a>
 </em>
 </td>
 <td>
@@ -20865,7 +27256,7 @@ map[k8s.io/apimachinery/pkg/types.UID]struct{}
 <td>
 <code>createdAt</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
@@ -20936,10 +27327,6 @@ Networks
 </tbody>
 </table>
 <h3 id="workerconfig">WorkerConfig</h3>
-<p>
-(<em>Appears on:</em>
-<a href="#workerspec">WorkerSpec</a>)
-</p>
 <p>
 <p>WorkerConfig is the configuration of dm-worker-server</p>
 </p>
@@ -21020,6 +27407,36 @@ DMSecurityConfig
 </tr>
 </tbody>
 </table>
+<h3 id="workerconfigwraper">WorkerConfigWraper</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#workerspec">WorkerSpec</a>)
+</p>
+<p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>GenericConfig</code></br>
+<em>
+github.com/pingcap/tidb-operator/pkg/apis/util/config.GenericConfig
+</em>
+</td>
+<td>
+<p>
+(Members of <code>GenericConfig</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+</tbody>
+</table>
 <h3 id="workerfailuremember">WorkerFailureMember</h3>
 <p>
 (<em>Appears on:</em>
@@ -21050,7 +27467,7 @@ string
 <td>
 <code>createdAt</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
@@ -21110,7 +27527,7 @@ string
 <td>
 <code>lastTransitionTime</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#time-v1-meta">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta">
 Kubernetes meta/v1.Time
 </a>
 </em>
@@ -21156,7 +27573,7 @@ ComponentSpec
 <td>
 <code>ResourceRequirements</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#resourcerequirements-v1-core">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core">
 Kubernetes core/v1.ResourceRequirements
 </a>
 </em>
@@ -21252,8 +27669,8 @@ Defaults to &ldquo;&rdquo; (volume&rsquo;s root).</p>
 <td>
 <code>config</code></br>
 <em>
-<a href="#workerconfig">
-WorkerConfig
+<a href="#workerconfigwraper">
+WorkerConfigWraper
 </a>
 </em>
 </td>
@@ -21272,6 +27689,20 @@ bool
 <td>
 <em>(Optional)</em>
 <p>RecoverFailover indicates that Operator can recover the failover Pods</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>failover</code></br>
+<em>
+<a href="#failover">
+Failover
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Failover is the configurations of failover</p>
 </td>
 </tr>
 </tbody>
@@ -21318,7 +27749,7 @@ MemberPhase
 <td>
 <code>statefulSet</code></br>
 <em>
-<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/#statefulsetstatus-v1-apps">
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#statefulsetstatus-v1-apps">
 Kubernetes apps/v1.StatefulSetStatus
 </a>
 </em>
@@ -21352,12 +27783,49 @@ map[string]github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.WorkerFail
 </tr>
 <tr>
 <td>
+<code>failoverUID</code></br>
+<em>
+k8s.io/apimachinery/pkg/types.UID
+</em>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<td>
 <code>image</code></br>
 <em>
 string
 </em>
 </td>
 <td>
+</td>
+</tr>
+<tr>
+<td>
+<code>volumes</code></br>
+<em>
+<a href="#storagevolumestatus">
+map[github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.StorageVolumeName]*github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1.StorageVolumeStatus
+</a>
+</em>
+</td>
+<td>
+<p>Volumes contains the status of all volumes.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>conditions</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta">
+[]Kubernetes meta/v1.Condition
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Represents the latest available observations of a component&rsquo;s state.</p>
 </td>
 </tr>
 </tbody>

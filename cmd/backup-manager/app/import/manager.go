@@ -27,7 +27,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	errorutils "k8s.io/apimachinery/pkg/util/errors"
-	"k8s.io/klog"
+	"k8s.io/apimachinery/pkg/util/json"
+	"k8s.io/klog/v2"
 )
 
 // RestoreManager mainly used to manage restore related work
@@ -55,13 +56,13 @@ func (rm *RestoreManager) setOptions(restore *v1alpha1.Restore) {
 	if restore.Spec.To.Port != 0 {
 		rm.Options.Port = restore.Spec.To.Port
 	} else {
-		rm.Options.Port = bkconstants.DefaultTidbPort
+		rm.Options.Port = v1alpha1.DefaultTiDBServerPort
 	}
 
 	if restore.Spec.To.User != "" {
 		rm.Options.User = restore.Spec.To.User
 	} else {
-		rm.Options.User = bkconstants.DefaultTidbUser
+		rm.Options.User = v1alpha1.DefaultTidbUser
 	}
 
 	rm.Options.Password = util.GetOptionValueFromEnv(bkconstants.TidbPasswordKey, bkconstants.BackupManagerEnvVarPrefix)
@@ -85,6 +86,13 @@ func (rm *RestoreManager) ProcessRestore() error {
 		}, nil)
 		errs = append(errs, uerr)
 		return errorutils.NewAggregate(errs)
+	}
+
+	crData, err := json.Marshal(restore)
+	if err != nil {
+		klog.Errorf("failed to marshal restore %v to json, err: %s", restore, err)
+	} else {
+		klog.Infof("start to process restore: %s", string(crData))
 	}
 
 	rm.setOptions(restore)

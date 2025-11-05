@@ -66,11 +66,13 @@ try {
             ],
         ]
         podTemplate(
+            cloud: "kubernetes-ng",
+            namespace: "jenkins-tidb-operator",
             label: buildPodLabel,
             yaml: podYAML,
             // We allow this pod to remain active for a while, later jobs can
             // reuse cache in previous created nodes.
-            idleMinutes: 180,
+            idleMinutes: 30,
         ) {
         node(buildPodLabel) {
             container("golang-builder") {
@@ -87,14 +89,31 @@ try {
                         // clean stale files because we may reuse previous created nodes
                         deleteDir()
 
-                        checkout changelog: false, poll: false, scm: [
-                                $class: 'GitSCM',
-                                branches: [[name: "${GIT_REF}"]],
-                                userRemoteConfigs: [[
-                                    refspec: '+refs/heads/*:refs/remotes/origin/* +refs/pull/*:refs/remotes/origin/pull/*',
-                                    url: "${params.GIT_URL}",
-                                ]]
+                        try {
+                            checkout changelog: false, poll: false, scm: [
+                                    $class: 'GitSCM',
+                                    branches: [[name: "${GIT_REF}"]],
+                                    userRemoteConfigs: [[
+                                            refspec: '+refs/heads/*:refs/remotes/origin/* +refs/pull/*:refs/remotes/origin/pull/*',
+                                            url: "${params.GIT_URL}",
+                                    ]]
                             ]
+                        } catch (info) {
+                            retry(3) {
+                                echo "checkout failed, retry.."
+                                sleep 10
+                                checkout changelog: false, poll: false, scm: [
+                                        $class: 'GitSCM',
+                                        branches: [[name: "${GIT_REF}"]],
+                                        userRemoteConfigs: [[
+                                                refspec: '+refs/heads/*:refs/remotes/origin/* +refs/pull/*:refs/remotes/origin/pull/*',
+                                                url: "${params.GIT_URL}",
+                                        ]]
+                                ]
+                            }
+                        }
+
+
 
                         GITHASH = sh(returnStdout: true, script: "git rev-parse HEAD").trim()
                         IMAGE_TAG = env.JOB_NAME + "-" + GITHASH.substring(0, 6)
@@ -106,23 +125,17 @@ try {
                         echo "info: run unit tests"
                         GOFLAGS='-race' make test
                         echo "info: building"
-                        make build
+                        GOARCH=amd64 make build
+                        GOARCH=arm64 make build
                         """
                     }
 
                     stage('Upload binaries and charts'){
-                        withCredentials([
-                            string(credentialsId: 'UCLOUD_PUBLIC_KEY', variable: 'UCLOUD_PUBLIC_KEY'),
-                            string(credentialsId: 'UCLOUD_PRIVATE_KEY', variable: 'UCLOUD_PRIVATE_KEY'),
-                        ]) {
-                            sh """
-                            export UCLOUD_UFILE_PROXY_HOST=pingcap-dev.hk.ufileos.com
-                            export UCLOUD_UFILE_BUCKET=pingcap-dev
-                            export BUILD_BRANCH=${GIT_REF}
-                            export GITHASH=${GITHASH}
-                            ./ci/upload-binaries-charts.sh
-                            """
-                        }
+                        sh """
+                        export BUILD_BRANCH=${GIT_REF}
+                        export GITHASH=${GITHASH}
+                        ./ci/upload-binaries-charts.sh
+                        """
                     }
                 }
             }

@@ -14,6 +14,7 @@
 package util
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -21,6 +22,8 @@ import (
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/backup/constants"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kubeinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -146,6 +149,36 @@ func TestGenerateGcsCertEnvVar(t *testing.T) {
 	g.Expect(len(envs)).ShouldNot(Equal(0))
 }
 
+func TestGenerateAzblobCertEnvVar(t *testing.T) {
+	g := NewGomegaWithT(t)
+
+	var azblob *v1alpha1.AzblobStorageProvider
+
+	contains := func(envs []corev1.EnvVar, name string, value string) {
+		for _, e := range envs {
+			if e.Name == name {
+				g.Expect(e.Value).Should(Equal(value))
+				return
+			}
+		}
+		t.Fatalf("env %s not exist", name)
+	}
+
+	// test &v1alpha1.AzblobStorageProvider AccessTier default value
+	azblob = &v1alpha1.AzblobStorageProvider{
+		AccessTier: "",
+	}
+	envs, _, err := generateAzblobCertEnvVar(azblob, nil, true)
+	g.Expect(err).Should(BeNil())
+	contains(envs, "AZURE_ACCESS_TIER", "Cool")
+
+	// test &v1alpha1.AzblobStorageProvider AccessTier set value
+	azblob.AccessTier = "Hot"
+	envs, _, err = generateAzblobCertEnvVar(azblob, nil, true)
+	g.Expect(err).Should(BeNil())
+	contains(envs, "AZURE_ACCESS_TIER", "Hot")
+}
+
 func TestGenerateStorageCertEnv(t *testing.T) {
 	g := NewGomegaWithT(t)
 	ns := "ns"
@@ -180,21 +213,32 @@ func TestGenerateStorageCertEnv(t *testing.T) {
 		{
 			provider: v1alpha1.StorageProvider{},
 		},
+		{
+			provider: v1alpha1.StorageProvider{
+				Azblob: &v1alpha1.AzblobStorageProvider{
+					SecretName: secretName,
+				},
+			},
+		},
 	}
-
 	for _, test := range tests {
 		tmp := v1alpha1.StorageProvider{}
 		client := fake.NewSimpleClientset()
+		informer := kubeinformers.NewSharedInformerFactory(client, 0)
+		stop := make(chan struct{})
+		informer.Start(stop)
+		informer.WaitForCacheSync(stop)
+		defer close(stop)
 
 		// handle unsupported storage type
 		if test.provider == tmp {
-			_, _, err := GenerateStorageCertEnv(ns, false, test.provider, client)
+			_, _, err := GenerateStorageCertEnv(ns, false, test.provider, informer.Core().V1().Secrets().Lister())
 			g.Expect(err.Error()).Should(MatchRegexp(".*unsupported storage type.*"))
 			continue
 		}
 
 		// start normal storage type
-		_, _, err := GenerateStorageCertEnv(ns, false, test.provider, client)
+		_, _, err := GenerateStorageCertEnv(ns, false, test.provider, informer.Core().V1().Secrets().Lister())
 		if test.provider.Gcs != nil && test.provider.Gcs.SecretName == "" {
 			g.Expect(err).Should(BeNil())
 		} else {
@@ -204,9 +248,9 @@ func TestGenerateStorageCertEnv(t *testing.T) {
 		s := &corev1.Secret{}
 		s.Namespace = ns
 		s.Name = secretName
-		_, err = client.CoreV1().Secrets(ns).Create(s)
+		err = informer.Core().V1().Secrets().Informer().GetIndexer().Add(s)
 		g.Expect(err).Should(BeNil())
-		_, _, err = GenerateStorageCertEnv(ns, false, test.provider, client)
+		_, _, err = GenerateStorageCertEnv(ns, false, test.provider, informer.Core().V1().Secrets().Lister())
 		if test.provider.Gcs != nil && test.provider.Gcs.SecretName == "" {
 			g.Expect(err).Should(BeNil())
 		} else {
@@ -218,11 +262,85 @@ func TestGenerateStorageCertEnv(t *testing.T) {
 			constants.GcsCredentialsKey: []byte("dummy"),
 			constants.S3AccessKey:       []byte("dummy"),
 			constants.S3SecretKey:       []byte("dummy"),
+			constants.AzblobAccountName: []byte("dummy"),
+			constants.AzblobAccountKey:  []byte("dummy"),
+			constants.AzblobClientID:    []byte("dummy"),
+			constants.AzblobClientScrt:  []byte("dummy"),
+			constants.AzblobTenantID:    []byte("dummy"),
 		}
-		_, err = client.CoreV1().Secrets(ns).Update(s)
+		err = informer.Core().V1().Secrets().Informer().GetIndexer().Update(s)
 		g.Expect(err).Should(BeNil())
-		_, _, err = GenerateStorageCertEnv(ns, false, test.provider, client)
+		_, _, err = GenerateStorageCertEnv(ns, false, test.provider, informer.Core().V1().Secrets().Lister())
 		g.Expect(err).Should(BeNil())
+
+		// test azblob secret with key
+		if test.provider.Azblob != nil && test.provider.Azblob.SecretName != "" {
+			// test using sas token
+			test.provider.Azblob.StorageAccount = "dummy"
+			test.provider.Azblob.SasToken = "dummy"
+			_, _, err := GenerateStorageCertEnv(ns, false, test.provider, informer.Core().V1().Secrets().Lister())
+			g.Expect(err).Should(BeNil())
+
+			// test using sas token, account from env
+			test.provider.Azblob.SasToken = "dummy"
+			s.Data = map[string][]byte{
+				constants.TidbPasswordKey:   []byte("dummy"),
+				constants.AzblobAccountName: []byte("dummy"),
+			}
+			err = informer.Core().V1().Secrets().Informer().GetIndexer().Update(s)
+			g.Expect(err).Should(BeNil())
+			_, _, err = GenerateStorageCertEnv(ns, false, test.provider, informer.Core().V1().Secrets().Lister())
+			g.Expect(err).Should(BeNil())
+
+			// test using sas token, missing account
+			test.provider.Azblob.SasToken = "dummy"
+			test.provider.Azblob.StorageAccount = ""
+			s.Data = map[string][]byte{
+				constants.TidbPasswordKey: []byte("dummy"),
+			}
+			err = informer.Core().V1().Secrets().Informer().GetIndexer().Update(s)
+			g.Expect(err).Should(BeNil())
+			_, _, err = GenerateStorageCertEnv(ns, false, test.provider, informer.Core().V1().Secrets().Lister())
+			g.Expect(err.Error()).Should(MatchRegexp(".*storage account unspecified"))
+
+			// test missing some critical key
+			test.provider.Azblob.SasToken = ""
+			s.Data = map[string][]byte{
+				constants.TidbPasswordKey:   []byte("dummy"),
+				constants.AzblobAccountName: []byte("dummy"),
+				constants.AzblobClientID:    []byte("dummy"),
+				constants.AzblobTenantID:    []byte("dummy"),
+			}
+			err = informer.Core().V1().Secrets().Informer().GetIndexer().Update(s)
+			g.Expect(err).Should(BeNil())
+			_, _, err = GenerateStorageCertEnv(ns, false, test.provider, informer.Core().V1().Secrets().Lister())
+			g.Expect(err.Error()).Should(MatchRegexp(".*missing some keys.*"))
+
+			// test integrated shared key
+			test.provider.Azblob.SasToken = ""
+			s.Data = map[string][]byte{
+				constants.TidbPasswordKey:   []byte("dummy"),
+				constants.AzblobAccountName: []byte("dummy"),
+				constants.AzblobAccountKey:  []byte("dummy"),
+			}
+			err = informer.Core().V1().Secrets().Informer().GetIndexer().Update(s)
+			g.Expect(err).Should(BeNil())
+			_, _, err = GenerateStorageCertEnv(ns, false, test.provider, informer.Core().V1().Secrets().Lister())
+			g.Expect(err).Should(BeNil())
+
+			// test integrated AAD key
+			s.Data = map[string][]byte{
+				constants.TidbPasswordKey:   []byte("dummy"),
+				constants.AzblobAccountName: []byte("dummy"),
+				constants.AzblobClientID:    []byte("dummy"),
+				constants.AzblobClientScrt:  []byte("dummy"),
+				constants.AzblobTenantID:    []byte("dummy"),
+			}
+			err = informer.Core().V1().Secrets().Informer().GetIndexer().Update(s)
+			g.Expect(err).Should(BeNil())
+			_, _, err = GenerateStorageCertEnv(ns, false, test.provider, informer.Core().V1().Secrets().Lister())
+			g.Expect(err).Should(BeNil())
+		}
 	}
 }
 
@@ -232,27 +350,30 @@ func TestGenerateTidbPasswordEnv(t *testing.T) {
 	tcName := "tctest"
 	secretName := "secretName"
 	client := fake.NewSimpleClientset()
-
-	// test fail to get secret
-	_, _, err := GenerateTidbPasswordEnv(ns, tcName, secretName, false, client)
+	informer := kubeinformers.NewSharedInformerFactory(client, 0)
+	_, _, err := GenerateTidbPasswordEnv(ns, tcName, secretName, false, informer.Core().V1().Secrets().Lister())
 	g.Expect(err.Error()).Should(MatchRegexp(".*get tidb secret.*"))
 
 	// create secret and not exist constants.TidbPasswordKey key in secret
 	s := &corev1.Secret{}
 	s.Namespace = ns
 	s.Name = secretName
-	_, err = client.CoreV1().Secrets(ns).Create(s)
+	_, err = client.CoreV1().Secrets(ns).Create(context.TODO(), s, metav1.CreateOptions{})
 	g.Expect(err).Should(BeNil())
-	_, _, err = GenerateTidbPasswordEnv(ns, tcName, secretName, false, client)
+	err = informer.Core().V1().Secrets().Informer().GetIndexer().Add(s)
+	g.Expect(err).Should(BeNil())
+	_, _, err = GenerateTidbPasswordEnv(ns, tcName, secretName, false, informer.Core().V1().Secrets().Lister())
 	g.Expect(err.Error()).Should(MatchRegexp(".*missing password key.*"))
 
 	// update secret with need key
 	s.Data = map[string][]byte{
 		constants.TidbPasswordKey: []byte("dummy"),
 	}
-	_, err = client.CoreV1().Secrets(ns).Update(s)
+	_, err = client.CoreV1().Secrets(ns).Update(context.TODO(), s, metav1.UpdateOptions{})
 	g.Expect(err).Should(BeNil())
-	envs, _, err := GenerateTidbPasswordEnv(ns, tcName, secretName, false, client)
+	err = informer.Core().V1().Secrets().Informer().GetIndexer().Update(s)
+	g.Expect(err).Should(BeNil())
+	envs, _, err := GenerateTidbPasswordEnv(ns, tcName, secretName, false, informer.Core().V1().Secrets().Lister())
 	g.Expect(err).Should(BeNil())
 	g.Expect(len(envs)).ShouldNot(Equal(0))
 }
@@ -377,7 +498,7 @@ func TestValidateBackup(t *testing.T) {
 	backup := new(v1alpha1.Backup)
 	match := func(sub string) {
 		t.Helper()
-		err := ValidateBackup(backup, "tikv:v4.0.8")
+		err := ValidateBackup(backup, "tikv:v4.0.8", nil)
 		if sub == "" {
 			g.Expect(err).Should(BeNil())
 		} else {
@@ -437,7 +558,7 @@ func TestValidateRestore(t *testing.T) {
 	restore := new(v1alpha1.Restore)
 	match := func(sub string) {
 		t.Helper()
-		err := ValidateRestore(restore, "tikv:v4.0.8")
+		err := ValidateRestore(restore, "tikv:v4.0.8", false)
 		if sub == "" {
 			g.Expect(err).Should(BeNil())
 		} else {

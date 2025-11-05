@@ -9,20 +9,31 @@ on:
 jobs:
 
   pull:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-    - name: Set up Go 1.13
-      uses: actions/setup-go@v1
-      with:
-        go-version: 1.13
-      id: go
-
     - name: Check out code into the Go module directory
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
       with:
         ref: ${{ github.event.pull_request.head.sha }}
         path: go/src/github.com/${{ github.repository }}
-
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go/src/github.com/${{ github.repository }}/go.mod
+        go-version: 1.21.3
+    - name: Set vars
+      run: |
+        echo "GOCACHE=$(go env GOCACHE)" >> $GITHUB_ENV
+        echo "GOMODCACHE=$(go env GOMODCACHE)" >> $GITHUB_ENV
+    - name: Try to use build cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ${{ env.GOCACHE }}
+          ${{ env.GOMODCACHE }}
+        key: ${{ runner.os }}-go-${{ hashFiles(format('go/src/github.com/{0}/**/go.sum', github.repository)) }}
+        restore-keys: |
+          ${{ runner.os }}-go-
     - name: Creating kind cluster
       run: |
         SKIP_BUILD=y SKIP_IMAGE_BUILD=y SKIP_DOWN=y SKIP_TEST=y KUBE_WORKERS=0 ./hack/e2e.sh
@@ -40,11 +51,16 @@ jobs:
       working-directory: ${{ github.workspace }}/go/src/github.com/${{ github.repository }}
 
     - name: Run chaos mesh
-      uses: chaos-mesh/chaos-mesh-actions@v0.2
+      uses: chaos-mesh/chaos-mesh-actions@master
       env:
-        CFG_BASE64: YXBpVmVyc2lvbjogY2hhb3MtbWVzaC5vcmcvdjFhbHBoYTEKa2luZDogUG9kQ2hhb3MKbWV0YWRhdGE6CiAgbmFtZTogcG9kLWZhaWx1cmUKICBuYW1lc3BhY2U6IHBpbmdjYXAKc3BlYzoKICBhY3Rpb246IHBvZC1mYWlsdXJlIAogIG1vZGU6IG9uZSAKICBkdXJhdGlvbjogIjYwcyIKICBzZWxlY3RvcjoKICAgIGxhYmVsU2VsZWN0b3JzOgogICAgICAiYXBwLmt1YmVybmV0ZXMuaW8vY29tcG9uZW50IjogImNvbnRyb2xsZXItbWFuYWdlciIKICBzY2hlZHVsZXI6CiAgICBjcm9uOiAiQGV2ZXJ5IDVtIgo=
-
+        CFG_BASE64: YXBpVmVyc2lvbjogY2hhb3MtbWVzaC5vcmcvdjFhbHBoYTEKa2luZDogU2NoZWR1bGUKbWV0YWRhdGE6CiAgbmFtZTogcG9kLWZhaWx1cmUKICBuYW1lc3BhY2U6IHBpbmdjYXAKc3BlYzoKICBzY2hlZHVsZTogJ0BldmVyeSA1bScKICB0eXBlOiBQb2RDaGFvcwogIGhpc3RvcnlMaW1pdDogNQogIGNvbmN1cnJlbmN5UG9saWN5OiBGb3JiaWQKICBwb2RDaGFvczoKICAgIGFjdGlvbjogcG9kLWZhaWx1cmUKICAgIG1vZGU6IG9uZQogICAgZHVyYXRpb246IDYwcwogICAgc2VsZWN0b3I6CiAgICAgIGxhYmVsU2VsZWN0b3JzOgogICAgICAgIGFwcC5rdWJlcm5ldGVzLmlvL2NvbXBvbmVudDogY29udHJvbGxlci1tYW5hZ2VyCg==
+        CHAOS_MESH_VERSION: v2.1.0
     - name: Run e2e
       run: |
         SKIP_UP=y ./hack/e2e.sh -- --ginkgo.focus='Restarter'
       working-directory: ${{ github.workspace }}/go/src/github.com/${{ github.repository }}
+
+    - name: Set up tmate session
+      if: ${{ failure() }}
+      uses: mxschmitt/action-tmate@v3
+      timeout-minutes: 60

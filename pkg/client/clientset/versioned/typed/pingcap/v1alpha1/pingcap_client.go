@@ -16,6 +16,8 @@
 package v1alpha1
 
 import (
+	"net/http"
+
 	v1alpha1 "github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned/scheme"
 	rest "k8s.io/client-go/rest"
@@ -25,13 +27,15 @@ type PingcapV1alpha1Interface interface {
 	RESTClient() rest.Interface
 	BackupsGetter
 	BackupSchedulesGetter
+	CompactBackupsGetter
 	DMClustersGetter
 	DataResourcesGetter
 	RestoresGetter
 	TidbClustersGetter
-	TidbClusterAutoScalersGetter
+	TidbDashboardsGetter
 	TidbInitializersGetter
 	TidbMonitorsGetter
+	TidbNGMonitoringsGetter
 }
 
 // PingcapV1alpha1Client is used to interact with features provided by the pingcap.com group.
@@ -45,6 +49,10 @@ func (c *PingcapV1alpha1Client) Backups(namespace string) BackupInterface {
 
 func (c *PingcapV1alpha1Client) BackupSchedules(namespace string) BackupScheduleInterface {
 	return newBackupSchedules(c, namespace)
+}
+
+func (c *PingcapV1alpha1Client) CompactBackups(namespace string) CompactBackupInterface {
+	return newCompactBackups(c, namespace)
 }
 
 func (c *PingcapV1alpha1Client) DMClusters(namespace string) DMClusterInterface {
@@ -63,8 +71,8 @@ func (c *PingcapV1alpha1Client) TidbClusters(namespace string) TidbClusterInterf
 	return newTidbClusters(c, namespace)
 }
 
-func (c *PingcapV1alpha1Client) TidbClusterAutoScalers(namespace string) TidbClusterAutoScalerInterface {
-	return newTidbClusterAutoScalers(c, namespace)
+func (c *PingcapV1alpha1Client) TidbDashboards(namespace string) TidbDashboardInterface {
+	return newTidbDashboards(c, namespace)
 }
 
 func (c *PingcapV1alpha1Client) TidbInitializers(namespace string) TidbInitializerInterface {
@@ -75,13 +83,33 @@ func (c *PingcapV1alpha1Client) TidbMonitors(namespace string) TidbMonitorInterf
 	return newTidbMonitors(c, namespace)
 }
 
+func (c *PingcapV1alpha1Client) TidbNGMonitorings(namespace string) TidbNGMonitoringInterface {
+	return newTidbNGMonitorings(c, namespace)
+}
+
 // NewForConfig creates a new PingcapV1alpha1Client for the given config.
+// NewForConfig is equivalent to NewForConfigAndClient(c, httpClient),
+// where httpClient was generated with rest.HTTPClientFor(c).
 func NewForConfig(c *rest.Config) (*PingcapV1alpha1Client, error) {
 	config := *c
 	if err := setConfigDefaults(&config); err != nil {
 		return nil, err
 	}
-	client, err := rest.RESTClientFor(&config)
+	httpClient, err := rest.HTTPClientFor(&config)
+	if err != nil {
+		return nil, err
+	}
+	return NewForConfigAndClient(&config, httpClient)
+}
+
+// NewForConfigAndClient creates a new PingcapV1alpha1Client for the given config and http client.
+// Note the http client provided takes precedence over the configured transport values.
+func NewForConfigAndClient(c *rest.Config, h *http.Client) (*PingcapV1alpha1Client, error) {
+	config := *c
+	if err := setConfigDefaults(&config); err != nil {
+		return nil, err
+	}
+	client, err := rest.RESTClientForConfigAndClient(&config, h)
 	if err != nil {
 		return nil, err
 	}

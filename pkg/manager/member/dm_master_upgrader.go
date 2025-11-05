@@ -19,8 +19,11 @@ import (
 	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
+	mngerutils "github.com/pingcap/tidb-operator/pkg/manager/utils"
+	"github.com/pingcap/tidb-operator/pkg/third_party/k8s"
+
 	apps "k8s.io/api/apps/v1"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 type masterUpgrader struct {
@@ -59,10 +62,6 @@ func (u *masterUpgrader) gracefulUpgrade(dc *v1alpha1.DMCluster, oldSet *apps.St
 		return nil
 	}
 
-	if dc.Status.Master.StatefulSet.UpdateRevision == dc.Status.Master.StatefulSet.CurrentRevision {
-		return nil
-	}
-
 	if oldSet.Spec.UpdateStrategy.Type == apps.OnDeleteStatefulSetStrategyType || oldSet.Spec.UpdateStrategy.RollingUpdate == nil {
 		// Manually bypass tidb-operator to modify statefulset directly, such as modify dm-master statefulset's RollingUpdate straregy to OnDelete strategy,
 		// or set RollingUpdate to nil, skip tidb-operator's rolling update logic in order to speed up the upgrade in the test environment occasionally.
@@ -73,7 +72,7 @@ func (u *masterUpgrader) gracefulUpgrade(dc *v1alpha1.DMCluster, oldSet *apps.St
 		return nil
 	}
 
-	setUpgradePartition(newSet, *oldSet.Spec.UpdateStrategy.RollingUpdate.Partition)
+	mngerutils.SetUpgradePartition(newSet, *oldSet.Spec.UpdateStrategy.RollingUpdate.Partition)
 	podOrdinals := helper.GetPodOrdinals(*oldSet.Spec.Replicas, oldSet).List()
 	for _i := len(podOrdinals) - 1; _i >= 0; _i-- {
 		i := podOrdinals[_i]
@@ -89,16 +88,14 @@ func (u *masterUpgrader) gracefulUpgrade(dc *v1alpha1.DMCluster, oldSet *apps.St
 		}
 
 		if revision == dc.Status.Master.StatefulSet.UpdateRevision {
+			if !k8s.IsPodReady(pod) {
+				return controller.RequeueErrorf("dmcluster: [%s/%s]'s upgraded dm pod: [%s] is not ready", ns, dcName, podName)
+			}
 			if member, exist := dc.Status.Master.Members[podName]; !exist || !member.Health {
 				return controller.RequeueErrorf("dmcluster: [%s/%s]'s dm-master upgraded pod: [%s] is not ready", ns, dcName, podName)
 			}
 			continue
 		}
-
-		//if controller.PodWebhookEnabled {
-		//	setUpgradePartition(newSet, i)
-		//	return nil
-		//}
 
 		return u.upgradeMasterPod(dc, i, newSet)
 	}
@@ -120,7 +117,7 @@ func (u *masterUpgrader) upgradeMasterPod(dc *v1alpha1.DMCluster, ordinal int32,
 		return controller.RequeueErrorf("dmcluster: [%s/%s]'s dm-master member: evicting [%s]'s leader", ns, dcName, upgradePodName)
 	}
 
-	setUpgradePartition(newSet, ordinal)
+	mngerutils.SetUpgradePartition(newSet, ordinal)
 	return nil
 }
 

@@ -22,14 +22,15 @@ import (
 	"github.com/google/go-cmp/cmp"
 	. "github.com/onsi/gomega"
 	"github.com/pingcap/kvproto/pkg/metapb"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+	"github.com/pingcap/tidb-operator/pkg/apis/util/toml"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
+	"github.com/pingcap/tidb-operator/pkg/manager/suspender"
+	"github.com/pingcap/tidb-operator/pkg/manager/volumes"
 	"github.com/pingcap/tidb-operator/pkg/pdapi"
-	"github.com/pingcap/tidb-operator/pkg/util/toml"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,6 +48,7 @@ func TestTiKVMemberManagerSyncCreate(t *testing.T) {
 		errWhenCreateStatefulSet     bool
 		errWhenCreateTiKVPeerService bool
 		errWhenGetStores             bool
+		suspendComponent             func() (bool, error)
 		err                          bool
 		tls                          bool
 		tikvPeerSvcCreated           bool
@@ -105,6 +107,11 @@ func TestTiKVMemberManagerSyncCreate(t *testing.T) {
 		}
 		if test.errWhenCreateTiKVPeerService {
 			fakeSvcControl.SetCreateServiceError(errors.NewInternalError(fmt.Errorf("API server failed")), 0)
+		}
+		if test.suspendComponent != nil {
+			tkmm.suspender.(*suspender.FakeSuspender).SuspendComponentFunc = func(c v1alpha1.Cluster, mt v1alpha1.MemberType) (bool, error) {
+				return test.suspendComponent()
+			}
 		}
 
 		err := tkmm.Sync(tc)
@@ -187,6 +194,18 @@ func TestTiKVMemberManagerSyncCreate(t *testing.T) {
 			errWhenCreateStatefulSet:     false,
 			errWhenCreateTiKVPeerService: true,
 			err:                          true,
+			tikvPeerSvcCreated:           false,
+			setCreated:                   false,
+			pdStores:                     &pdapi.StoresInfo{Count: 0, Stores: []*pdapi.StoreInfo{}},
+			tombstoneStores:              &pdapi.StoresInfo{Count: 0, Stores: []*pdapi.StoreInfo{}},
+		},
+		{
+			name:                         "skip create when suspend",
+			suspendComponent:             func() (bool, error) { return true, nil },
+			prepare:                      nil,
+			errWhenCreateStatefulSet:     true,
+			errWhenCreateTiKVPeerService: true,
+			err:                          false,
 			tikvPeerSvcCreated:           false,
 			setCreated:                   false,
 			pdStores:                     &pdapi.StoresInfo{Count: 0, Stores: []*pdapi.StoreInfo{}},
@@ -385,6 +404,27 @@ func TestTiKVMemberManagerSyncUpdate(t *testing.T) {
 			expectStatefulSetFn: func(g *GomegaWithT, set *apps.StatefulSet, err error) {
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(set.Spec.Template.Spec.Containers).To(HaveLen(3))
+			},
+			expectTidbClusterFn: nil,
+		},
+		{
+			name: "template updates blocked on volume replace",
+			modify: func(tc *v1alpha1.TidbCluster) {
+				// Random test change to affect pod spec template.
+				tc.Spec.TiKV.ServiceAccount = "test_new_account"
+				tc.Spec.TiKV.SpareVolReplaceReplicas = pointer.Int32(1)
+				tc.Status.TiKV.VolReplaceInProgress = true
+			},
+			pdStores:                     &pdapi.StoresInfo{Count: 0, Stores: []*pdapi.StoreInfo{}},
+			tombstoneStores:              &pdapi.StoresInfo{Count: 0, Stores: []*pdapi.StoreInfo{}},
+			errWhenUpdateStatefulSet:     false,
+			errWhenUpdateTiKVPeerService: false,
+			errWhenGetStores:             false,
+			err:                          false,
+			expectTiKVPeerServiceFn:      nil,
+			expectStatefulSetFn: func(g *GomegaWithT, set *apps.StatefulSet, err error) {
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(set.Spec.Template.Spec.ServiceAccountName).To(Equal(""))
 			},
 			expectTidbClusterFn: nil,
 		},
@@ -835,6 +875,7 @@ func TestTiKVMemberManagerSyncTidbClusterStatus(t *testing.T) {
 		Replicas: pointer.Int32Ptr(3),
 	}
 	now := metav1.Time{Time: time.Now()}
+
 	testFn := func(test *testcase, t *testing.T) {
 		tc := newTidbClusterForPD()
 		tc.Status.PD.Phase = v1alpha1.NormalPhase
@@ -869,7 +910,7 @@ func TestTiKVMemberManagerSyncTidbClusterStatus(t *testing.T) {
 			})
 		}
 
-		err := pmm.syncTidbClusterStatus(tc, set)
+		err := pmm.syncTiKVClusterStatus(tc, set)
 		if test.errExpectFn != nil {
 			test.errExpectFn(g, err)
 		}
@@ -877,6 +918,7 @@ func TestTiKVMemberManagerSyncTidbClusterStatus(t *testing.T) {
 			test.tcExpectFn(g, tc)
 		}
 	}
+
 	tests := []testcase{
 		{
 			name:     "whether statefulset is upgrading returns failed",
@@ -935,6 +977,28 @@ func TestTiKVMemberManagerSyncTidbClusterStatus(t *testing.T) {
 			updateTC: nil,
 			upgradingFn: func(lister corelisters.PodLister, controlInterface pdapi.PDControlInterface, set *apps.StatefulSet, cluster *v1alpha1.TidbCluster) (bool, error) {
 				return false, nil
+			},
+			errWhenGetStores:          false,
+			storeInfo:                 nil,
+			errWhenGetTombstoneStores: false,
+			tombstoneStoreInfo:        nil,
+			errExpectFn:               nil,
+			tcExpectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster) {
+				g.Expect(tc.Status.TiKV.StatefulSet.Replicas).To(Equal(int32(3)))
+				g.Expect(tc.Status.TiKV.Phase).To(Equal(v1alpha1.NormalPhase))
+			},
+		},
+		{
+			name: "statefulset is upgrading but someone is evicting leader",
+			updateTC: func(tc *v1alpha1.TidbCluster) {
+				tc.Status.TiKV.Phase = v1alpha1.NormalPhase
+				tc.Status.TiKV.SetCondition(metav1.Condition{
+					Type:   v1alpha1.ConditionTypeLeaderEvicting,
+					Status: metav1.ConditionTrue,
+				})
+			},
+			upgradingFn: func(lister corelisters.PodLister, controlInterface pdapi.PDControlInterface, set *apps.StatefulSet, cluster *v1alpha1.TidbCluster) (bool, error) {
+				return true, nil
 			},
 			errWhenGetStores:          false,
 			storeInfo:                 nil,
@@ -1450,9 +1514,10 @@ func TestTiKVMemberManagerSyncTidbClusterStatus(t *testing.T) {
 								Id:      330,
 								Address: fmt.Sprintf("%s-tiflash-1.%s-tiflash-peer.%s.svc:20160", "test", "test", "default"),
 							},
+							StateName: "Up",
 						},
 						Status: &pdapi.StoreStatus{
-							LastHeartbeatTS: time.Time{},
+							LastHeartbeatTS: time.Now(),
 						},
 					},
 				},
@@ -1576,6 +1641,8 @@ func newFakeTiKVMemberManager(tc *v1alpha1.TidbCluster) (
 		scaler:                   NewFakeTiKVScaler(),
 		upgrader:                 NewFakeTiKVUpgrader(),
 		statefulSetIsUpgradingFn: tikvStatefulSetIsUpgrading,
+		suspender:                suspender.NewFakeSuspender(),
+		podVolumeModifier:        &volumes.FakePodVolumeModifier{},
 	}
 	setControl := fakeDeps.StatefulSetControl.(*controller.FakeStatefulSetControl)
 	svcControl := fakeDeps.ServiceControl.(*controller.FakeServiceControl)
@@ -1603,7 +1670,7 @@ func TestGetNewTiKVServiceForTidbCluster(t *testing.T) {
 			},
 			svcConfig: SvcConfig{
 				Name:       "peer",
-				Port:       20160,
+				Port:       v1alpha1.DefaultTiKVServerPort,
 				Headless:   true,
 				SvcLabel:   func(l label.Label) label.Label { return l.TiKV() },
 				MemberName: controller.TiKVPeerMemberName,
@@ -1639,8 +1706,8 @@ func TestGetNewTiKVServiceForTidbCluster(t *testing.T) {
 					Ports: []corev1.ServicePort{
 						{
 							Name:       "peer",
-							Port:       20160,
-							TargetPort: intstr.FromInt(20160),
+							Port:       v1alpha1.DefaultTiKVServerPort,
+							TargetPort: intstr.FromInt(int(v1alpha1.DefaultTiKVServerPort)),
 							Protocol:   corev1.ProtocolTCP,
 						},
 					},
@@ -1656,7 +1723,8 @@ func TestGetNewTiKVServiceForTidbCluster(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
+	for i := range tests {
+		tt := tests[i]
 		t.Run(tt.name, func(t *testing.T) {
 			svc := getNewServiceForTidbCluster(&tt.tc, tt.svcConfig)
 			if diff := cmp.Diff(tt.expected, *svc); diff != "" {
@@ -1706,7 +1774,7 @@ func TestGetNewTiKVSetForTidbCluster(t *testing.T) {
 					TiDB: &v1alpha1.TiDBSpec{},
 				},
 			},
-			testSts: testHostNetwork(t, true, v1.DNSClusterFirstWithHostNet),
+			testSts: testHostNetwork(t, true, corev1.DNSClusterFirstWithHostNet),
 		},
 		{
 			name: "tikv network is not host when pd is host",
@@ -1827,6 +1895,41 @@ func TestGetNewTiKVSetForTidbCluster(t *testing.T) {
 			},
 		},
 		{
+			name: "TiKV set custom env from secret",
+			tc: v1alpha1.TidbCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tc",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.TidbClusterSpec{
+					TiKV: &v1alpha1.TiKVSpec{
+						ComponentSpec: v1alpha1.ComponentSpec{
+							EnvFrom: []corev1.EnvFromSource{
+								{
+									SecretRef: &corev1.SecretEnvSource{
+										LocalObjectReference: corev1.LocalObjectReference{
+											Name: "secret-example",
+										},
+									},
+								},
+							},
+						},
+					},
+					PD:   &v1alpha1.PDSpec{},
+					TiDB: &v1alpha1.TiDBSpec{},
+				},
+			},
+			testSts: testContainerEnvFrom(t, []corev1.EnvFromSource{
+				{
+					SecretRef: &corev1.SecretEnvSource{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: "secret-example",
+						},
+					},
+				},
+			}, v1alpha1.TiKVMemberType),
+		},
+		{
 			name: "TiKV additional containers",
 			tc: v1alpha1.TidbCluster{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1891,7 +1994,7 @@ func TestGetNewTiKVSetForTidbCluster(t *testing.T) {
 			testSts: func(sts *apps.StatefulSet) {
 				g := NewGomegaWithT(t)
 				q, _ := resource.ParseQuantity("2Gi")
-				g.Expect(sts.Spec.VolumeClaimTemplates).To(Equal([]v1.PersistentVolumeClaim{
+				g.Expect(sts.Spec.VolumeClaimTemplates).To(Equal([]corev1.PersistentVolumeClaim{
 					{
 						ObjectMeta: metav1.ObjectMeta{
 							Name: v1alpha1.TiKVMemberType.String(),
@@ -1924,10 +2027,151 @@ func TestGetNewTiKVSetForTidbCluster(t *testing.T) {
 				}))
 			},
 		},
-		// TODO add more tests
+		{
+			name: "tikv spec rocksdb Log storageVolumes",
+			tc: v1alpha1.TidbCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tc",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.TidbClusterSpec{
+					PD:   &v1alpha1.PDSpec{},
+					TiDB: &v1alpha1.TiDBSpec{},
+					TiKV: &v1alpha1.TiKVSpec{
+						SeparateRocksDBLog:   pointer.BoolPtr(true),
+						SeparateRaftLog:      pointer.BoolPtr(true),
+						RocksDBLogVolumeName: "rocksdblog",
+						RaftLogVolumeName:    "raftlog",
+						StorageVolumes: []v1alpha1.StorageVolume{
+							{
+								Name:        "rocksdblog",
+								StorageSize: "1Gi",
+								MountPath:   "/var/log/rocksdblog",
+							},
+							{
+								Name:        "raftlog",
+								StorageSize: "1Gi",
+								MountPath:   "/var/log/raftlog",
+							}},
+					},
+				},
+			},
+			testSts: func(sts *apps.StatefulSet) {
+				g := NewGomegaWithT(t)
+				q, _ := resource.ParseQuantity("1Gi")
+				g.Expect(sts.Spec.VolumeClaimTemplates).To(Equal([]corev1.PersistentVolumeClaim{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: v1alpha1.TiKVMemberType.String(),
+						},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{
+								corev1.ReadWriteOnce,
+							},
+						},
+					},
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: v1alpha1.TiKVMemberType.String() + "-rocksdblog",
+						},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{
+								corev1.ReadWriteOnce,
+							},
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: q,
+								},
+							},
+						},
+					},
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: v1alpha1.TiKVMemberType.String() + "-raftlog",
+						},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{
+								corev1.ReadWriteOnce,
+							},
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: q,
+								},
+							},
+						},
+					},
+				}))
+				g.Expect(sts.Spec.Template.Spec.Containers).To(HaveLen(3))
+				index := len(sts.Spec.Template.Spec.Containers[0].VolumeMounts) - 1
+				g.Expect(sts.Spec.Template.Spec.Containers[0].VolumeMounts[index]).To(Equal(corev1.VolumeMount{
+					Name: fmt.Sprintf("%s-%s", v1alpha1.TiKVMemberType, "rocksdblog"), MountPath: "/var/log/rocksdblog",
+				}))
+				g.Expect(sts.Spec.Template.Spec.Containers[0].Command[2]).To(ContainSubstring("rocksdb.info"))
+				index = len(sts.Spec.Template.Spec.Containers[1].VolumeMounts) - 1
+				g.Expect(sts.Spec.Template.Spec.Containers[1].VolumeMounts[index]).To(Equal(corev1.VolumeMount{
+					Name: fmt.Sprintf("%s-%s", v1alpha1.TiKVMemberType, "raftlog"), MountPath: "/var/log/raftlog",
+				}))
+				g.Expect(sts.Spec.Template.Spec.Containers[1].Command[2]).To(ContainSubstring("raftdb.info"))
+			},
+		},
+		{
+			name: "TiKV spec readiness",
+			tc: v1alpha1.TidbCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tc",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.TidbClusterSpec{
+					TiKV: &v1alpha1.TiKVSpec{
+						ComponentSpec: v1alpha1.ComponentSpec{
+							ReadinessProbe: &v1alpha1.Probe{
+								Type: pointer.StringPtr("tcp"),
+							},
+						},
+					},
+					PD:   &v1alpha1.PDSpec{},
+					TiDB: &v1alpha1.TiDBSpec{},
+				},
+			},
+			testSts: func(sts *apps.StatefulSet) {
+				g := NewGomegaWithT(t)
+				g.Expect(sts.Spec.Template.Spec.Containers[0].ReadinessProbe).To(Equal(&corev1.Probe{
+					ProbeHandler:        buildTiKVReadinessProbHandler(nil),
+					InitialDelaySeconds: int32(10),
+				}))
+			},
+		},
+		{
+			name: "TiKV VolumeReplace modifications to sts",
+			tc: v1alpha1.TidbCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tc",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.TidbClusterSpec{
+					TiKV: &v1alpha1.TiKVSpec{
+						Replicas:                3,
+						SpareVolReplaceReplicas: pointer.Int32(1),
+					},
+					PD:   &v1alpha1.PDSpec{},
+					TiDB: &v1alpha1.TiDBSpec{},
+				},
+				Status: v1alpha1.TidbClusterStatus{
+					TiKV: v1alpha1.TiKVStatus{
+						VolReplaceInProgress: true,
+					},
+				},
+			},
+			testSts: func(sts *apps.StatefulSet) {
+				g := NewGomegaWithT(t)
+				g.Expect(int(*sts.Spec.Replicas)).To(Equal(4))
+				g.Expect(sts.Spec.UpdateStrategy.Type).To(Equal(apps.OnDeleteStatefulSetStrategyType))
+			},
+		},
 	}
 
-	for _, tt := range tests {
+	for i := range tests {
+		tt := tests[i]
 		t.Run(tt.name, func(t *testing.T) {
 			sts, err := getNewTiKVSetForTidbCluster(&tt.tc, nil)
 			if (err != nil) != tt.wantErr {
@@ -2266,7 +2510,8 @@ func TestTiKVInitContainers(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
+	for i := range tests {
+		tt := tests[i]
 		t.Run(tt.name, func(t *testing.T) {
 			sts, err := getNewTiKVSetForTidbCluster(&tt.tc, nil)
 			if (err != nil) != tt.wantErr {
@@ -2376,7 +2621,8 @@ func TestGetTiKVConfigMap(t *testing.T) {
 		},
 	}
 
-	for _, tt := range testCases {
+	for i := range testCases {
+		tt := &testCases[i]
 		t.Run(tt.name, func(t *testing.T) {
 			cm, err := getTikVConfigMap(&tt.tc)
 			g.Expect(err).To(Succeed())
@@ -2472,8 +2718,10 @@ func TestTiKVBackupConfig(t *testing.T) {
 func newTidbClusterForTiKV() *v1alpha1.TidbCluster {
 	return &v1alpha1.TidbCluster{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test",
-			Namespace: corev1.NamespaceDefault,
+			Name:        "test",
+			Namespace:   corev1.NamespaceDefault,
+			Labels:      map[string]string{},
+			Annotations: map[string]string{},
 		},
 		Spec: v1alpha1.TidbClusterSpec{
 			TiKV: &v1alpha1.TiKVSpec{
@@ -2507,4 +2755,335 @@ func mustTiKVConfig(x interface{}) *v1alpha1.TiKVConfigWraper {
 	c.UnmarshalTOML(data)
 
 	return c
+}
+
+func TestTiKVMemberManagerApplyPiTRConfigOverride(t *testing.T) {
+	type testcase struct {
+		name           string
+		restores       []*v1alpha1.Restore
+		expectOverride bool
+		expectError    bool
+		tc             *v1alpha1.TidbCluster
+	}
+
+	testFn := func(test *testcase, t *testing.T) {
+		t.Run(test.name, func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			tkmm, _, _, _, _, _ := newFakeTiKVMemberManager(test.tc)
+
+			// Add restores to the fake restore lister
+			for _, restore := range test.restores {
+				err := tkmm.deps.InformerFactory.Pingcap().V1alpha1().Restores().Informer().GetIndexer().Add(restore)
+				g.Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Create a ConfigMap to test the override
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-tikv-config",
+					Namespace: test.tc.Namespace,
+				},
+				Data: map[string]string{
+					"config-file": `[gc]
+batch-keys = 512`,
+				},
+			}
+
+			err := tkmm.applyPiTRConfigOverride(test.tc, cm)
+
+			if test.expectError {
+				g.Expect(err).To(HaveOccurred())
+				return
+			}
+
+			g.Expect(err).NotTo(HaveOccurred())
+
+			if test.expectOverride {
+				// Verify that gc.ratio-threshold is set to -1.0
+				g.Expect(cm.Data["config-file"]).To(ContainSubstring("ratio-threshold = -1"))
+			} else {
+				// Verify that gc.ratio-threshold is not set or modified
+				g.Expect(cm.Data["config-file"]).NotTo(ContainSubstring("ratio-threshold"))
+			}
+		})
+	}
+
+	tc := newTidbClusterForTiKV()
+
+	tests := []testcase{
+		{
+			name:           "no restores",
+			restores:       []*v1alpha1.Restore{},
+			expectOverride: false,
+			expectError:    false,
+			tc:             tc,
+		},
+		{
+			name: "non-PiTR restore",
+			restores: []*v1alpha1.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "non-pitr-restore",
+						Namespace: tc.Namespace,
+					},
+					Spec: v1alpha1.RestoreSpec{
+						BR: &v1alpha1.BRConfig{
+							Cluster:          tc.Name,
+							ClusterNamespace: tc.Namespace,
+						},
+						Mode: v1alpha1.RestoreModeSnapshot,
+					},
+					Status: v1alpha1.RestoreStatus{
+						Phase: v1alpha1.RestoreRunning,
+					},
+				},
+			},
+			expectOverride: false,
+			expectError:    false,
+			tc:             tc,
+		},
+		{
+			name: "active PiTR restore for same cluster",
+			restores: []*v1alpha1.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "pitr-restore",
+						Namespace: tc.Namespace,
+					},
+					Spec: v1alpha1.RestoreSpec{
+						BR: &v1alpha1.BRConfig{
+							Cluster:          tc.Name,
+							ClusterNamespace: tc.Namespace,
+						},
+						Mode: v1alpha1.RestoreModePiTR,
+					},
+					Status: v1alpha1.RestoreStatus{
+						Phase: v1alpha1.RestoreRunning,
+					},
+				},
+			},
+			expectOverride: true,
+			expectError:    false,
+			tc:             tc,
+		},
+		{
+			name: "completed PiTR restore",
+			restores: []*v1alpha1.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "completed-pitr-restore",
+						Namespace: tc.Namespace,
+					},
+					Spec: v1alpha1.RestoreSpec{
+						BR: &v1alpha1.BRConfig{
+							Cluster:          tc.Name,
+							ClusterNamespace: tc.Namespace,
+						},
+						Mode: v1alpha1.RestoreModePiTR,
+					},
+					Status: v1alpha1.RestoreStatus{
+						Phase: v1alpha1.RestoreComplete,
+						Conditions: []v1alpha1.RestoreCondition{
+							{
+								Type:   v1alpha1.RestoreComplete,
+								Status: corev1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			expectOverride: false,
+			expectError:    false,
+			tc:             tc,
+		},
+		{
+			name: "failed PiTR restore",
+			restores: []*v1alpha1.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "failed-pitr-restore",
+						Namespace: tc.Namespace,
+					},
+					Spec: v1alpha1.RestoreSpec{
+						BR: &v1alpha1.BRConfig{
+							Cluster:          tc.Name,
+							ClusterNamespace: tc.Namespace,
+						},
+						Mode: v1alpha1.RestoreModePiTR,
+					},
+					Status: v1alpha1.RestoreStatus{
+						Phase: v1alpha1.RestoreFailed,
+						Conditions: []v1alpha1.RestoreCondition{
+							{
+								Type:   v1alpha1.RestoreFailed,
+								Status: corev1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			expectOverride: false,
+			expectError:    false,
+			tc:             tc,
+		},
+		{
+			name: "PiTR restore for different cluster",
+			restores: []*v1alpha1.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "other-cluster-pitr-restore",
+						Namespace: tc.Namespace,
+					},
+					Spec: v1alpha1.RestoreSpec{
+						BR: &v1alpha1.BRConfig{
+							Cluster:          "other-cluster",
+							ClusterNamespace: tc.Namespace,
+						},
+						Mode: v1alpha1.RestoreModePiTR,
+					},
+					Status: v1alpha1.RestoreStatus{
+						Phase: v1alpha1.RestoreRunning,
+					},
+				},
+			},
+			expectOverride: false,
+			expectError:    false,
+			tc:             tc,
+		},
+		{
+			name: "PiTR restore for different namespace",
+			restores: []*v1alpha1.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "other-ns-pitr-restore",
+						Namespace: tc.Namespace,
+					},
+					Spec: v1alpha1.RestoreSpec{
+						BR: &v1alpha1.BRConfig{
+							Cluster:          tc.Name,
+							ClusterNamespace: "other-namespace",
+						},
+						Mode: v1alpha1.RestoreModePiTR,
+					},
+					Status: v1alpha1.RestoreStatus{
+						Phase: v1alpha1.RestoreRunning,
+					},
+				},
+			},
+			expectOverride: false,
+			expectError:    false,
+			tc:             tc,
+		},
+		{
+			name: "multiple PiTR restores with one active",
+			restores: []*v1alpha1.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "completed-pitr-restore",
+						Namespace: tc.Namespace,
+					},
+					Spec: v1alpha1.RestoreSpec{
+						BR: &v1alpha1.BRConfig{
+							Cluster:          tc.Name,
+							ClusterNamespace: tc.Namespace,
+						},
+						Mode: v1alpha1.RestoreModePiTR,
+					},
+					Status: v1alpha1.RestoreStatus{
+						Phase: v1alpha1.RestoreComplete,
+						Conditions: []v1alpha1.RestoreCondition{
+							{
+								Type:   v1alpha1.RestoreComplete,
+								Status: corev1.ConditionTrue,
+							},
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "active-pitr-restore",
+						Namespace: tc.Namespace,
+					},
+					Spec: v1alpha1.RestoreSpec{
+						BR: &v1alpha1.BRConfig{
+							Cluster:          tc.Name,
+							ClusterNamespace: tc.Namespace,
+						},
+						Mode: v1alpha1.RestoreModePiTR,
+					},
+					Status: v1alpha1.RestoreStatus{
+						Phase: v1alpha1.RestoreRunning,
+					},
+				},
+			},
+			expectOverride: true,
+			expectError:    false,
+			tc:             tc,
+		},
+	}
+
+	for i := range tests {
+		testFn(&tests[i], t)
+	}
+}
+
+func TestApplyOverlay(t *testing.T) {
+	g := NewGomegaWithT(t)
+
+	tests := []struct {
+		name              string
+		configFile        string
+		configFileOverlay string
+		key               string
+		value             interface{}
+	}{
+		{
+			name:              "empty config-file with empty overlay",
+			configFile:        "",
+			configFileOverlay: "",
+			key:               "gc.ratio-threshold",
+			value:             -1.0,
+		},
+		{
+			name:              "existing config-file with overlay",
+			configFile:        "[log]\n  level = \"info\"\n",
+			configFileOverlay: "",
+			key:               "gc.ratio-threshold",
+			value:             -1.0,
+		},
+		{
+			name:              "empty config-file with existing overlay",
+			configFile:        "",
+			configFileOverlay: "[storage.block-cache]\ncapacity = \"1GB\"\n",
+			key:               "gc.ratio-threshold",
+			value:             -1.0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cm := &corev1.ConfigMap{
+				Data: map[string]string{
+					"config-file":         tt.configFile,
+					"config-file-overlay": tt.configFileOverlay,
+				},
+			}
+
+			err := applyOverlay(cm, tt.key, tt.value)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			// Check that config-file now contains the merged configuration
+			g.Expect(cm.Data["config-file"]).NotTo(BeEmpty(), "config-file should not be empty after applying overlay")
+
+			// Parse the result to verify it contains our key
+			wrapper := v1alpha1.NewTiKVConfig()
+			err = wrapper.UnmarshalTOML([]byte(cm.Data["config-file"]))
+			g.Expect(err).NotTo(HaveOccurred())
+
+			// Verify the key was set correctly
+			val := wrapper.Get(tt.key)
+			g.Expect(val).NotTo(BeNil(), "expected key %s should be present in config", tt.key)
+			g.Expect(val.Interface()).To(Equal(tt.value), "expected value for key %s", tt.key)
+		})
+	}
 }

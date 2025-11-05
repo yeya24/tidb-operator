@@ -17,7 +17,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,7 +33,10 @@ import (
 	"github.com/pingcap/tidb-operator/pkg/dmapi"
 	"github.com/pingcap/tidb-operator/pkg/pdapi"
 	"golang.org/x/sync/errgroup"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/informers"
+	kubeinformers "k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 )
 
@@ -66,8 +69,10 @@ func TestServer(t *testing.T) {
 	os.Setenv("MY_POD_NAMESPACE", "default")
 	cli := fake.NewSimpleClientset()
 	kubeCli := kubefake.NewSimpleClientset()
-	fakePDControl := pdapi.NewFakePDControl(kubeCli)
-	faleMasterControl := dmapi.NewFakeMasterControl(kubeCli)
+	informer := kubeinformers.NewSharedInformerFactory(kubeCli, 0)
+	informer.Core().V1().Secrets().Informer().GetIndexer().Add(&corev1.Secret{})
+	fakePDControl := pdapi.NewFakePDControl(informer.Core().V1().Secrets().Lister())
+	faleMasterControl := dmapi.NewFakeMasterControl(informer.Core().V1().Secrets().Lister())
 	pdClient := pdapi.NewFakePDClient()
 	s := NewServer(fakePDControl, faleMasterControl, cli, kubeCli)
 	httpServer := httptest.NewServer(s.(*server).container.ServeMux)
@@ -87,7 +92,7 @@ func TestServer(t *testing.T) {
 		ret := *pdMemberInfos
 		return &ret, nil
 	})
-	cli.PingcapV1alpha1().TidbClusters(tc.Namespace).Create(tc)
+	cli.PingcapV1alpha1().TidbClusters(tc.Namespace).Create(context.TODO(), tc, metav1.CreateOptions{})
 	fakePDControl.SetPDClient(pdapi.Namespace(tc.Namespace), tc.Name, pdClient)
 
 	var (
@@ -111,7 +116,7 @@ func TestServer(t *testing.T) {
 					time.Sleep(time.Millisecond * 100)
 					continue
 				}
-				data, err := ioutil.ReadAll(resp.Body)
+				data, err := io.ReadAll(resp.Body)
 				if err != nil {
 					return err
 				}
@@ -150,8 +155,10 @@ func TestDMServer(t *testing.T) {
 	os.Setenv("MY_POD_NAMESPACE", "default")
 	cli := fake.NewSimpleClientset()
 	kubeCli := kubefake.NewSimpleClientset()
-	fakePDControl := pdapi.NewFakePDControl(kubeCli)
-	faleMasterControl := dmapi.NewFakeMasterControl(kubeCli)
+	informer := informers.NewSharedInformerFactory(kubeCli, 0)
+	informer.Core().V1().Secrets().Informer().GetIndexer().Add(&corev1.Secret{})
+	fakePDControl := pdapi.NewFakePDControl(informer.Core().V1().Secrets().Lister())
+	faleMasterControl := dmapi.NewFakeMasterControl(informer.Core().V1().Secrets().Lister())
 	masterClient := dmapi.NewFakeMasterClient()
 	s := NewServer(fakePDControl, faleMasterControl, cli, kubeCli)
 	httpServer := httptest.NewServer(s.(*server).container.ServeMux)
@@ -169,7 +176,7 @@ func TestDMServer(t *testing.T) {
 		ret := append([]*dmapi.MastersInfo{}, masterMemberInfos...)
 		return ret, nil
 	})
-	cli.PingcapV1alpha1().DMClusters(dc.Namespace).Create(dc)
+	cli.PingcapV1alpha1().DMClusters(dc.Namespace).Create(context.TODO(), dc, metav1.CreateOptions{})
 	faleMasterControl.SetMasterClient(dc.Namespace, dc.Name, masterClient)
 
 	var (
@@ -193,7 +200,7 @@ func TestDMServer(t *testing.T) {
 					time.Sleep(time.Millisecond * 100)
 					continue
 				}
-				data, err := ioutil.ReadAll(resp.Body)
+				data, err := io.ReadAll(resp.Body)
 				if err != nil {
 					return err
 				}
@@ -232,9 +239,10 @@ func TestVerifyServer(t *testing.T) {
 	os.Setenv("MY_POD_NAMESPACE", "default")
 	cli := fake.NewSimpleClientset()
 	kubeCli := kubefake.NewSimpleClientset()
-	fakePDControl := pdapi.NewFakePDControl(kubeCli)
-	faleMasterControl := dmapi.NewFakeMasterControl(kubeCli)
-	s := NewServer(fakePDControl, faleMasterControl, cli, kubeCli)
+	informer := informers.NewSharedInformerFactory(kubeCli, 0)
+	fakePDControl := pdapi.NewFakePDControl(informer.Core().V1().Secrets().Lister())
+	fakeMasterControl := dmapi.NewFakeMasterControl(informer.Core().V1().Secrets().Lister())
+	s := NewServer(fakePDControl, fakeMasterControl, cli, kubeCli)
 
 	httpServer := httptest.NewServer(s.(*server).container.ServeMux)
 
@@ -245,7 +253,7 @@ func TestVerifyServer(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		_, err = ioutil.ReadAll(resp.Body)
+		_, err = io.ReadAll(resp.Body)
 		if err != nil {
 			return err
 		}

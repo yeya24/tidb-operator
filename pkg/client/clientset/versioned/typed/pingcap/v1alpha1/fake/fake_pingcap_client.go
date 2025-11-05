@@ -33,6 +33,10 @@ func (c *FakePingcapV1alpha1) BackupSchedules(namespace string) v1alpha1.BackupS
 	return &FakeBackupSchedules{c, namespace}
 }
 
+func (c *FakePingcapV1alpha1) CompactBackups(namespace string) v1alpha1.CompactBackupInterface {
+	return &FakeCompactBackups{c, namespace}
+}
+
 func (c *FakePingcapV1alpha1) DMClusters(namespace string) v1alpha1.DMClusterInterface {
 	return &FakeDMClusters{c, namespace}
 }
@@ -49,8 +53,8 @@ func (c *FakePingcapV1alpha1) TidbClusters(namespace string) v1alpha1.TidbCluste
 	return &FakeTidbClusters{c, namespace}
 }
 
-func (c *FakePingcapV1alpha1) TidbClusterAutoScalers(namespace string) v1alpha1.TidbClusterAutoScalerInterface {
-	return &FakeTidbClusterAutoScalers{c, namespace}
+func (c *FakePingcapV1alpha1) TidbDashboards(namespace string) v1alpha1.TidbDashboardInterface {
+	return &FakeTidbDashboards{c, namespace}
 }
 
 func (c *FakePingcapV1alpha1) TidbInitializers(namespace string) v1alpha1.TidbInitializerInterface {
@@ -59,6 +63,10 @@ func (c *FakePingcapV1alpha1) TidbInitializers(namespace string) v1alpha1.TidbIn
 
 func (c *FakePingcapV1alpha1) TidbMonitors(namespace string) v1alpha1.TidbMonitorInterface {
 	return &FakeTidbMonitors{c, namespace}
+}
+
+func (c *FakePingcapV1alpha1) TidbNGMonitorings(namespace string) v1alpha1.TidbNGMonitoringInterface {
+	return &FakeTidbNGMonitorings{c, namespace}
 }
 
 // RESTClient returns a RESTClient that is used to communicate

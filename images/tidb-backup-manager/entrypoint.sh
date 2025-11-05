@@ -15,6 +15,18 @@
 
 set -e
 
+# The trap command is to make sure the sidecars are terminated when the jobs are finished
+cleanup() {
+    if [ ! -d "/tmp/pod" ]; then
+        mkdir -p /tmp/pod
+    fi
+    echo "Sleeping for 10 seconds before exit..."
+    sleep 10
+    touch /tmp/pod/main-terminated
+}
+
+trap cleanup EXIT
+
 export GOOGLE_APPLICATION_CREDENTIALS=/tmp/google-credentials.json
 echo "Create rclone.conf file."
 cat <<EOF > /tmp/rclone.conf
@@ -58,12 +70,25 @@ else
 	EXEC_COMMAND="/usr/local/bin/shush exec --"
 fi
 
+terminate_subprocesses() {
+    echo "get SIGTERM, send it to sub process $1"
+    kill -15 $1 # -15 is SIGTERM
+    wait $1
+}
+
 # exec command
 case "$1" in
     backup)
         shift 1
         echo "$BACKUP_BIN backup $@"
-        $EXEC_COMMAND $BACKUP_BIN backup "$@"
+        $EXEC_COMMAND $BACKUP_BIN backup "$@" &
+
+        # save the PID of the sub process
+        pid=$!
+        # Trap the SIGTERM signal and forward it to the main process
+        trap 'terminate_subprocesses $pid' SIGTERM
+        # Wait for the sub process to complete
+        wait $pid
         ;;
     export)
         shift 1
@@ -80,13 +105,20 @@ case "$1" in
         echo "$BACKUP_BIN import $@"
         $EXEC_COMMAND $BACKUP_BIN import "$@"
         ;;
+    compact)
+        shift 1
+        echo "$BACKUP_BIN compact $@"
+        $EXEC_COMMAND $BACKUP_BIN compact "$@"
+        ;;
     clean)
         shift 1
         echo "$BACKUP_BIN clean $@"
+        echo "Sleeping for 10 seconds before clean..."
+        sleep 10
         $EXEC_COMMAND $BACKUP_BIN clean "$@"
         ;;
     *)
-        echo "Usage: $0 {backup|restore|clean}"
+        echo "Usage: $0 {backup|restore|import|compact|clean}"
         echo "Now runs your command."
         echo "$@"
 

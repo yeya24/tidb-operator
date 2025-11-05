@@ -12,7 +12,7 @@ timezone: UTC
 
 # clusterName is the TiDB cluster name that should backup from or restore to.
 clusterName: demo
-clusterVersion: v5.0.0
+clusterVersion: v8.5.3
 
 baseImage: pingcap/tidb-binlog
 imagePullPolicy: IfNotPresent
@@ -29,6 +29,12 @@ storage: 10Gi
 disableDetect: false
 # if drainer donesn't have checkpoint, use initial commitTS to initial checkpoint
 initialCommitTs: "-1"
+
+# The port that Drainer listens on
+port: 8249
+
+# The PD client port connected by Drainer
+pdClientPort: 2379
 
 # Whether enable the TLS connection between TiDB server components
 tlsCluster:

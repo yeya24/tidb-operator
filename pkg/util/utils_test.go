@@ -14,7 +14,6 @@
 package util
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -25,8 +24,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	fuzz "github.com/google/gofuzz"
 	. "github.com/onsi/gomega"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
-	"github.com/pingcap/tidb-operator/pkg/label"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -178,32 +177,6 @@ func TestGetPodOrdinals(t *testing.T) {
 	}
 }
 
-func TestGetAutoScalingOutSlots(t *testing.T) {
-	g := NewGomegaWithT(t)
-	slice := []int32{1, 2}
-	sliceData, err := json.Marshal(slice)
-	sliceString := string(sliceData)
-	g.Expect(err).Should(BeNil())
-	tc := &v1alpha1.TidbCluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{
-				label.AnnTiKVAutoScalingOutOrdinals: sliceString,
-				label.AnnTiDBAutoScalingOutOrdinals: sliceString,
-			},
-		},
-	}
-
-	var get sets.Int32
-	get = GetAutoScalingOutSlots(tc, v1alpha1.PDMemberType)
-	g.Expect(get).Should(Equal(sets.Int32{}))
-
-	get = GetAutoScalingOutSlots(tc, v1alpha1.TiKVMemberType)
-	g.Expect(get).Should(Equal(sets.NewInt32(slice...)))
-
-	get = GetAutoScalingOutSlots(tc, v1alpha1.TiDBMemberType)
-	g.Expect(get).Should(Equal(sets.NewInt32(slice...)))
-}
-
 func TestName(t *testing.T) {
 	tcName := "test_cluster"
 	com := "com_name"
@@ -216,7 +189,7 @@ func TestName(t *testing.T) {
 	name = ClusterTLSSecretName(tcName, com)
 	g.Expect(name).Should(Equal(tcName + "-" + com + "-cluster-secret"))
 
-	name = TiDBClientTLSSecretName(tcName)
+	name = TiDBClientTLSSecretName(tcName, nil)
 	g.Expect(name).Should(Equal(tcName + "-tidb-client-secret"))
 
 	name = DMClientTLSSecretName(tcName)
@@ -679,6 +652,42 @@ func TestBuildAdditionalVolumeAndVolumeMount(t *testing.T) {
 			},
 		},
 		{
+			name: "pdms spec storageVolumes",
+			storageVolumes: []v1alpha1.StorageVolume{
+				{
+					Name:        "log",
+					StorageSize: "2Gi",
+					MountPath:   "/var/lib/log",
+				}},
+			memberType: v1alpha1.PDMSTSOMemberType,
+			testResult: func(volMounts []corev1.VolumeMount, volumeClaims []corev1.PersistentVolumeClaim) {
+				g := NewGomegaWithT(t)
+				q, _ := resource.ParseQuantity("2Gi")
+				g.Expect(volumeClaims).To(Equal([]corev1.PersistentVolumeClaim{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: v1alpha1.PDMSTSOMemberType.String() + "-log",
+						},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{
+								corev1.ReadWriteOnce,
+							},
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: q,
+								},
+							},
+						},
+					},
+				}))
+				g.Expect(volMounts).To(Equal([]corev1.VolumeMount{
+					{
+						Name: fmt.Sprintf("%s-%s", v1alpha1.PDMSTSOMemberType, "log"), MountPath: "/var/lib/log",
+					},
+				}))
+			},
+		},
+		{
 			name:             "tikv spec multiple storageVolumes",
 			storageClassName: pointer.StringPtr("ns2"),
 			storageVolumes: []v1alpha1.StorageVolume{
@@ -731,7 +740,40 @@ func TestBuildAdditionalVolumeAndVolumeMount(t *testing.T) {
 						},
 					},
 				}))
-
+			},
+		},
+		{
+			name: "test no volumeMount generate",
+			storageVolumes: []v1alpha1.StorageVolume{
+				{
+					Name:             "wal",
+					StorageSize:      "2Gi",
+					StorageClassName: pointer.StringPtr("sc"),
+				},
+			},
+			memberType: v1alpha1.TiCDCMemberType,
+			testResult: func(volMounts []corev1.VolumeMount, volumeClaims []corev1.PersistentVolumeClaim) {
+				g := NewGomegaWithT(t)
+				q, _ := resource.ParseQuantity("2Gi")
+				g.Expect(len(volMounts)).To(Equal(0))
+				g.Expect(volumeClaims).To(Equal([]corev1.PersistentVolumeClaim{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: v1alpha1.TiCDCMemberType.String() + "-wal",
+						},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{
+								corev1.ReadWriteOnce,
+							},
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: q,
+								},
+							},
+							StorageClassName: pointer.StringPtr("sc"),
+						},
+					},
+				}))
 			},
 		},
 	}

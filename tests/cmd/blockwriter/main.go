@@ -24,11 +24,12 @@ import (
 	// To register MySQL driver
 	_ "github.com/go-sql-driver/mysql"
 
+	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/tests/pkg/blockwriter"
 	"github.com/pingcap/tidb-operator/tests/pkg/util"
+	"github.com/pingcap/tidb-operator/tests/third_party/k8s/log"
 	flag "github.com/spf13/pflag"
 	"k8s.io/component-base/logs"
-	"k8s.io/kubernetes/test/e2e/framework/log"
 )
 
 var (
@@ -37,6 +38,7 @@ var (
 	optClusterName string
 	optDatabase    string
 	optPassword    string
+	optTiDBSvcPort int32
 )
 
 func init() {
@@ -48,10 +50,11 @@ func init() {
 	flag.StringVar(&optClusterName, "cluster-name", optClusterName, "cluster name")
 	flag.StringVar(&optDatabase, "database", optDatabase, "database")
 	flag.StringVar(&optPassword, "password", optPassword, "password")
+	flag.Int32Var(&optTiDBSvcPort, "tidb-service-port", v1alpha1.DefaultTiDBServerPort, "tidb service port")
 }
 
-func getDSN(ns, tcName, databaseName, password string) string {
-	return fmt.Sprintf("root:%s@(%s-tidb.%s:4000)/%s?charset=utf8", password, tcName, ns, databaseName)
+func getDSN(ns, tcName, databaseName, password string, port int32) string {
+	return fmt.Sprintf("root:%s@(%s-tidb.%s:%d)/%s?charset=utf8", password, tcName, ns, port, databaseName)
 }
 
 func main() {
@@ -64,7 +67,7 @@ func main() {
 	if err != nil {
 		log.Failf(err.Error())
 	}
-	dsn := getDSN(optNamespace, optClusterName, optDatabase, optPassword)
+	dsn := getDSN(optNamespace, optClusterName, optDatabase, optPassword, optTiDBSvcPort)
 	db, err := util.OpenDB(dsn, optConfig.Concurrency)
 	if err != nil {
 		log.Failf(err.Error())
@@ -82,7 +85,7 @@ func main() {
 }
 
 func initDB() error {
-	s := fmt.Sprintf("root:%s@(%s-tidb.%s:4000)/?charset=utf8", optPassword, optClusterName, optNamespace)
+	s := fmt.Sprintf("root:%s@(%s-tidb.%s:%d)/?charset=utf8", optPassword, optClusterName, optNamespace, v1alpha1.DefaultTiDBServerPort)
 	db, err := sql.Open("mysql", s)
 	if err != nil {
 		return err

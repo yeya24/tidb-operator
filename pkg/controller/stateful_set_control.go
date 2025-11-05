@@ -14,6 +14,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -29,14 +30,14 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // StatefulSetControlInterface defines the interface that uses to create, update, and delete StatefulSets,
 type StatefulSetControlInterface interface {
 	CreateStatefulSet(runtime.Object, *apps.StatefulSet) error
 	UpdateStatefulSet(runtime.Object, *apps.StatefulSet) (*apps.StatefulSet, error)
-	DeleteStatefulSet(runtime.Object, *apps.StatefulSet) error
+	DeleteStatefulSet(runtime.Object, *apps.StatefulSet, metav1.DeleteOptions) error
 }
 
 type realStatefulSetControl struct {
@@ -60,7 +61,7 @@ func (c *realStatefulSetControl) CreateStatefulSet(controller runtime.Object, se
 	name := controllerMo.GetName()
 	namespace := controllerMo.GetNamespace()
 
-	_, err := c.kubeCli.AppsV1().StatefulSets(namespace).Create(set)
+	_, err := c.kubeCli.AppsV1().StatefulSets(namespace).Create(context.TODO(), set, metav1.CreateOptions{})
 	// sink already exists errors
 	if apierrors.IsAlreadyExists(err) {
 		return err
@@ -81,12 +82,14 @@ func (c *realStatefulSetControl) UpdateStatefulSet(controller runtime.Object, se
 
 	setName := set.GetName()
 	setSpec := set.Spec.DeepCopy()
+	setLabels := set.Labels
+	setAnnotations := set.Annotations
 	var updatedSS *apps.StatefulSet
 
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		// TODO: verify if StatefulSet identity(name, namespace, labels) matches TidbCluster
 		var updateErr error
-		updatedSS, updateErr = c.kubeCli.AppsV1().StatefulSets(namespace).Update(set)
+		updatedSS, updateErr = c.kubeCli.AppsV1().StatefulSets(namespace).Update(context.TODO(), set, metav1.UpdateOptions{})
 		if updateErr == nil {
 			klog.Infof("%s: [%s/%s]'s StatefulSet: [%s/%s] updated successfully", kind, namespace, name, namespace, setName)
 			return nil
@@ -97,6 +100,8 @@ func (c *realStatefulSetControl) UpdateStatefulSet(controller runtime.Object, se
 			// make a copy so we don't mutate the shared cache
 			set = updated.DeepCopy()
 			set.Spec = *setSpec
+			set.Labels = setLabels
+			set.Annotations = setAnnotations
 		} else {
 			utilruntime.HandleError(fmt.Errorf("error getting updated StatefulSet %s/%s from lister: %v", namespace, setName, err))
 		}
@@ -107,7 +112,7 @@ func (c *realStatefulSetControl) UpdateStatefulSet(controller runtime.Object, se
 }
 
 // DeleteStatefulSet delete a StatefulSet in a TidbCluster.
-func (c *realStatefulSetControl) DeleteStatefulSet(controller runtime.Object, set *apps.StatefulSet) error {
+func (c *realStatefulSetControl) DeleteStatefulSet(controller runtime.Object, set *apps.StatefulSet, opts metav1.DeleteOptions) error {
 	controllerMo, ok := controller.(metav1.Object)
 	if !ok {
 		return fmt.Errorf("%T is not a metav1.Object, cannot call setControllerReference", controller)
@@ -116,7 +121,7 @@ func (c *realStatefulSetControl) DeleteStatefulSet(controller runtime.Object, se
 	name := controllerMo.GetName()
 	namespace := controllerMo.GetNamespace()
 
-	err := c.kubeCli.AppsV1().StatefulSets(namespace).Delete(set.Name, nil)
+	err := c.kubeCli.AppsV1().StatefulSets(namespace).Delete(context.TODO(), set.Name, opts)
 	c.recordStatefulSetEvent("delete", kind, name, controller, set, err)
 	return err
 }
@@ -224,7 +229,7 @@ func (c *FakeStatefulSetControl) UpdateStatefulSet(_ runtime.Object, set *apps.S
 }
 
 // DeleteStatefulSet deletes the statefulset of SetIndexer
-func (c *FakeStatefulSetControl) DeleteStatefulSet(_ runtime.Object, _ *apps.StatefulSet) error {
+func (c *FakeStatefulSetControl) DeleteStatefulSet(_ runtime.Object, _ *apps.StatefulSet, _ metav1.DeleteOptions) error {
 	return nil
 }
 

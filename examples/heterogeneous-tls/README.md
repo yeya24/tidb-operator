@@ -3,6 +3,9 @@
 
 The following steps will create a basic TLS TiDB cluster , then we can create a heterogeneous cluster contains one tikv and one tidb.
 
+## Install Cert Manager 
+Reference [document](https://cert-manager.io/docs/installation/).
+
 ## Install TLS certificate
 The following commands is assumed to be executed in this directory.
 

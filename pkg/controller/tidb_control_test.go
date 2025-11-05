@@ -14,18 +14,20 @@
 package controller
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	. "github.com/onsi/gomega"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
-	"github.com/pingcap/tidb/config"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	kubeinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	core "k8s.io/client-go/testing"
 )
@@ -77,6 +79,7 @@ o8O7UTMyQ7MUrPusaqsG/QuvppbdahOLzkVc0E5jUOL/dgSxsdOqc7EIxd94Cg65
 cQQSTMrQTbQLo5c=
 -----END CERTIFICATE-----
 `
+	// nolint:gosec
 	keyData string = `
 -----BEGIN EC PRIVATE KEY-----
 MHcCAQEEIFbUNEYv0ujI3dTLbnb5lTBfRxwst3lMROmRV2tN7NTroAoGCCqGSM49
@@ -132,8 +135,8 @@ func TestHealth(t *testing.T) {
 
 		fakeClient := &fake.Clientset{}
 		tc := getTidbCluster()
-
-		control := NewDefaultTiDBControl(fakeClient)
+		informer := kubeinformers.NewSharedInformerFactory(fakeClient, 0)
+		control := NewDefaultTiDBControl(informer.Core().V1().Secrets().Lister())
 		control.testURL = svc.URL
 		result, err := control.GetHealth(tc, 0)
 		g.Expect(err).NotTo(HaveOccurred())
@@ -195,7 +198,8 @@ func TestInfo(t *testing.T) {
 		defer svc.Close()
 
 		fakeClient := &fake.Clientset{}
-		control := NewDefaultTiDBControl(fakeClient)
+		informer := kubeinformers.NewSharedInformerFactory(fakeClient, 0)
+		control := NewDefaultTiDBControl(informer.Core().V1().Secrets().Lister())
 		control.testURL = svc.URL
 		tc := getTidbCluster()
 		result, err := control.GetInfo(tc, 0)
@@ -205,63 +209,6 @@ func TestInfo(t *testing.T) {
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(result).To(Equal(c.expected))
 		}
-	}
-}
-
-func TestSettings(t *testing.T) {
-	g := NewGomegaWithT(t)
-
-	cases := []struct {
-		caseName string
-		path     string
-		method   string
-		failed   bool
-		resp     config.Config
-		expected *config.Config
-	}{
-		{
-			caseName: "GetSettings",
-			path:     "/settings",
-			method:   "GET",
-			failed:   false,
-			resp:     config.Config{Host: "host1", Port: 1},
-			expected: &config.Config{Host: "host1", Port: 1},
-		},
-		{
-			caseName: "GetSettings",
-			path:     "/settings",
-			method:   "GET",
-			failed:   true,
-			resp:     config.Config{Host: "host2", Port: 2},
-			expected: nil,
-		},
-	}
-
-	for _, c := range cases {
-		svc := getClientServer(func(w http.ResponseWriter, request *http.Request) {
-			g.Expect(request.Method).To(Equal(c.method), "check method")
-			g.Expect(request.URL.Path).To(Equal(c.path), "check url")
-
-			w.Header().Set("Content-Type", ContentTypeJSON)
-			if c.failed {
-				w.WriteHeader(http.StatusInternalServerError)
-			} else {
-				data, err := json.Marshal(c.resp)
-				g.Expect(err).NotTo(HaveOccurred())
-				w.Write(data)
-			}
-		})
-		defer svc.Close()
-
-		fakeClient := &fake.Clientset{}
-		control := NewDefaultTiDBControl(fakeClient)
-		control.testURL = svc.URL
-		tc := getTidbCluster()
-		result, err := control.GetSettings(tc, 0)
-		if c.failed {
-			g.Expect(err).To(HaveOccurred())
-		}
-		g.Expect(result).To(Equal(c.expected))
 	}
 }
 
@@ -296,12 +243,78 @@ func TestGetHTTPClient(t *testing.T) {
 	for _, c := range cases {
 		fakeClient := &fake.Clientset{}
 		fakeSecret(fakeClient)
-		control := NewDefaultTiDBControl(fakeClient)
+		informer := kubeinformers.NewSharedInformerFactory(fakeClient, 0)
+		err := informer.Core().V1().Secrets().Informer().GetIndexer().Add(&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "demo-cluster-client-secret",
+				Namespace: corev1.NamespaceDefault,
+			},
+			Data: map[string][]byte{
+				corev1.TLSCertKey:              []byte(certData),
+				corev1.TLSPrivateKeyKey:        []byte(keyData),
+				corev1.ServiceAccountRootCAKey: []byte(caData),
+			},
+		})
+		g.Expect(err).Should(BeNil())
+		control := NewDefaultTiDBControl(informer.Core().V1().Secrets().Lister())
 		tc := getTidbCluster()
 		c.updateTC(tc)
 		httpClient, err := control.getHTTPClient(tc)
 		g.Expect(err).NotTo(HaveOccurred())
 		c.expected(httpClient)
+	}
+}
+
+func TestSetLabels(t *testing.T) {
+	g := NewGomegaWithT(t)
+
+	cases := []struct {
+		caseName string
+		labels   map[string]string
+		failed   bool
+	}{
+		{
+			caseName: "SetLabelsSuccessfully",
+			failed:   false,
+			labels:   map[string]string{"zone": "test1"},
+		},
+		{
+			caseName: "SetLabelsFailed",
+			failed:   true,
+			labels:   map[string]string{"zone": "test1", "topology.kubernetes.io/zone": "test1"},
+		},
+	}
+
+	for _, c := range cases {
+		svc := getClientServer(func(w http.ResponseWriter, request *http.Request) {
+			g.Expect(request.Method).To(Equal(http.MethodPost), "check method")
+			g.Expect(request.URL.Path).To(Equal("/labels"), "check url")
+			buffer := bytes.NewBuffer([]byte{})
+			g.Expect(json.NewEncoder(buffer).Encode(c.labels)).NotTo(HaveOccurred())
+			body, err := io.ReadAll(request.Body)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(body).To(Equal(buffer.Bytes()))
+
+			w.Header().Set("Content-Type", ContentTypeJSON)
+			if c.failed {
+				w.WriteHeader(http.StatusInternalServerError)
+			} else {
+				w.Write(buffer.Bytes())
+			}
+		})
+		defer svc.Close()
+
+		fakeClient := &fake.Clientset{}
+		informer := kubeinformers.NewSharedInformerFactory(fakeClient, 0)
+		control := NewDefaultTiDBControl(informer.Core().V1().Secrets().Lister())
+		control.testURL = svc.URL
+		tc := getTidbCluster()
+		err := control.SetServerLabels(tc, 0, c.labels)
+		if c.failed {
+			g.Expect(err).To(HaveOccurred())
+		} else {
+			g.Expect(err).NotTo(HaveOccurred())
+		}
 	}
 }
 
@@ -318,6 +331,26 @@ func getTidbCluster() *v1alpha1.TidbCluster {
 		},
 		Spec: v1alpha1.TidbClusterSpec{
 			TiDB: &v1alpha1.TiDBSpec{},
+		},
+	}
+}
+
+func getTidbClusterWithClusterDomain(
+	clusterDomain string,
+) *v1alpha1.TidbCluster {
+	return &v1alpha1.TidbCluster{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "TidbCluster",
+			APIVersion: "pingcap.com/v1alpha1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: corev1.NamespaceDefault,
+			UID:       types.UID("test"),
+		},
+		Spec: v1alpha1.TidbClusterSpec{
+			TiDB:          &v1alpha1.TiDBSpec{},
+			ClusterDomain: clusterDomain,
 		},
 	}
 }

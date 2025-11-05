@@ -17,13 +17,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 
 	"github.com/pingcap/tidb-operator/tests/pkg/fault-trigger/api"
 	"github.com/pingcap/tidb-operator/tests/pkg/fault-trigger/manager"
 	"github.com/pingcap/tidb-operator/tests/pkg/util"
-	"k8s.io/kubernetes/test/e2e/framework/log"
+	"github.com/pingcap/tidb-operator/tests/third_party/k8s/log"
 )
 
 // Client is a fault-trigger client
@@ -100,7 +100,7 @@ func (c client) do(req *http.Request) (*http.Response, []byte, error) {
 		}
 	}
 
-	bodyByte, err := ioutil.ReadAll(resp.Body)
+	bodyByte, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return resp, nil, &clientError{
 			code: code,

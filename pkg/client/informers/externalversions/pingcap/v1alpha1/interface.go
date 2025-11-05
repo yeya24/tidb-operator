@@ -25,6 +25,8 @@ type Interface interface {
 	Backups() BackupInformer
 	// BackupSchedules returns a BackupScheduleInformer.
 	BackupSchedules() BackupScheduleInformer
+	// CompactBackups returns a CompactBackupInformer.
+	CompactBackups() CompactBackupInformer
 	// DMClusters returns a DMClusterInformer.
 	DMClusters() DMClusterInformer
 	// DataResources returns a DataResourceInformer.
@@ -33,12 +35,14 @@ type Interface interface {
 	Restores() RestoreInformer
 	// TidbClusters returns a TidbClusterInformer.
 	TidbClusters() TidbClusterInformer
-	// TidbClusterAutoScalers returns a TidbClusterAutoScalerInformer.
-	TidbClusterAutoScalers() TidbClusterAutoScalerInformer
+	// TidbDashboards returns a TidbDashboardInformer.
+	TidbDashboards() TidbDashboardInformer
 	// TidbInitializers returns a TidbInitializerInformer.
 	TidbInitializers() TidbInitializerInformer
 	// TidbMonitors returns a TidbMonitorInformer.
 	TidbMonitors() TidbMonitorInformer
+	// TidbNGMonitorings returns a TidbNGMonitoringInformer.
+	TidbNGMonitorings() TidbNGMonitoringInformer
 }
 
 type version struct {
@@ -62,6 +66,11 @@ func (v *version) BackupSchedules() BackupScheduleInformer {
 	return &backupScheduleInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
+// CompactBackups returns a CompactBackupInformer.
+func (v *version) CompactBackups() CompactBackupInformer {
+	return &compactBackupInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
 // DMClusters returns a DMClusterInformer.
 func (v *version) DMClusters() DMClusterInformer {
 	return &dMClusterInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
@@ -82,9 +91,9 @@ func (v *version) TidbClusters() TidbClusterInformer {
 	return &tidbClusterInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
-// TidbClusterAutoScalers returns a TidbClusterAutoScalerInformer.
-func (v *version) TidbClusterAutoScalers() TidbClusterAutoScalerInformer {
-	return &tidbClusterAutoScalerInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+// TidbDashboards returns a TidbDashboardInformer.
+func (v *version) TidbDashboards() TidbDashboardInformer {
+	return &tidbDashboardInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
 // TidbInitializers returns a TidbInitializerInformer.
@@ -95,4 +104,9 @@ func (v *version) TidbInitializers() TidbInitializerInformer {
 // TidbMonitors returns a TidbMonitorInformer.
 func (v *version) TidbMonitors() TidbMonitorInformer {
 	return &tidbMonitorInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// TidbNGMonitorings returns a TidbNGMonitoringInformer.
+func (v *version) TidbNGMonitorings() TidbNGMonitoringInformer {
+	return &tidbNGMonitoringInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }

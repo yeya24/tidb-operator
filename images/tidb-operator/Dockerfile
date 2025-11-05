@@ -1,7 +1,8 @@
-FROM alpine:3.10
+FROM ghcr.io/pingcap-qe/bases/pingcap-base:v1.10.0
 
-RUN apk add tzdata --no-cache
-ADD bin/tidb-scheduler /usr/local/bin/tidb-scheduler
-ADD bin/tidb-discovery /usr/local/bin/tidb-discovery
-ADD bin/tidb-controller-manager /usr/local/bin/tidb-controller-manager
-ADD bin/tidb-admission-webhook /usr/local/bin/tidb-admission-webhook
+ARG TARGETARCH
+RUN dnf install -y tzdata bind-utils && dnf clean all
+ADD bin/${TARGETARCH}/tidb-scheduler /usr/local/bin/tidb-scheduler
+ADD bin/${TARGETARCH}/tidb-discovery /usr/local/bin/tidb-discovery
+ADD bin/${TARGETARCH}/tidb-controller-manager /usr/local/bin/tidb-controller-manager
+ADD bin/${TARGETARCH}/tidb-admission-webhook /usr/local/bin/tidb-admission-webhook

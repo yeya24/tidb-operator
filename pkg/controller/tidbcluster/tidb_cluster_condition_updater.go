@@ -68,9 +68,15 @@ func (u *tidbClusterConditionUpdater) updateReadyCondition(tc *v1alpha1.TidbClus
 	case tc.Spec.TiDB != nil && !tc.TiDBAllMembersReady():
 		reason = utiltidbcluster.TiDBUnhealthy
 		message = "TiDB(s) are not healthy"
-	case !tc.TiFlashAllStoresReady():
+	case tc.Spec.TiFlash != nil && !tc.TiFlashAllStoresReady():
 		reason = utiltidbcluster.TiFlashStoreNotUp
 		message = "TiFlash store(s) are not up"
+	case tc.Spec.TiCDC != nil && !tc.TiCDCAllCapturesReady():
+		reason = utiltidbcluster.TiCDCCaptureNotReady
+		message = "TiCDC capture(s) are not up"
+	case tc.Spec.TiProxy != nil && !tc.TiProxyAllMembersReady():
+		reason = utiltidbcluster.TiProxyUnhealthy
+		message = "TiProxy(s) are not healthy"
 	default:
 		status = v1.ConditionTrue
 		reason = utiltidbcluster.Ready

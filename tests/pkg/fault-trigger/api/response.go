@@ -30,8 +30,9 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/juju/errors"
-	"k8s.io/kubernetes/test/e2e/framework/log"
+	"github.com/pingcap/errors"
+
+	"github.com/pingcap/tidb-operator/tests/third_party/k8s/log"
 )
 
 // Response defines a new response struct for http

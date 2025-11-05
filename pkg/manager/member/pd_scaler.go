@@ -17,13 +17,14 @@ import (
 	"fmt"
 
 	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
-	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
-	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/util"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+
+	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+	"github.com/pingcap/tidb-operator/pkg/controller"
+	"github.com/pingcap/tidb-operator/pkg/util"
 )
 
 // TODO add e2e test specs
@@ -44,7 +45,7 @@ func (s *pdScaler) Scale(meta metav1.Object, oldSet *apps.StatefulSet, newSet *a
 	} else if scaling < 0 {
 		return s.ScaleIn(meta, oldSet, newSet)
 	}
-	return s.SyncAutoScalerAnn(meta, oldSet)
+	return nil
 }
 
 func (s *pdScaler) ScaleOut(meta metav1.Object, oldSet *apps.StatefulSet, newSet *apps.StatefulSet) error {
@@ -68,30 +69,11 @@ func (s *pdScaler) ScaleOut(meta metav1.Object, oldSet *apps.StatefulSet, newSet
 		return fmt.Errorf("TidbCluster: %s/%s's pd status sync failed, can't scale out now", ns, tcName)
 	}
 
-	if len(tc.Status.PD.FailureMembers) != 0 {
-		setReplicasAndDeleteSlots(newSet, replicas, deleteSlots)
-		return nil
-	}
-
-	healthCount := 0
-	totalCount := *oldSet.Spec.Replicas
-	podOrdinals := helper.GetPodOrdinals(*oldSet.Spec.Replicas, oldSet).List()
-	for _, i := range podOrdinals {
-		targetPdName := PdName(tcName, i, tc.Namespace, tc.Spec.ClusterDomain)
-		if member, ok := tc.Status.PD.Members[targetPdName]; ok && member.Health {
-			healthCount++
-		}
-	}
-	if healthCount < int(totalCount) {
-		return fmt.Errorf("TidbCluster: %s/%s's pd %d/%d is ready, can't scale out now",
-			ns, tcName, healthCount, totalCount)
-	}
-
 	setReplicasAndDeleteSlots(newSet, replicas, deleteSlots)
 	return nil
 }
 
-// We need remove member from cluster before reducing statefulset replicas
+// ScaleIn We need remove member from cluster before reducing statefulset replicas
 // only remove one member at a time when scale down
 func (s *pdScaler) ScaleIn(meta metav1.Object, oldSet *apps.StatefulSet, newSet *apps.StatefulSet) error {
 	tc, ok := meta.(*v1alpha1.TidbCluster)
@@ -103,7 +85,7 @@ func (s *pdScaler) ScaleIn(meta metav1.Object, oldSet *apps.StatefulSet, newSet 
 	tcName := tc.GetName()
 	_, ordinal, replicas, deleteSlots := scaleOne(oldSet, newSet)
 	resetReplicas(newSet, oldSet)
-	memberName := PdName(tcName, ordinal, tc.Namespace, tc.Spec.ClusterDomain)
+	memberName := PdName(tcName, ordinal, tc.Namespace, tc.Spec.ClusterDomain, tc.Spec.AcrossK8s)
 	pdPodName := PdPodName(tcName, ordinal)
 
 	if !tc.Status.PD.Synced {
@@ -111,11 +93,6 @@ func (s *pdScaler) ScaleIn(meta metav1.Object, oldSet *apps.StatefulSet, newSet 
 	}
 
 	klog.Infof("scaling in pd statefulset %s/%s, ordinal: %d (replicas: %d, delete slots: %v)", oldSet.Namespace, oldSet.Name, ordinal, replicas, deleteSlots.List())
-
-	if s.deps.CLIConfig.PodWebhookEnabled {
-		setReplicasAndDeleteSlots(newSet, replicas, deleteSlots)
-		return nil
-	}
 
 	// limit scale in when multi-cluster is enabled
 	if pass := s.preCheckUpMembers(tc, pdPodName); !pass {
@@ -137,7 +114,7 @@ func (s *pdScaler) ScaleIn(meta metav1.Object, oldSet *apps.StatefulSet, newSet 
 			if ordinal > minOrdinal {
 				targetOrdinal = minOrdinal
 			}
-			targetPdName := PdName(tcName, targetOrdinal, tc.Namespace, tc.Spec.ClusterDomain)
+			targetPdName := PdName(tcName, targetOrdinal, tc.Namespace, tc.Spec.ClusterDomain, tc.Spec.AcrossK8s)
 			if _, exist := tc.Status.PD.Members[targetPdName]; exist {
 				err = pdClient.TransferPDLeader(targetPdName)
 			} else {
@@ -186,10 +163,6 @@ func (s *pdScaler) ScaleIn(meta metav1.Object, oldSet *apps.StatefulSet, newSet 
 	return nil
 }
 
-func (s *pdScaler) SyncAutoScalerAnn(meta metav1.Object, actual *apps.StatefulSet) error {
-	return nil
-}
-
 func (s *pdScaler) preCheckUpMembers(tc *v1alpha1.TidbCluster, podName string) bool {
 	upComponents := 0
 
@@ -204,7 +177,7 @@ func (s *pdScaler) preCheckUpMembers(tc *v1alpha1.TidbCluster, podName string) b
 	}
 
 	if upComponents != 0 && tc.Spec.PD.Replicas == 0 {
-		errMsg := fmt.Sprintf("The PD is in use by TidbCluster [%s/%s], can't scale in PD, podname %s", tc.GetNamespace(), tc.GetName(), podName)
+		errMsg := fmt.Sprintf("The PD is in use by TidbCluster [%s/%s], can't scale in PD, podname %s, upComponents %d", tc.GetNamespace(), tc.GetName(), podName, upComponents)
 		klog.Error(errMsg)
 		s.deps.Recorder.Event(tc, v1.EventTypeWarning, "FailedScaleIn", errMsg)
 		return false
@@ -236,9 +209,5 @@ func (s *fakePDScaler) ScaleOut(_ metav1.Object, oldSet *apps.StatefulSet, newSe
 
 func (s *fakePDScaler) ScaleIn(_ metav1.Object, oldSet *apps.StatefulSet, newSet *apps.StatefulSet) error {
 	setReplicasAndDeleteSlots(newSet, *oldSet.Spec.Replicas-1, nil)
-	return nil
-}
-
-func (s *fakePDScaler) SyncAutoScalerAnn(tc metav1.Object, actual *apps.StatefulSet) error {
 	return nil
 }

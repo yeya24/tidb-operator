@@ -16,6 +16,7 @@ package export
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
@@ -23,13 +24,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mholt/archiver"
+	"github.com/mholt/archives"
 	"github.com/pingcap/tidb-operator/cmd/backup-manager/app/constants"
 	backupUtil "github.com/pingcap/tidb-operator/cmd/backup-manager/app/util"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/util"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // Options contains the input arguments to the backup command
@@ -59,8 +60,7 @@ func (bo *Options) getDestBucketURI(remotePath string) string {
 	return fmt.Sprintf("%s://%s", bo.StorageType, remotePath)
 }
 
-func (bo *Options) dumpTidbClusterData(ctx context.Context, backup *v1alpha1.Backup) error {
-	bfPath := bo.getBackupFullPath()
+func (bo *Options) dumpTidbClusterData(ctx context.Context, bfPath string, backup *v1alpha1.Backup) error {
 	err := backupUtil.EnsureDirectoryExist(bfPath)
 	if err != nil {
 		return err
@@ -74,7 +74,9 @@ func (bo *Options) dumpTidbClusterData(ctx context.Context, backup *v1alpha1.Bac
 	}
 	args = append(args, backupUtil.ConstructDumplingOptionsForBackup(backup)...)
 	if bo.TLSClient {
-		args = append(args, fmt.Sprintf("--ca=%s", path.Join(util.TiDBClientTLSPath, corev1.ServiceAccountRootCAKey)))
+		if !bo.SkipClientCA {
+			args = append(args, fmt.Sprintf("--ca=%s", path.Join(util.TiDBClientTLSPath, corev1.ServiceAccountRootCAKey)))
+		}
 		args = append(args, fmt.Sprintf("--cert=%s", path.Join(util.TiDBClientTLSPath, corev1.TLSCertKey)))
 		args = append(args, fmt.Sprintf("--key=%s", path.Join(util.TiDBClientTLSPath, corev1.TLSPrivateKeyKey)))
 	}
@@ -84,7 +86,16 @@ func (bo *Options) dumpTidbClusterData(ctx context.Context, backup *v1alpha1.Bac
 		binPath = path.Join(util.DumplingBinPath, "dumpling")
 	}
 
-	klog.Infof("The dump process is ready, command \"%s %s\"", binPath, strings.Join(args, " "))
+	args_redacted := []string{}
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--password=") {
+			args_redacted = append(args_redacted, "--password=******")
+		} else {
+			args_redacted = append(args_redacted, arg)
+		}
+	}
+
+	klog.Infof("The dump process is ready, command \"%s %s\"", binPath, strings.Join(args_redacted, " "))
 
 	output, err := exec.CommandContext(ctx, binPath, args...).CombinedOutput()
 	if err != nil {
@@ -137,7 +148,7 @@ func getBackupSize(ctx context.Context, backupPath string, opts []string) (int64
 }
 
 // archiveBackupData archive backup data by destFile's extension name.
-// NOTE: no context/timeout supported for `archiver.Archive`, this may cause to be KILLed when blocking.
+// NOTE: no context/timeout supported for archiving, this may cause to be KILLed when blocking.
 func archiveBackupData(backupDir, destFile string) error {
 	if exist := backupUtil.IsDirExist(backupDir); !exist {
 		return fmt.Errorf("dir %s does not exist or is not a dir", backupDir)
@@ -146,7 +157,33 @@ func archiveBackupData(backupDir, destFile string) error {
 	if err := backupUtil.EnsureDirectoryExist(destDir); err != nil {
 		return err
 	}
-	err := archiver.Archive([]string{backupDir}, destFile)
+
+	// Create output file
+	outFile, err := os.Create(destFile)
+	if err != nil {
+		return fmt.Errorf("create archive file %s failed, err: %v", destFile, err)
+	}
+	defer outFile.Close()
+
+	// Create gzip writer
+	gz := archives.Gz{}
+	gzWriter, err := gz.OpenWriter(outFile)
+	if err != nil {
+		return fmt.Errorf("create gzip writer failed, err: %v", err)
+	}
+	defer gzWriter.Close()
+
+	// Get files to archive
+	files, err := archives.FilesFromDisk(context.Background(), nil, map[string]string{
+		backupDir: filepath.Base(backupDir),
+	})
+	if err != nil {
+		return fmt.Errorf("get files from %s failed, err: %v", backupDir, err)
+	}
+
+	// Create the tar archive into gzip writer
+	tar := archives.Tar{}
+	err = tar.Archive(context.Background(), gzWriter, files)
 	if err != nil {
 		return fmt.Errorf("archive backup data %s to %s failed, err: %v", backupDir, destFile, err)
 	}

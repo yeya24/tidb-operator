@@ -16,21 +16,13 @@ metadata:
 spec:
   containers:
   - name: main
-    image: gcr.io/k8s-testimages/kubekins-e2e:v20200311-1e25827-master
+    image: hub.pingcap.net/tidb-operator/kubekins-e2e:v8-go1.23.1
     command:
     - runner.sh
-    # Clean containers on TERM signal in root process to avoid cgroup leaking.
-    # https://github.com/pingcap/tidb-operator/issues/1603#issuecomment-582402196
     - exec
     - bash
     - -c
     - |
-      function clean() {
-        echo "info: clean all containers to avoid cgroup leaking"
-        docker kill $(docker ps -q) || true
-        docker system prune -af || true
-      }
-      trap clean TERM
       sleep 1d & wait
     # we need privileged mode in order to do docker in docker
     securityContext:
@@ -78,15 +70,6 @@ spec:
     key: tidb-operator
     operator: Exists
   affinity:
-    # running on nodes for tidb-operator only
-    nodeAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        nodeSelectorTerms:
-        - matchExpressions:
-          - key: ci.pingcap.com
-            operator: In
-            values:
-            - tidb-operator
     podAntiAffinity:
       preferredDuringSchedulingIgnoredDuringExecution:
       - weight: 100
@@ -128,6 +111,8 @@ if (!env.DEFAULT_GCR_IO_MIRROR) {
 pipeline {
     agent {
         kubernetes {
+            cloud "kubernetes-ng"
+            namespace "jenkins-tidb-operator"
             yaml podYAML
             defaultContainer "main"
             customWorkspace "/home/jenkins/agent/workspace/go/src/github.com/pingcap/tidb-operator"
@@ -177,15 +162,31 @@ pipeline {
 
         stage("Checkout") {
             steps {
-                checkout scm: [
-                        $class: 'GitSCM',
-                        branches: [[name: GIT_REF]],
-                        userRemoteConfigs: [[
-                            credentialsId: 'github-sre-bot-ssh',
-                            refspec: '+refs/heads/*:refs/remotes/origin/* +refs/pull/*:refs/remotes/origin/pr/*',
-                            url: "${params.GIT_URL}",
-                        ]]
+                try {
+                    checkout scm: [
+                            $class: 'GitSCM',
+                            branches: [[name: GIT_REF]],
+                            userRemoteConfigs: [[
+                                    credentialsId: 'github-sre-bot-ssh',
+                                    refspec: '+refs/heads/*:refs/remotes/origin/* +refs/pull/*:refs/remotes/origin/pr/*',
+                                    url: "${params.GIT_URL}",
+                            ]]
                     ]
+                } catch (info) {
+                    retry(3) {
+                        echo "checkout failed, retry.."
+                        sleep 10
+                        checkout scm: [
+                                $class: 'GitSCM',
+                                branches: [[name: GIT_REF]],
+                                userRemoteConfigs: [[
+                                        credentialsId: 'github-sre-bot-ssh',
+                                        refspec: '+refs/heads/*:refs/remotes/origin/* +refs/pull/*:refs/remotes/origin/pr/*',
+                                        url: "${params.GIT_URL}",
+                                ]]
+                        ]
+                    }
+                }
             }
         }
 

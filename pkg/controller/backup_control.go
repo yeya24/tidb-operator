@@ -27,24 +27,29 @@
 package controller
 
 import (
+	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned"
 	informers "github.com/pingcap/tidb-operator/pkg/client/informers/externalversions/pingcap/v1alpha1"
 	listers "github.com/pingcap/tidb-operator/pkg/client/listers/pingcap/v1alpha1"
-	"github.com/pingcap/tidb-operator/pkg/label"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // BackupControlInterface manages Backups used in BackupSchedule
 type BackupControlInterface interface {
 	CreateBackup(backup *v1alpha1.Backup) (*v1alpha1.Backup, error)
+	GetBackup(backup *v1alpha1.Backup) (*v1alpha1.Backup, error)
 	DeleteBackup(backup *v1alpha1.Backup) error
+	TruncateLogBackup(logBackup *v1alpha1.Backup, truncateTSO uint64) error
 }
 
 type realBackupControl struct {
@@ -68,7 +73,7 @@ func (c *realBackupControl) CreateBackup(backup *v1alpha1.Backup) (*v1alpha1.Bac
 	backupName := backup.GetName()
 
 	bsName := backup.GetLabels()[label.BackupScheduleLabelKey]
-	backup, err := c.cli.PingcapV1alpha1().Backups(ns).Create(backup)
+	backup, err := c.cli.PingcapV1alpha1().Backups(ns).Create(context.TODO(), backup, metav1.CreateOptions{})
 	if err != nil {
 		klog.Errorf("failed to create Backup: [%s/%s] for backupSchedule/%s, err: %v", ns, backupName, bsName, err)
 	} else {
@@ -78,18 +83,47 @@ func (c *realBackupControl) CreateBackup(backup *v1alpha1.Backup) (*v1alpha1.Bac
 	return backup, err
 }
 
+func (c *realBackupControl) GetBackup(backup *v1alpha1.Backup) (*v1alpha1.Backup, error) {
+	ns := backup.GetNamespace()
+	backupName := backup.GetName()
+
+	bsName := backup.GetLabels()[label.BackupScheduleLabelKey]
+	backup, err := c.cli.PingcapV1alpha1().Backups(ns).Get(context.TODO(), backupName, metav1.GetOptions{})
+	if err != nil {
+		klog.Errorf("failed to get Backup: [%s/%s] for backupSchedule/%s, err: %v", ns, backupName, bsName, err)
+		return nil, err
+	}
+	return backup, err
+}
+
 func (c *realBackupControl) DeleteBackup(backup *v1alpha1.Backup) error {
 	ns := backup.GetNamespace()
 	backupName := backup.GetName()
 
 	bsName := backup.GetLabels()[label.BackupScheduleLabelKey]
-	err := c.cli.PingcapV1alpha1().Backups(ns).Delete(backupName, nil)
+	err := c.cli.PingcapV1alpha1().Backups(ns).Delete(context.TODO(), backupName, metav1.DeleteOptions{})
 	if err != nil {
 		klog.Errorf("failed to delete Backup: [%s/%s] for backupSchedule/%s, err: %v", ns, backupName, bsName, err)
 	} else {
 		klog.V(4).Infof("delete backup: [%s/%s] successfully, backupSchedule/%s", ns, backupName, bsName)
 	}
 	c.recordBackupEvent("delete", backup, err)
+	return err
+}
+
+func (c *realBackupControl) TruncateLogBackup(backup *v1alpha1.Backup, truncateTSO uint64) error {
+	ns := backup.GetNamespace()
+	backupName := backup.GetName()
+
+	bsName := backup.GetLabels()[label.BackupScheduleLabelKey]
+	backup.Spec.LogTruncateUntil = strconv.FormatUint(truncateTSO, 10)
+	_, err := c.cli.PingcapV1alpha1().Backups(ns).Update(context.TODO(), backup, metav1.UpdateOptions{})
+	if err != nil {
+		klog.Errorf("failed to truncate Log Backup: [%s/%s] for backupSchedule/%s, truncateTSO: %d, err: %v", ns, backupName, bsName, truncateTSO, err)
+	} else {
+		klog.V(4).Infof("truncate log backup: [%s/%s] successfully, backupSchedule/%s, truncateTSO: %d", ns, backupName, bsName, truncateTSO)
+	}
+	c.recordBackupEvent("truncate", backup, err)
 	return err
 }
 
@@ -152,6 +186,10 @@ func (fbc *FakeBackupControl) CreateBackup(backup *v1alpha1.Backup) (*v1alpha1.B
 	return backup, fbc.backupIndexer.Add(backup)
 }
 
+func (fbc *FakeBackupControl) GetBackup(backup *v1alpha1.Backup) (*v1alpha1.Backup, error) {
+	return fbc.backupLister.Backups(backup.GetNamespace()).Get(backup.GetName())
+}
+
 // DeleteBackup deletes the backup from BackupIndexer
 func (fbc *FakeBackupControl) DeleteBackup(backup *v1alpha1.Backup) error {
 	defer fbc.createBackupTracker.Inc()
@@ -161,6 +199,17 @@ func (fbc *FakeBackupControl) DeleteBackup(backup *v1alpha1.Backup) error {
 	}
 
 	return fbc.backupIndexer.Delete(backup)
+}
+
+// TruncateLogBackup truncate the log backup
+func (fbc *FakeBackupControl) TruncateLogBackup(backup *v1alpha1.Backup, truncateTSO uint64) error {
+	defer fbc.createBackupTracker.Inc()
+	if fbc.createBackupTracker.ErrorReady() {
+		defer fbc.createBackupTracker.Reset()
+		return fbc.createBackupTracker.GetError()
+	}
+	backup.Spec.LogTruncateUntil = strconv.FormatUint(truncateTSO, 10)
+	return fbc.backupIndexer.Update(backup)
 }
 
 var _ BackupControlInterface = &FakeBackupControl{}

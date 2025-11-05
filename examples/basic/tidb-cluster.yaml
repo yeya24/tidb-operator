@@ -6,14 +6,17 @@ kind: TidbCluster
 metadata:
   name: basic
 spec:
-  version: v5.0.0
+  version: v8.5.3
   timezone: UTC
   pvReclaimPolicy: Retain
   enableDynamicConfiguration: true
   configUpdateStrategy: RollingUpdate
   discovery: {}
+  helper:
+    image: alpine:3.16.0
   pd:
     baseImage: pingcap/pd
+    maxFailoverCount: 0
     replicas: 1
     # if storageClassName is not set, the default Storage Class of the Kubernetes cluster will be used
     # storageClassName: local-storage
@@ -22,6 +25,11 @@ spec:
     config: {}
   tikv:
     baseImage: pingcap/tikv
+    maxFailoverCount: 0
+    # If only 1 TiKV is deployed, the TiKV region leader
+    # cannot be transferred during upgrade, so we have
+    # to configure a short timeout
+    evictLeaderTimeout: 1m
     replicas: 1
     # if storageClassName is not set, the default Storage Class of the Kubernetes cluster will be used
     # storageClassName: local-storage
@@ -39,6 +47,7 @@ spec:
         max-open-files: 256
   tidb:
     baseImage: pingcap/tidb
+    maxFailoverCount: 0
     replicas: 1
     service:
       type: ClusterIP

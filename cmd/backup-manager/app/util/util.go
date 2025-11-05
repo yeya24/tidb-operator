@@ -15,24 +15,30 @@ package util
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Masterminds/semver"
 	"github.com/gogo/protobuf/proto"
-	kvbackup "github.com/pingcap/kvproto/pkg/backup"
+	"github.com/pingcap/errors"
+	kvbackup "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/tidb-operator/cmd/backup-manager/app/constants"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/backup/util"
 	"github.com/spf13/pflag"
-	"k8s.io/klog"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 )
 
@@ -57,6 +63,14 @@ var (
 
 func validCmdFlagFunc(flag *pflag.Flag) {
 	if len(flag.Value.String()) > 0 {
+		return
+	}
+	// optional flag
+	if flag.Name == "target-az" {
+		return
+	}
+
+	if flag.Name == "use-fsr" {
 		return
 	}
 
@@ -89,41 +103,33 @@ func EnsureDirectoryExist(dirName string) error {
 }
 
 // GetStoragePath generate the path of a specific storage
-func GetStoragePath(backup *v1alpha1.Backup) (string, error) {
+func GetStoragePath(StorageProvider *v1alpha1.StorageProvider) (string, error) {
 	var url, bucket, prefix string
-	st := util.GetStorageType(backup.Spec.StorageProvider)
+	st := util.GetStorageType(*StorageProvider)
 	switch st {
 	case v1alpha1.BackupStorageTypeS3:
-		prefix = backup.Spec.StorageProvider.S3.Prefix
-		bucket = backup.Spec.StorageProvider.S3.Bucket
+		prefix = StorageProvider.S3.Prefix
+		bucket = StorageProvider.S3.Bucket
 		url = fmt.Sprintf("s3://%s", path.Join(bucket, prefix))
 		return url, nil
 	case v1alpha1.BackupStorageTypeGcs:
-		prefix = backup.Spec.StorageProvider.Gcs.Prefix
-		bucket = backup.Spec.StorageProvider.Gcs.Bucket
+		prefix = StorageProvider.Gcs.Prefix
+		bucket = StorageProvider.Gcs.Bucket
 		url = fmt.Sprintf("gcs://%s/", path.Join(bucket, prefix))
 		return url, nil
+	case v1alpha1.BackupStorageTypeAzblob:
+		prefix = StorageProvider.Azblob.Prefix
+		bucket = StorageProvider.Azblob.Container
+		url = fmt.Sprintf("azure://%s/", path.Join(bucket, prefix))
+		return url, nil
 	case v1alpha1.BackupStorageTypeLocal:
-		prefix = backup.Spec.StorageProvider.Local.Prefix
-		mountPath := backup.Spec.StorageProvider.Local.VolumeMount.MountPath
+		prefix = StorageProvider.Local.Prefix
+		mountPath := StorageProvider.Local.VolumeMount.MountPath
 		url = fmt.Sprintf("local://%s", path.Join(mountPath, prefix))
 		return url, nil
 	default:
 		return "", fmt.Errorf("storage %s not supported yet", st)
 	}
-}
-
-// OpenDB opens db
-func OpenDB(ctx context.Context, dsn string) (*sql.DB, error) {
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open datasource failed, err: %v", err)
-	}
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("cannot connect to mysql, err: %v", err)
-	}
-	return db, nil
 }
 
 // IsFileExist return true if file exist and is a regular file, other cases return false
@@ -163,13 +169,13 @@ func ConstructBRGlobalOptionsForBackup(backup *v1alpha1.Backup) ([]string, error
 		return nil, fmt.Errorf("no config for br in Backup %s/%s", backup.Namespace, backup.Name)
 	}
 	args = append(args, constructBRGlobalOptions(spec.BR)...)
-	storageArgs, err := genStorageArgs(backup.Spec.StorageProvider)
+	storageArgs, err := util.GenStorageArgsForFlag(backup.Spec.StorageProvider, "")
 	if err != nil {
 		return nil, err
 	}
 	args = append(args, storageArgs...)
 
-	if spec.TableFilter != nil && len(spec.TableFilter) > 0 {
+	if len(spec.TableFilter) > 0 {
 		for _, tableFilter := range spec.TableFilter {
 			args = append(args, "--filter", tableFilter)
 		}
@@ -198,7 +204,7 @@ func ConstructDumplingOptionsForBackup(backup *v1alpha1.Backup) []string {
 	var args []string
 	config := backup.Spec
 
-	if config.TableFilter != nil && len(config.TableFilter) > 0 {
+	if len(config.TableFilter) > 0 {
 		for _, tableFilter := range config.TableFilter {
 			args = append(args, "--filter", tableFilter)
 		}
@@ -232,13 +238,13 @@ func ConstructBRGlobalOptionsForRestore(restore *v1alpha1.Restore) ([]string, er
 		return nil, fmt.Errorf("no config for br in restore %s/%s", restore.Namespace, restore.Name)
 	}
 	args = append(args, constructBRGlobalOptions(config.BR)...)
-	storageArgs, err := genStorageArgs(restore.Spec.StorageProvider)
+	storageArgs, err := util.GenStorageArgsForFlag(restore.Spec.StorageProvider, "")
 	if err != nil {
 		return nil, err
 	}
 	args = append(args, storageArgs...)
 
-	if config.TableFilter != nil && len(config.TableFilter) > 0 {
+	if len(config.TableFilter) > 0 {
 		for _, tableFilter := range config.TableFilter {
 			args = append(args, "--filter", tableFilter)
 		}
@@ -306,17 +312,17 @@ func GetOptions(provider v1alpha1.StorageProvider) []string {
 }
 
 /*
-	GetCommitTsFromMetadata get commitTs from mydumper's metadata file
+GetCommitTsFromMetadata get commitTs from mydumper's metadata file
 
-	metadata file format is as follows:
+metadata file format is as follows:
 
-		Started dump at: 2019-06-13 10:00:04
-		SHOW MASTER STATUS:
-			Log: tidb-binlog
-			Pos: 409054741514944513
-			GTID:
+	Started dump at: 2019-06-13 10:00:04
+	SHOW MASTER STATUS:
+		Log: tidb-binlog
+		Pos: 409054741514944513
+		GTID:
 
-		Finished dump at: 2019-06-13 10:00:04
+	Finished dump at: 2019-06-13 10:00:04
 */
 func GetCommitTsFromMetadata(backupPath string) (string, error) {
 	var commitTs string
@@ -346,6 +352,10 @@ func GetCommitTsFromMetadata(backupPath string) (string, error) {
 
 // GetBRArchiveSize returns the total size of the backup archive.
 func GetBRArchiveSize(meta *kvbackup.BackupMeta) uint64 {
+	if meta.BackupSize != 0 {
+		return meta.BackupSize
+	}
+	// ASSERT: the version of meta must be v1
 	total := uint64(meta.Size())
 	for _, file := range meta.Files {
 		total += file.Size_
@@ -355,27 +365,46 @@ func GetBRArchiveSize(meta *kvbackup.BackupMeta) uint64 {
 
 // GetBRMetaData get backup metadata from cloud storage
 func GetBRMetaData(ctx context.Context, provider v1alpha1.StorageProvider) (*kvbackup.BackupMeta, error) {
-	s, err := NewStorageBackend(provider)
+	s, err := util.NewStorageBackend(provider, &util.StorageCredential{})
 	if err != nil {
 		return nil, err
 	}
 	defer s.Close()
-	exist, err := s.Exists(ctx, constants.MetaFile)
-	if err != nil {
-		return nil, err
-	}
-	if !exist {
-		return nil, fmt.Errorf("%s not exist", constants.MetaFile)
 
+	var metaData []byte
+	// use exponential backoff, every retry duration is duration * factor ^ (used_step - 1)
+	backoff := wait.Backoff{
+		Duration: time.Second,
+		Steps:    6,
+		Factor:   2.0,
+		Cap:      time.Minute,
 	}
-	metaData, err := s.ReadAll(ctx, constants.MetaFile)
+	readBackupMeta := func() error {
+		exist, err := s.Exists(ctx, constants.MetaFile)
+		if err != nil {
+			return err
+		}
+		if !exist {
+			return fmt.Errorf("%s not exist", constants.MetaFile)
+		}
+		metaData, err = s.ReadAll(ctx, constants.MetaFile)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+	isRetry := func(err error) bool {
+		return !strings.Contains(err.Error(), "not exist")
+	}
+	err = retry.OnError(backoff, isRetry, readBackupMeta)
 	if err != nil {
-		return nil, err
+		return nil, errors.Annotatef(err, "read backup meta from bucket %s and prefix %s", s.GetBucket(), s.GetPrefix())
 	}
+
 	backupMeta := &kvbackup.BackupMeta{}
 	err = proto.Unmarshal(metaData, backupMeta)
 	if err != nil {
-		return nil, err
+		return nil, errors.Annotatef(err, "unmarshal backup meta from bucket %s and prefix %s", s.GetBucket(), s.GetPrefix())
 	}
 	return backupMeta, nil
 }
@@ -439,4 +468,94 @@ func GetContextForTerminationSignals(op string) (context.Context, context.Cancel
 		cancel() // NOTE: the `Message` in `Status.Conditions` will contain `context canceled`.
 	}()
 	return ctx, cancel
+}
+
+// GetSliceExcludeString get a slice of strings that excludes the specified substring
+func GetSliceExcludeOneString(strs []string, str string) []string {
+	for i := range strs {
+		if strings.Contains(strs[i], str) {
+			return append(strs[:i], strs[i+1:]...)
+		}
+	}
+	return strs
+}
+
+func RetriableOnAnyError(err error) bool {
+	return err != nil
+}
+
+// RetryOnError allows the caller to retry fn in case the error returned by fn.
+// sleep define the interval between two retries.
+func RetryOnError(ctx context.Context, attempts int, sleep time.Duration,
+	retriable func(error) bool, fn func() error) error {
+	var err error
+	for i := 0; i < attempts; i++ {
+		err = fn()
+
+		if !retriable(err) {
+			return err
+		}
+
+		if sleep != 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(sleep):
+			}
+		}
+	}
+
+	return err
+}
+
+// ParseRestoreProgress parse restore progress and return restore step and progress
+func ParseRestoreProgress(line string) (step, progress string) {
+	matchStr := "\\[progress\\] \\[step=\"(.*?)\"\\] \\[progress=(.*?)\\%\\]"
+	complieRegex := regexp.MustCompile(matchStr)
+	matchs := complieRegex.FindStringSubmatch(line)
+	if len(matchs) < 3 {
+		return
+	}
+	step, progress = matchs[1], matchs[2]
+	return
+}
+
+// ReadAllStdErrToChannel read the stdErr and send the output to channel
+func ReadAllStdErrToChannel(stdErr io.Reader, errMsgCh chan []byte) {
+	errMsg, err := io.ReadAll(stdErr)
+	if err != nil {
+		klog.Errorf("read stderr error: %s", err.Error())
+	}
+	errMsgCh <- errMsg
+	close(errMsgCh)
+}
+
+// GracefullyShutDownSubProcess just send SIGTERM to the process of cmd when context done
+// the caller should wait the process of cmd to shut down
+func GracefullyShutDownSubProcess(ctx context.Context, cmd *exec.Cmd) {
+	<-ctx.Done()
+	klog.Errorf("context done, err: %s. start to shut down sub process gracefully", ctx.Err().Error())
+	if cmd.Process == nil {
+		klog.Infof("sub process not started, won't send SIGTERM")
+	} else if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		klog.Errorf("send SIGTERM to sub process error: %s", err.Error())
+	} else {
+		klog.Infof("send SIGTERM to sub process successfully")
+	}
+}
+
+const (
+	e2eBackupEnv                string = "E2E_TEST_ENV"
+	e2eExtendBackupTime         string = "Extend_BACKUP_TIME"
+	e2eExtendBackupTimeAndPanic string = "Extend_BACKUP_TIME_AND_PANIC"
+)
+
+func IsE2EExtendBackupTime() bool {
+	e2eEnv := os.Getenv(e2eBackupEnv)
+	return strings.Contains(e2eEnv, e2eExtendBackupTime)
+}
+
+func IsE2EExtendBackupTimeAndPanic() bool {
+	e2eEnv := os.Getenv(e2eBackupEnv)
+	return strings.Contains(e2eEnv, e2eExtendBackupTimeAndPanic)
 }

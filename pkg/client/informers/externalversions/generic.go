@@ -54,6 +54,8 @@ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Pingcap().V1alpha1().Backups().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("backupschedules"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Pingcap().V1alpha1().BackupSchedules().Informer()}, nil
+	case v1alpha1.SchemeGroupVersion.WithResource("compactbackups"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Pingcap().V1alpha1().CompactBackups().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("dmclusters"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Pingcap().V1alpha1().DMClusters().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("dataresources"):
@@ -62,12 +64,14 @@ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Pingcap().V1alpha1().Restores().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("tidbclusters"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Pingcap().V1alpha1().TidbClusters().Informer()}, nil
-	case v1alpha1.SchemeGroupVersion.WithResource("tidbclusterautoscalers"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Pingcap().V1alpha1().TidbClusterAutoScalers().Informer()}, nil
+	case v1alpha1.SchemeGroupVersion.WithResource("tidbdashboards"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Pingcap().V1alpha1().TidbDashboards().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("tidbinitializers"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Pingcap().V1alpha1().TidbInitializers().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("tidbmonitors"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Pingcap().V1alpha1().TidbMonitors().Informer()}, nil
+	case v1alpha1.SchemeGroupVersion.WithResource("tidbngmonitorings"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Pingcap().V1alpha1().TidbNGMonitorings().Informer()}, nil
 
 	}
 

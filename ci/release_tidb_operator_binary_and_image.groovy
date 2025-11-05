@@ -2,10 +2,36 @@ def call(BUILD_BRANCH, RELEASE_TAG, CREDENTIALS_ID, CHART_ITEMS) {
 	def GITHASH
 	def ACCESS_KEY
 	def SECRET_KEY
-	def UCLOUD_OSS_URL = "http://pingcap-dev.hk.ufileos.com"
+	def FILE_SERVER_URL = "http://fileserver.pingcap.net"
+    def FILE_BASE_DIR = "pingcap/tidb-operator"
 
 	catchError {
-		node('delivery') {
+		def delivery_pod_label = "${JOB_NAME}-${BUILD_NUMBER}"
+		podTemplate(label: delivery_pod_label,
+				cloud: "kubernetes-ng",
+				namespace: "jenkins-tidb-operator",
+				idleMinutes: 0,
+				containers: [
+						containerTemplate(
+							name: 'delivery', alwaysPullImage: true,
+							image: "hub.pingcap.net/jenkins/jenkins-slave-centos7:delivery3", 
+							ttyEnabled: true,  privileged: true,
+							resourceRequestCpu: '2000m', resourceRequestMemory: '4Gi',
+							command: '/bin/sh -c', args: 'cat' 
+						),
+						containerTemplate(
+							name: 'dind', alwaysPullImage: false,
+							image: "docker:20.10.13-dind", ttyEnabled: true, privileged: true,
+							resourceRequestCpu: '2000m', resourceRequestMemory: '4Gi',
+							envVars: [containerEnvVar(key: 'DOCKER_TLS_CERTDIR', value: '')]    
+						)
+				],
+				volumes: [
+						emptyDirVolume(mountPath: '/var/lib/docker', memory: false),
+						secretVolume(secretName: 'operator-staging-kubeconfig', mountPath: '/home/jenkins/.kubeconfig'),
+				],
+		) {
+		node(delivery_pod_label) {
 			container("delivery") {
 				def WORKSPACE = pwd()
 				withCredentials([string(credentialsId: "${env.QN_ACCESS_KET_ID}", variable: 'QN_access_key'), string(credentialsId: "${env.QN_SECRET_KEY_ID}", variable: 'Qiniu_secret_key')]) {
@@ -18,19 +44,28 @@ def call(BUILD_BRANCH, RELEASE_TAG, CREDENTIALS_ID, CHART_ITEMS) {
 
 				dir("${WORKSPACE}/operator") {
 					stage('Download tidb-operator binary'){
-						GITHASH = sh(returnStdout: true, script: "curl ${UCLOUD_OSS_URL}/refs/pingcap/operator/${BUILD_BRANCH}/centos7/sha1").trim()
-						sh "curl ${UCLOUD_OSS_URL}/builds/pingcap/operator/${GITHASH}/centos7/tidb-operator.tar.gz | tar xz"
+						GITHASH = sh(returnStdout: true, script: "curl ${FILE_SERVER_URL}/download/${FILE_BASE_DIR}/refs/${BUILD_BRANCH}/sha1").trim()
+						sh """
+						curl ${FILE_SERVER_URL}/download/${FILE_BASE_DIR}/builds/${GITHASH}/tidb-operator.tar.gz | tar xz
+
+						wget https://github.com/docker/buildx/releases/download/v0.8.0/buildx-v0.8.0.linux-amd64 -O /usr/bin/buildx
+                        chmod +x /usr/bin/buildx
+                        docker run --rm --privileged multiarch/qemu-user-static:6.1.0-8 --reset
+                        buildx create --name mybuilder --platform=linux/arm64,linux/amd64 --use || true
+						"""
 					}
 
                     def images = ["tidb-operator", "tidb-backup-manager"]
                     images.each {
                         stage("Build and push ${it} image") {
                             withDockerServer([uri: "${env.DOCKER_HOST}"]) {
-                                docker.build("pingcap/${it}:${RELEASE_TAG}", "images/${it}").push()
+                                sh """
+                                buildx build --platform=linux/arm64,linux/amd64 --push -t pingcap/${it}:${RELEASE_TAG} images/${it}
+                                """
                                 withDockerRegistry([url: "https://registry.cn-beijing.aliyuncs.com", credentialsId: "ACR_TIDB_ACCOUNT"]) {
                                     sh """
-                                    docker tag pingcap/${it}:${RELEASE_TAG} registry.cn-beijing.aliyuncs.com/tidb/${it}:${RELEASE_TAG}
-                                    docker push registry.cn-beijing.aliyuncs.com/tidb/${it}:${RELEASE_TAG}
+                                    buildx create --name mybuilder --platform=linux/arm64,linux/amd64 --use || true
+                                    buildx build --platform=linux/arm64,linux/amd64 --push -t registry.cn-beijing.aliyuncs.com/tidb/${it}:${RELEASE_TAG} images/${it}
                                     """
                                 }
                             }
@@ -63,8 +98,8 @@ def call(BUILD_BRANCH, RELEASE_TAG, CREDENTIALS_ID, CHART_ITEMS) {
 							./upload.py \${chartPrefixName}.sha256 \${chartPrefixName}.sha256
 						done
 						# Generate index.yaml for helm repo if the version is not "latest" (not a valid semantic version)
-                        if [ "${RELEASE_TAG}" != "latest" ]; then
-                            wget https://storage.googleapis.com/kubernetes-helm/helm-v2.14.1-linux-amd64.tar.gz
+                        if [ "${RELEASE_TAG}" != "latest" -a "${RELEASE_TAG}" != "nightly" ]; then
+                            wget https://get.helm.sh/helm-v2.14.1-linux-amd64.tar.gz
                             tar -zxvf helm-v2.14.1-linux-amd64.tar.gz
                             mv linux-amd64/helm /usr/local/bin/helm
                             chmod +x /usr/local/bin/helm
@@ -82,6 +117,7 @@ def call(BUILD_BRANCH, RELEASE_TAG, CREDENTIALS_ID, CHART_ITEMS) {
 					}
 				}
 			}
+		}
 		}
 		currentBuild.result = "SUCCESS"
 	}

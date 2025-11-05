@@ -24,7 +24,7 @@ import (
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 type masterFailover struct {
@@ -157,7 +157,8 @@ func (f *masterFailover) tryToDeleteAFailureMember(dc *v1alpha1.DMCluster) error
 	var failureMember *v1alpha1.MasterFailureMember
 	var failurePodName string
 
-	for podName, masterMember := range dc.Status.Master.FailureMembers {
+	for podName := range dc.Status.Master.FailureMembers {
+		masterMember := dc.Status.Master.FailureMembers[podName]
 		if !masterMember.MemberDeleted {
 			failureMember = &masterMember
 			failurePodName = podName

@@ -15,10 +15,13 @@ package controller
 
 import (
 	"context"
+	stderrs "errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/dustin/go-humanize"
+	fedv1alpha1 "github.com/pingcap/tidb-operator/pkg/apis/federation/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/scheme"
 	"github.com/pingcap/tidb-operator/pkg/util"
@@ -32,7 +35,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -46,17 +49,32 @@ var (
 	// BackupControllerKind contains the schema.GroupVersionKind for backup controller type.
 	BackupControllerKind = v1alpha1.SchemeGroupVersion.WithKind("Backup")
 
+	// CompactBackupControllerKind contains the schema.GroupVersionKind for backup controller type.
+	CompactBackupControllerKind = v1alpha1.SchemeGroupVersion.WithKind("CompactBackup")
+
 	// RestoreControllerKind contains the schema.GroupVersionKind for restore controller type.
 	RestoreControllerKind = v1alpha1.SchemeGroupVersion.WithKind("Restore")
 
 	// backupScheduleControllerKind contains the schema.GroupVersionKind for backupschedule controller type.
 	backupScheduleControllerKind = v1alpha1.SchemeGroupVersion.WithKind("BackupSchedule")
 
-	// tidbMonitorControllerkind cotnains the schema.GroupVersionKind for TidbMonitor controller type.
-	tidbMonitorControllerkind = v1alpha1.SchemeGroupVersion.WithKind("TidbMonitor")
+	// tidbMonitorControllerKind contains the schema.GroupVersionKind for TidbMonitor controller type.
+	tidbMonitorControllerKind = v1alpha1.SchemeGroupVersion.WithKind("TidbMonitor")
 
-	// tidbClusterAutoScalerKind cotnains the schema.GroupVersionKind for TidbClusterAutoScaler controller type.
-	tidbClusterAutoScalerKind = v1alpha1.SchemeGroupVersion.WithKind("TidbClusterAutoScaler")
+	// tidbNGMonitoringKind contains the schema.GroupVersionKind for TidbNGMonitoring controller type.
+	tidbNGMonitoringKind = v1alpha1.SchemeGroupVersion.WithKind("TidbNGMonitoring")
+
+	// tidbDashboardKind contains the schema.GroupVersionKind for TidbDashboard controller type.
+	tidbDashboardKind = v1alpha1.SchemeGroupVersion.WithKind("TidbDashboard")
+
+	// FedVolumeBackupControllerKind contains the schema.GroupVersionKind for federation VolumeBackup controller type.
+	FedVolumeBackupControllerKind = fedv1alpha1.SchemeGroupVersion.WithKind("VolumeBackup")
+
+	// FedVolumeRestoreControllerKind contains the schema.GroupVersionKind for federation VolumeRestore controller type.
+	FedVolumeRestoreControllerKind = fedv1alpha1.SchemeGroupVersion.WithKind("VolumeRestore")
+
+	// FedVolumeBackupScheduleControllerKind contains the schema.GroupVersionKind for federation VolumeBackupSchedule controller type.
+	FedVolumeBackupScheduleControllerKind = fedv1alpha1.SchemeGroupVersion.WithKind("VolumeBackupSchedule")
 )
 
 // RequeueError is used to requeue the item, this error type should't be considered as a real error
@@ -75,11 +93,11 @@ func RequeueErrorf(format string, a ...interface{}) error {
 
 // IsRequeueError returns whether err is a RequeueError
 func IsRequeueError(err error) bool {
-	_, ok := err.(*RequeueError)
-	return ok
+	rerr := &RequeueError{}
+	return stderrs.As(err, &rerr)
 }
 
-// IgnoreError is used to ignore this item, this error type should't be considered as a real error, no need to requeue
+// IgnoreError is used to ignore this item, this error type shouldn't be considered as a real error, no need to requeue
 type IgnoreError struct {
 	s string
 }
@@ -141,6 +159,20 @@ func GetBackupOwnerRef(backup *v1alpha1.Backup) metav1.OwnerReference {
 	}
 }
 
+// GetCompactBackupOwnerRef returns Backup's OwnerReference
+func GetCompactBackupOwnerRef(backup *v1alpha1.CompactBackup) metav1.OwnerReference {
+	controller := true
+	blockOwnerDeletion := true
+	return metav1.OwnerReference{
+		APIVersion:         CompactBackupControllerKind.GroupVersion().String(),
+		Kind:               CompactBackupControllerKind.Kind,
+		Name:               backup.GetName(),
+		UID:                backup.GetUID(),
+		Controller:         &controller,
+		BlockOwnerDeletion: &blockOwnerDeletion,
+	}
+}
+
 // GetRestoreOwnerRef returns Restore's OwnerReference
 func GetRestoreOwnerRef(restore *v1alpha1.Restore) metav1.OwnerReference {
 	controller := true
@@ -169,12 +201,26 @@ func GetBackupScheduleOwnerRef(bs *v1alpha1.BackupSchedule) metav1.OwnerReferenc
 	}
 }
 
+// GetFedVolumeBackupScheduleOwnerRef returns FedVolumeBackupSchedule's OwnerReference
+func GetFedVolumeBackupScheduleOwnerRef(vbks *fedv1alpha1.VolumeBackupSchedule) metav1.OwnerReference {
+	controller := true
+	blockOwnerDeletion := true
+	return metav1.OwnerReference{
+		APIVersion:         FedVolumeBackupScheduleControllerKind.GroupVersion().String(),
+		Kind:               FedVolumeBackupScheduleControllerKind.Kind,
+		Name:               vbks.GetName(),
+		UID:                vbks.GetUID(),
+		Controller:         &controller,
+		BlockOwnerDeletion: &blockOwnerDeletion,
+	}
+}
+
 func GetTiDBMonitorOwnerRef(monitor *v1alpha1.TidbMonitor) metav1.OwnerReference {
 	controller := true
 	blockOwnerDeletion := true
 	return metav1.OwnerReference{
-		APIVersion:         tidbMonitorControllerkind.GroupVersion().String(),
-		Kind:               tidbMonitorControllerkind.Kind,
+		APIVersion:         tidbMonitorControllerKind.GroupVersion().String(),
+		Kind:               tidbMonitorControllerKind.Kind,
 		Name:               monitor.GetName(),
 		UID:                monitor.GetUID(),
 		Controller:         &controller,
@@ -182,14 +228,27 @@ func GetTiDBMonitorOwnerRef(monitor *v1alpha1.TidbMonitor) metav1.OwnerReference
 	}
 }
 
-func GetTiDBClusterAutoScalerOwnerRef(tac *v1alpha1.TidbClusterAutoScaler) metav1.OwnerReference {
+func GetTiDBNGMonitoringOwnerRef(tngm *v1alpha1.TidbNGMonitoring) metav1.OwnerReference {
 	controller := true
 	blockOwnerDeletion := true
 	return metav1.OwnerReference{
-		APIVersion:         tidbClusterAutoScalerKind.GroupVersion().String(),
-		Kind:               tidbClusterAutoScalerKind.Kind,
-		Name:               tac.GetName(),
-		UID:                tac.GetUID(),
+		APIVersion:         tidbNGMonitoringKind.GroupVersion().String(),
+		Kind:               tidbNGMonitoringKind.Kind,
+		Name:               tngm.GetName(),
+		UID:                tngm.GetUID(),
+		Controller:         &controller,
+		BlockOwnerDeletion: &blockOwnerDeletion,
+	}
+}
+
+func GetTiDBDashboardOwnerRef(td *v1alpha1.TidbDashboard) metav1.OwnerReference {
+	controller := true
+	blockOwnerDeletion := true
+	return metav1.OwnerReference{
+		APIVersion:         tidbDashboardKind.GroupVersion().String(),
+		Kind:               tidbDashboardKind.Kind,
+		Name:               td.GetName(),
+		UID:                td.GetUID(),
 		Controller:         &controller,
 		BlockOwnerDeletion: &blockOwnerDeletion,
 	}
@@ -238,6 +297,11 @@ func TiKVCapacity(limits corev1.ResourceList) string {
 	return fmt.Sprintf("%dMB", i/humanize.MiByte)
 }
 
+// MemberName return a component member name
+func MemberName(clusterName string, member v1alpha1.MemberType) string {
+	return fmt.Sprintf("%s-%s", clusterName, member)
+}
+
 // PDMemberName returns pd member name
 func PDMemberName(clusterName string) string {
 	return fmt.Sprintf("%s-pd", clusterName)
@@ -246,6 +310,27 @@ func PDMemberName(clusterName string) string {
 // PDPeerMemberName returns pd peer service name
 func PDPeerMemberName(clusterName string) string {
 	return fmt.Sprintf("%s-pd-peer", clusterName)
+}
+
+// PDMSMemberName returns pd microservice member name
+func PDMSMemberName(clusterName string, serviceName string) string {
+	return fmt.Sprintf("%s-%s", clusterName, serviceName)
+}
+
+// PDMSPeerMemberName returns pd microservice peer service name
+func PDMSPeerMemberName(clusterName string, serviceName string) string {
+	return fmt.Sprintf("%s-%s-peer", clusterName, serviceName)
+}
+
+// PDMSTrimName returns last `-` separated string for `PDMSMemberName`
+func PDMSTrimName(memberName string) string {
+	name := memberName[strings.LastIndex(memberName, "-")+1:]
+	if name == "peer" {
+		// get middle serviceName
+		check := memberName[:strings.LastIndex(memberName, "-")]
+		name = check[strings.LastIndex(check, "-")+1:]
+	}
+	return name
 }
 
 // TiKVMemberName returns tikv member name
@@ -263,14 +348,24 @@ func TiFlashMemberName(clusterName string) string {
 	return fmt.Sprintf("%s-tiflash", clusterName)
 }
 
-// TiCDCMemberName returns ticdc member name
-func TiCDCMemberName(clusterName string) string {
-	return fmt.Sprintf("%s-ticdc", clusterName)
-}
-
 // TiFlashPeerMemberName returns tiflash peer service name
 func TiFlashPeerMemberName(clusterName string) string {
 	return fmt.Sprintf("%s-tiflash-peer", clusterName)
+}
+
+// TiProxyMemberName returns tiproxy member name
+func TiProxyMemberName(clusterName string) string {
+	return fmt.Sprintf("%s-tiproxy", clusterName)
+}
+
+// TiProxyPeerMemberName returns tiproxy peer service name
+func TiProxyPeerMemberName(clusterName string) string {
+	return fmt.Sprintf("%s-tiproxy-peer", clusterName)
+}
+
+// TiCDCMemberName returns ticdc member name
+func TiCDCMemberName(clusterName string) string {
+	return fmt.Sprintf("%s-ticdc", clusterName)
 }
 
 // TiCDCPeerMemberName returns ticdc peer service name
@@ -329,11 +424,16 @@ func DMWorkerPeerMemberName(clusterName string) string {
 	return fmt.Sprintf("%s-dm-worker-peer", clusterName)
 }
 
+// TiDBInitSecret returns tidb init secret name
+func TiDBInitSecret(clusterName string) string {
+	return fmt.Sprintf("%s-init", clusterName)
+}
+
 // AnnProm adds annotations for prometheus scraping metrics
-func AnnProm(port int32) map[string]string {
+func AnnProm(port int32, path string) map[string]string {
 	return map[string]string{
 		"prometheus.io/scrape": "true",
-		"prometheus.io/path":   "/metrics",
+		"prometheus.io/path":   path,
 		"prometheus.io/port":   fmt.Sprintf("%d", port),
 	}
 }
@@ -349,6 +449,10 @@ func FormatClusterDomain(clusterDomain string) string {
 		return ""
 	}
 	return "." + clusterDomain
+}
+
+func PDPeerFullyDomain(name, ns, clusterDomain string) string {
+	return fmt.Sprintf("%s.%s.svc%s", PDPeerMemberName(name), ns, FormatClusterDomain(clusterDomain))
 }
 
 // AnnAdditionalProm adds additional prometheus scarping configuration annotation for the pod
@@ -504,11 +608,9 @@ func WatchForController(informer cache.SharedIndexInformer, q workqueue.Interfac
 		controllerObj, err := fn(meta.GetNamespace(), ref.Name)
 		if err != nil {
 			if errors.IsNotFound(err) {
-				klog.V(4).Infof("controller %s/%s of %s/%s not found, ignore",
-					meta.GetNamespace(), ref.Name, meta.GetNamespace(), meta.GetName())
+				klog.V(4).Infof("controller %s/%s of %s not found, ignore", meta.GetNamespace(), ref.Name, meta.GetName())
 			} else {
-				utilruntime.HandleError(fmt.Errorf("cannot get controller %s/%s of %s/%s",
-					meta.GetNamespace(), ref.Name, meta.GetNamespace(), meta.GetName()))
+				utilruntime.HandleError(fmt.Errorf("cannot get controller %s/%s of %s", meta.GetNamespace(), ref.Name, meta.GetName()))
 			}
 			return
 		}
@@ -533,7 +635,7 @@ func WatchForController(informer cache.SharedIndexInformer, q workqueue.Interfac
 }
 
 // EmptyClone create an clone of the resource with the same name and namespace (if namespace-scoped), with other fields unset
-func EmptyClone(obj runtime.Object) (runtime.Object, error) {
+func EmptyClone(obj client.Object) (client.Object, error) {
 	meta, ok := obj.(metav1.Object)
 	if !ok {
 		return nil, fmt.Errorf("Obj %v is not a metav1.Object, cannot call EmptyClone", obj)
@@ -546,13 +648,19 @@ func EmptyClone(obj runtime.Object) (runtime.Object, error) {
 	if err != nil {
 		return nil, err
 	}
-	instMeta, ok := inst.(metav1.Object)
+	instMeta, ok := inst.(client.Object)
 	if !ok {
 		return nil, fmt.Errorf("New instatnce %v created from scheme is not a metav1.Object, EmptyClone failed", inst)
 	}
 	instMeta.SetName(meta.GetName())
 	instMeta.SetNamespace(meta.GetNamespace())
-	return inst, nil
+	return instMeta, nil
+}
+
+func DeepCopyClientObject(input client.Object) client.Object {
+	robj := input.DeepCopyObject()
+	cobj := robj.(client.Object)
+	return cobj
 }
 
 // InferObjectKind infers the object kind
@@ -562,18 +670,16 @@ func InferObjectKind(obj runtime.Object) (schema.GroupVersionKind, error) {
 		return schema.GroupVersionKind{}, err
 	}
 	if len(gvks) != 1 {
-		return schema.GroupVersionKind{}, fmt.Errorf("Object %v has ambigious GVK", obj)
+		return schema.GroupVersionKind{}, fmt.Errorf("object %v has ambiguous GVK", obj)
 	}
 	return gvks[0], nil
 }
 
 // GuaranteedUpdate will retry the updateFunc to mutate the object until success, updateFunc is expected to
 // capture the object reference from the caller context to avoid unnecessary type casting.
-func GuaranteedUpdate(cli client.Client, obj runtime.Object, updateFunc func() error) error {
-	key, err := client.ObjectKeyFromObject(obj)
-	if err != nil {
-		return err
-	}
+func GuaranteedUpdate(cli client.Client, obj client.Object, updateFunc func() error) error {
+	key := client.ObjectKeyFromObject(obj)
+
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if err := cli.Get(context.TODO(), key, obj); err != nil {
 			return err

@@ -24,7 +24,7 @@ OUTPUT=${ROOT}/output
 OUTPUT_BIN=${OUTPUT}/bin
 TERRAFORM_BIN=${OUTPUT_BIN}/terraform
 TERRAFORM_VERSION=${TERRAFORM_VERSION:-0.12.12}
-KUBECTL_VERSION=${KUBECTL_VERSION:-1.20.2}
+KUBECTL_VERSION=${KUBECTL_VERSION:-1.28.5}
 KUBECTL_BIN=$OUTPUT_BIN/kubectl
 HELM_BIN=$OUTPUT_BIN/helm
 DOCS_BIN=$OUTPUT_BIN/gen-crd-api-reference-docs
@@ -32,15 +32,23 @@ CFSSL_BIN=$OUTPUT_BIN/cfssl
 CFSSLJSON_BIN=$OUTPUT_BIN/cfssljson
 JQ_BIN=$OUTPUT_BIN/jq
 CFSSL_VERSION=${CFSSL_VERSION:-1.2}
+K8S_VERSION=${K8S_VERSION:-0.28.5}
 JQ_VERSION=${JQ_VERSION:-1.6}
-HELM_VERSION=${HELM_VERSION:-3.5.0}
-KIND_VERSION=${KIND_VERSION:-0.8.1}
-DOCS_VERSION=${DOCS_VERSION:-0.2.1}
+HELM_VERSION=${HELM_VERSION:-3.11.0}
+KIND_VERSION=${KIND_VERSION:-0.19.0}
 KIND_BIN=$OUTPUT_BIN/kind
-KUBETEST2_VERSION=v0.1.0
+KUBETEST2_VERSION=v1.6.0 # the real version is v0.1.0, it's just hosted in TiDB Operator v1.6.0 release
 KUBETEST2_BIN=$OUTPUT_BIN/kubetest2
 AWS_K8S_TESTER_VERSION=v1.1.5
 AWS_K8S_TESTER_BIN=$OUTPUT_BIN/aws-k8s-tester
+GO_SUBMODULES=(
+    "github.com/pingcap/tidb-operator/pkg/apis"
+    "github.com/pingcap/tidb-operator/pkg/client"
+)
+GO_SUBMODULE_DIRS=(
+    "pkg/apis"
+    "pkg/client"
+)
 
 test -d "$OUTPUT_BIN" || mkdir -p "$OUTPUT_BIN"
 
@@ -60,11 +68,11 @@ function hack::install_cfssl() {
     echo "info: Installing cfssl/cfssljson R${CFSSL_VERSION}"
     tmpfile=$(mktemp)
     trap "test -f $tmpfile && rm $tmpfile" RETURN
-    
+
     curl --retry 10 -L -o $tmpfile https://pkg.cfssl.org/R${CFSSL_VERSION}/cfssl_linux-amd64
     mv $tmpfile $CFSSL_BIN
     chmod +x $CFSSL_BIN
-    
+
     curl --retry 10 -L -o $tmpfile https://pkg.cfssl.org/R${CFSSL_VERSION}/cfssljson_linux-amd64
     mv $tmpfile $CFSSLJSON_BIN
     chmod +x $CFSSLJSON_BIN
@@ -111,7 +119,10 @@ function hack::ensure_terraform() {
 
 function hack::verify_kubectl() {
     if test -x "$KUBECTL_BIN"; then
-        [[ "$($KUBECTL_BIN version --client --short | grep -o -E '[0-9]+\.[0-9]+\.[0-9]+')" == "$KUBECTL_VERSION" ]]
+        # Only check the major and minor version
+        local version=$($KUBECTL_BIN version --client | grep -o -E '[0-9]+\.[0-9]+')
+        local required_version=$(echo "$KUBECTL_VERSION" | grep -o -E '[0-9]+\.[0-9]+')
+        [[ "$version" == "$required_version" ]]
         return
     fi
     return 1
@@ -144,7 +155,8 @@ function hack::ensure_helm() {
     fi
     echo "Installing helm ${HELM_VERSION}..."
     local HELM_URL=https://get.helm.sh/helm-v${HELM_VERSION}-${OS}-${ARCH}.tar.gz
-    curl --retry 3 -L -s "$HELM_URL" | tar --strip-components 1 -C $OUTPUT_BIN -zxf - ${OS}-${ARCH}/helm
+    echo "Installing helm from tarball: ${HELM_URL} ..."
+    curl --fail --retry 3 -L -s "$HELM_URL" | tar --strip-components 1 -C $OUTPUT_BIN -zxf - ${OS}-${ARCH}/helm
 }
 
 function hack::verify_kind() {
@@ -162,7 +174,7 @@ function hack::ensure_kind() {
     echo "Installing kind v$KIND_VERSION..."
     tmpfile=$(mktemp)
     trap "test -f $tmpfile && rm $tmpfile" RETURN
-    curl --retry 10 -L -o $tmpfile https://github.com/kubernetes-sigs/kind/releases/download/v${KIND_VERSION}/kind-$(uname)-amd64
+    curl --retry 10 -L -o $tmpfile https://github.com/kubernetes-sigs/kind/releases/download/v${KIND_VERSION}/kind-${OS}-${ARCH}
     mv $tmpfile $KIND_BIN
     chmod +x $KIND_BIN
 }
@@ -223,7 +235,7 @@ function hack::__ensure_kubetest2() {
     local tmpfile=$(mktemp)
     trap "test -f $tmpfile && rm $tmpfile" RETURN
     echo "info: downloading $n $KUBETEST2_VERSION"
-    curl --retry 10 -L -o - https://github.com/cofyc/kubetest2-release/releases/download/$KUBETEST2_VERSION/$n-$OS-$ARCH.gz | gunzip > $tmpfile
+    curl --retry 10 -L -o - https://github.com/pingcap/tidb-operator/releases/download/$KUBETEST2_VERSION/$n-$OS-$ARCH.gz | gunzip > $tmpfile
     mv $tmpfile $OUTPUT_BIN/$n
     chmod +x $OUTPUT_BIN/$n
 }
@@ -255,23 +267,39 @@ function hack::ensure_aws_k8s_tester() {
 	chmod +x $AWS_K8S_TESTER_BIN
 }
 
-function hack::verify_gen_crd_api_references_docs() {
-    if test -x "$DOCS_BIN"; then
-        # TODO check version when the binary version is available.
-        return
-    fi
-    return 1
+function hack::ensure_gen_crd_api_references_docs() {
+    echo "Installing gen_crd_api_references_docs..."
+    GOBIN=$OUTPUT_BIN go install github.com/xhebox/gen-crd-api-reference-docs@a8a3b01e858f0de8bc8f9419d210da4334929e2d
 }
 
-function hack::ensure_gen_crd_api_references_docs() {
-    if hack::verify_gen_crd_api_references_docs; then
-        return 0
-    fi
-    echo "Installing gen_crd_api_references_docs v$DOCS_VERSION..."
-    tmpdir=$(mktemp -d)
-    trap "test -d $tmpdir && rm -r $tmpdir" RETURN
-    curl --retry 10 -L -o ${tmpdir}/docs-bin.tar.gz https://github.com/Yisaer/gen-crd-api-reference-docs/releases/download/v${DOCS_VERSION}/gen-crd-api-reference-docs_${OS}_${ARCH}.tar.gz
-    tar -zvxf ${tmpdir}/docs-bin.tar.gz -C ${tmpdir}
-    mv ${tmpdir}/gen-crd-api-reference-docs ${DOCS_BIN}
-    chmod +x ${DOCS_BIN}
+function hack::ensure_misspell() {
+    echo "Installing misspell..."
+    GOBIN=$OUTPUT_BIN go install github.com/client9/misspell/cmd/misspell@v0.3.4
 }
+
+function hack::ensure_golangci_lint() {
+  echo "Installing golangci_lint..."
+  GOBIN=$OUTPUT_BIN go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.61.0
+}
+
+function hack::ensure_controller_gen() {
+    echo "Installing controller_gen..."
+    GOBIN=$OUTPUT_BIN go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.5
+}
+
+function hack::ensure_goimports() {
+    echo "Installing goimports..."
+    GOBIN=$OUTPUT_BIN go install golang.org/x/tools/cmd/goimports@v0.1.12
+}
+
+function hack::ensure_codegen() {
+    echo "Installing codegen..."
+    GOBIN=$OUTPUT_BIN go install k8s.io/code-generator/cmd/{defaulter-gen,client-gen,lister-gen,informer-gen,deepcopy-gen}@v$K8S_VERSION
+}
+
+function hack::ensure_openapi() {
+    echo "Installing openpi_gen..."
+    GOBIN=$OUTPUT_BIN go install k8s.io/code-generator/cmd/openapi-gen@v$K8S_VERSION
+}
+
+function version { echo "$@" | awk -F. '{ printf("%d%03d%03d%03d\n", $1,$2,$3,$4); }'; }

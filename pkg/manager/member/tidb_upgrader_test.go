@@ -16,10 +16,12 @@ package member
 import (
 	"testing"
 
-	. "github.com/onsi/gomega"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
+	mngerutils "github.com/pingcap/tidb-operator/pkg/manager/utils"
+
+	. "github.com/onsi/gomega"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,6 +36,7 @@ func TestTiDBUpgrader_Upgrade(t *testing.T) {
 	type testcase struct {
 		name                    string
 		changeFn                func(*v1alpha1.TidbCluster)
+		changePods              func(pods []*corev1.Pod)
 		getLastAppliedConfigErr bool
 		errorExpect             bool
 		changeOldSet            func(set *apps.StatefulSet)
@@ -48,6 +51,9 @@ func TestTiDBUpgrader_Upgrade(t *testing.T) {
 			test.changeFn(tc)
 		}
 		pods := getTiDBPods()
+		if test.changePods != nil {
+			test.changePods(pods)
+		}
 		for _, pod := range pods {
 			podInformer.Informer().GetIndexer().Add(pod)
 		}
@@ -61,7 +67,7 @@ func TestTiDBUpgrader_Upgrade(t *testing.T) {
 		if test.getLastAppliedConfigErr {
 			oldSet.SetAnnotations(map[string]string{LastAppliedConfigAnnotation: "fake apply config"})
 		} else {
-			SetStatefulSetLastAppliedConfigAnnotation(oldSet)
+			mngerutils.SetStatefulSetLastAppliedConfigAnnotation(oldSet)
 		}
 		err := upgrader.Upgrade(tc, oldSet, newSet)
 		if test.errorExpect {
@@ -84,6 +90,24 @@ func TestTiDBUpgrader_Upgrade(t *testing.T) {
 				g.Expect(tc.Status.TiDB.Phase).To(Equal(v1alpha1.UpgradePhase))
 				g.Expect(newSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(pointer.Int32Ptr(0)))
 			},
+		},
+		{
+			name: "normal with notReady pod",
+			changePods: func(pods []*corev1.Pod) {
+				for _, pod := range pods {
+					pod.Status = *new(corev1.PodStatus)
+				}
+			},
+			changeFn: func(tc *v1alpha1.TidbCluster) {
+				tc.Status.PD.Phase = v1alpha1.NormalPhase
+				tc.Status.TiKV.Phase = v1alpha1.NormalPhase
+			},
+			getLastAppliedConfigErr: false,
+			expectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster, newSet *apps.StatefulSet) {
+				g.Expect(tc.Status.TiDB.Phase).To(Equal(v1alpha1.UpgradePhase))
+				g.Expect(newSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(pointer.Int32Ptr(1)))
+			},
+			errorExpect: true,
 		},
 		{
 			name: "modify oldSet update strategy to OnDelete",
@@ -152,16 +176,6 @@ func TestTiDBUpgrader_Upgrade(t *testing.T) {
 			},
 		},
 		{
-			name: "cdc is upgrading",
-			changeFn: func(tc *v1alpha1.TidbCluster) {
-				tc.Status.TiCDC.Phase = v1alpha1.UpgradePhase
-			},
-			getLastAppliedConfigErr: false,
-			expectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster, newSet *apps.StatefulSet) {
-				g.Expect(newSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(pointer.Int32Ptr(1)))
-			},
-		},
-		{
 			name: "pump is upgrading",
 			changeFn: func(tc *v1alpha1.TidbCluster) {
 				tc.Status.Pump.Phase = v1alpha1.UpgradePhase
@@ -205,6 +219,27 @@ func TestTiDBUpgrader_Upgrade(t *testing.T) {
 					Name:   "upgrader-tidb-1",
 					Health: false,
 				}
+			},
+			getLastAppliedConfigErr: false,
+			errorExpect:             true,
+			expectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster, newSet *apps.StatefulSet) {
+				g.Expect(tc.Status.TiDB.Phase).To(Equal(v1alpha1.UpgradePhase))
+				g.Expect(newSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(pointer.Int32Ptr(1)))
+			},
+		},
+		{
+			name: "upgraded pod is ready but not available",
+			changePods: func(pods []*corev1.Pod) {
+				pods[1].Status.Conditions[0].LastTransitionTime = metav1.Now()
+			},
+			changeFn: func(tc *v1alpha1.TidbCluster) {
+				if tc.Annotations == nil {
+					tc.Annotations = map[string]string{}
+				}
+				// 5min is enough for unit test
+				tc.Annotations[annoKeyTiDBMinReadySeconds] = "300"
+				tc.Status.PD.Phase = v1alpha1.NormalPhase
+				tc.Status.TiKV.Phase = v1alpha1.NormalPhase
 			},
 			getLastAppliedConfigErr: false,
 			errorExpect:             true,
@@ -334,6 +369,13 @@ func getTiDBPods() []*corev1.Pod {
 				Namespace: corev1.NamespaceDefault,
 				Labels:    lc,
 			},
+			Status: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{
+					{
+						Type:   corev1.PodReady,
+						Status: corev1.ConditionTrue},
+				},
+			},
 		},
 		{
 			TypeMeta: metav1.TypeMeta{Kind: "Pod", APIVersion: "v1"},
@@ -341,6 +383,13 @@ func getTiDBPods() []*corev1.Pod {
 				Name:      tidbPodName(upgradeTcName, 1),
 				Namespace: corev1.NamespaceDefault,
 				Labels:    lu,
+			},
+			Status: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{
+					{
+						Type:   corev1.PodReady,
+						Status: corev1.ConditionTrue},
+				},
 			},
 		},
 	}

@@ -16,10 +16,12 @@ package member
 import (
 	"testing"
 
-	. "github.com/onsi/gomega"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
+	mngerutils "github.com/pingcap/tidb-operator/pkg/manager/utils"
+
+	. "github.com/onsi/gomega"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,19 +34,30 @@ func TestTiCDCUpgrader_Upgrade(t *testing.T) {
 	g := NewGomegaWithT(t)
 
 	type testcase struct {
-		name         string
-		changeFn     func(*v1alpha1.TidbCluster)
-		invalidPod   bool
-		missPod      bool
-		errorExpect  bool
-		changeOldSet func(set *apps.StatefulSet)
-		expectFn     func(g *GomegaWithT, tc *v1alpha1.TidbCluster, newSet *apps.StatefulSet)
+		name           string
+		changeFn       func(*v1alpha1.TidbCluster)
+		invalidPod     bool
+		changePods     func(pods []*corev1.Pod)
+		missPod        bool
+		errorExpect    bool
+		changeOldSet   func(set *apps.StatefulSet)
+		changeUpgrader func(u *ticdcUpgrader)
+		expectFn       func(g *GomegaWithT, tc *v1alpha1.TidbCluster, newSet *apps.StatefulSet)
 	}
 
 	testFn := func(test *testcase, t *testing.T) {
 		t.Log(test.name)
 		upgrader, podInformer := newTiCDCUpgrader()
+
+		// A version that is smaller than ticdcCrossUpgradeVersion, v6.3.0.
+		cdcVersionOld := "v6.2.0"
+		cdcControl := upgrader.(*ticdcUpgrader).deps.CDCControl.(*controller.FakeTiCDCControl)
+		cdcControl.GetStatusFn = func(tc *v1alpha1.TidbCluster, ordinal int32) (*controller.CaptureStatus, error) {
+			return &controller.CaptureStatus{Version: cdcVersionOld}, nil
+		}
+		cdcVersionNew := ticdcCrossUpgradeVersion
 		tc := newTidbClusterForTiCDCUpgrader()
+		tc.Spec.TiCDC.Version = &cdcVersionNew
 		if test.changeFn != nil {
 			test.changeFn(tc)
 		}
@@ -55,6 +68,12 @@ func TestTiCDCUpgrader_Upgrade(t *testing.T) {
 		if test.missPod {
 			pods = pods[:0]
 		}
+		if test.changePods != nil {
+			test.changePods(pods)
+		}
+		if test.changeUpgrader != nil {
+			test.changeUpgrader(upgrader.(*ticdcUpgrader))
+		}
 		for _, pod := range pods {
 			podInformer.Informer().GetIndexer().Add(pod)
 		}
@@ -64,7 +83,7 @@ func TestTiCDCUpgrader_Upgrade(t *testing.T) {
 		if test.changeOldSet != nil {
 			test.changeOldSet(oldSet)
 		}
-		SetStatefulSetLastAppliedConfigAnnotation(oldSet)
+		mngerutils.SetStatefulSetLastAppliedConfigAnnotation(oldSet)
 
 		err := upgrader.Upgrade(tc, oldSet, newSet)
 		if test.errorExpect {
@@ -82,6 +101,137 @@ func TestTiCDCUpgrader_Upgrade(t *testing.T) {
 				g.Expect(tc.Status.TiCDC.Phase).To(Equal(v1alpha1.UpgradePhase))
 				g.Expect(newSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(pointer.Int32Ptr(0)))
 			},
+		},
+		{
+			name:        "graceful upgrade retry resign owner",
+			errorExpect: true,
+			changeUpgrader: func(u *ticdcUpgrader) {
+				cdcControl := u.deps.CDCControl.(*controller.FakeTiCDCControl)
+				cdcControl.GetStatusFn = func(tc *v1alpha1.TidbCluster, ordinal int32) (*controller.CaptureStatus, error) {
+					return &controller.CaptureStatus{Version: ticdcCrossUpgradeVersion}, nil
+				}
+
+				// resignOwner returns false to let graceful shutdown retry.
+				cdcControl.ResignOwnerFn = func(tc *v1alpha1.TidbCluster, ordinal int32) (ok bool, err error) {
+					return false, nil
+				}
+			},
+			expectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster, newSet *apps.StatefulSet) {
+				g.Expect(tc.Status.TiCDC.Phase).To(Equal(v1alpha1.UpgradePhase))
+				g.Expect(newSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(pointer.Int32Ptr(1)))
+			},
+		},
+		{
+			name:        "graceful upgrade retry drain",
+			errorExpect: true,
+			changeUpgrader: func(u *ticdcUpgrader) {
+				cdcControl := u.deps.CDCControl.(*controller.FakeTiCDCControl)
+				cdcControl.GetStatusFn = func(tc *v1alpha1.TidbCluster, ordinal int32) (*controller.CaptureStatus, error) {
+					return &controller.CaptureStatus{Version: ticdcCrossUpgradeVersion}, nil
+				}
+
+				// resignOwner always success.
+				cdcControl.ResignOwnerFn = func(tc *v1alpha1.TidbCluster, ordinal int32) (ok bool, err error) {
+					return true, nil
+				}
+				// drainCapture returns none zero table count to let graceful shutdown retry.
+				cdcControl.DrainCaptureFn = func(tc *v1alpha1.TidbCluster, ordinal int32) (int, bool, error) {
+					return 1, false, nil
+				}
+			},
+			expectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster, newSet *apps.StatefulSet) {
+				g.Expect(tc.Status.TiCDC.Phase).To(Equal(v1alpha1.UpgradePhase))
+				g.Expect(newSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(pointer.Int32Ptr(1)))
+			},
+		},
+		{
+			name:        "graceful upgrade retry is healthy",
+			errorExpect: true,
+			changePods: func(pods []*corev1.Pod) {
+				for i := range pods {
+					// Set all pods to the old revision.
+					pods[i].Labels[apps.ControllerRevisionHashLabelKey] = "1"
+				}
+			},
+			changeOldSet: func(set *apps.StatefulSet) {
+				// Upgrade from the ordinal 2.
+				set.Spec.UpdateStrategy = apps.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType,
+					RollingUpdate: &apps.RollingUpdateStatefulSetStrategy{
+						Partition: pointer.Int32Ptr(2),
+					},
+				}
+				set.Status = apps.StatefulSetStatus{
+					CurrentRevision: "1",
+					UpdateRevision:  "2",
+					ReadyReplicas:   2,
+					Replicas:        2,
+					CurrentReplicas: 2,
+					UpdatedReplicas: 0,
+				}
+			},
+			changeUpgrader: func(u *ticdcUpgrader) {
+				cdcControl := u.deps.CDCControl.(*controller.FakeTiCDCControl)
+				cdcControl.GetStatusFn = func(tc *v1alpha1.TidbCluster, ordinal int32) (*controller.CaptureStatus, error) {
+					return &controller.CaptureStatus{Version: ticdcCrossUpgradeVersion}, nil
+				}
+
+				// resignOwner always success.
+				cdcControl.ResignOwnerFn = func(tc *v1alpha1.TidbCluster, ordinal int32) (ok bool, err error) {
+					return true, nil
+				}
+				// drainCapture always success.
+				cdcControl.DrainCaptureFn = func(tc *v1alpha1.TidbCluster, ordinal int32) (int, bool, error) {
+					return 0, false, nil
+				}
+				// isHealthy returns false to let graceful shutdown retry.
+				cdcControl.IsHealthyFn = func(tc *v1alpha1.TidbCluster, ordinal int32) (bool, error) {
+					return false, nil
+				}
+			},
+			expectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster, newSet *apps.StatefulSet) {
+				g.Expect(tc.Status.TiCDC.Phase).To(Equal(v1alpha1.UpgradePhase))
+				g.Expect(newSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(pointer.Int32Ptr(2)))
+			},
+		},
+		{
+			name:        "last graceful upgrade does not wait healthy",
+			errorExpect: false,
+			changeUpgrader: func(u *ticdcUpgrader) {
+				cdcControl := u.deps.CDCControl.(*controller.FakeTiCDCControl)
+				cdcControl.GetStatusFn = func(tc *v1alpha1.TidbCluster, ordinal int32) (*controller.CaptureStatus, error) {
+					return &controller.CaptureStatus{Version: ticdcCrossUpgradeVersion}, nil
+				}
+
+				// resignOwner always success.
+				cdcControl.ResignOwnerFn = func(tc *v1alpha1.TidbCluster, ordinal int32) (ok bool, err error) {
+					return true, nil
+				}
+				// drainCapture always success.
+				cdcControl.DrainCaptureFn = func(tc *v1alpha1.TidbCluster, ordinal int32) (int, bool, error) {
+					return 0, false, nil
+				}
+				// isHealthy returns false to let graceful shutdown retry.
+				cdcControl.IsHealthyFn = func(tc *v1alpha1.TidbCluster, ordinal int32) (bool, error) {
+					return false, nil
+				}
+			},
+			expectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster, newSet *apps.StatefulSet) {
+				g.Expect(tc.Status.TiCDC.Phase).To(Equal(v1alpha1.UpgradePhase))
+				g.Expect(newSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(pointer.Int32Ptr(0)))
+			},
+		},
+		{
+			name: "normal with pod notReady",
+			changePods: func(pods []*corev1.Pod) {
+				for _, pod := range pods {
+					pod.Status = *new(corev1.PodStatus)
+				}
+			},
+			expectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster, newSet *apps.StatefulSet) {
+				g.Expect(tc.Status.TiCDC.Phase).To(Equal(v1alpha1.UpgradePhase))
+				g.Expect(newSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(pointer.Int32Ptr(1)))
+			},
+			errorExpect: true,
 		},
 		{
 			name: "modify oldSet update strategy to OnDelete",
@@ -168,6 +318,101 @@ func TestTiCDCUpgrader_Upgrade(t *testing.T) {
 				g.Expect(newSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(pointer.Int32Ptr(1)))
 			},
 		},
+		{
+			name: "ticdc can not upgrade when pd is upgrading",
+			changeFn: func(tc *v1alpha1.TidbCluster) {
+				tc.Status.PD.Phase = v1alpha1.UpgradePhase
+				tc.Status.TiFlash.Phase = v1alpha1.NormalPhase
+				tc.Status.TiKV.Phase = v1alpha1.NormalPhase
+				tc.Status.Pump.Phase = v1alpha1.NormalPhase
+				tc.Status.TiDB.Phase = v1alpha1.NormalPhase
+				tc.Status.TiCDC.Synced = true
+			},
+			changeOldSet: func(oldSet *apps.StatefulSet) {
+				mngerutils.SetStatefulSetLastAppliedConfigAnnotation(oldSet)
+			},
+			errorExpect: false,
+			expectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster, newSet *apps.StatefulSet) {
+				g.Expect(tc.Status.TiCDC.Phase).To(Equal(v1alpha1.NormalPhase))
+				g.Expect(*newSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(int32(1)))
+			},
+		},
+		{
+			name: "ticdc can not upgrade when tiflash is upgrading",
+			changeFn: func(tc *v1alpha1.TidbCluster) {
+				tc.Status.PD.Phase = v1alpha1.NormalPhase
+				tc.Status.TiFlash.Phase = v1alpha1.UpgradePhase
+				tc.Status.TiKV.Phase = v1alpha1.NormalPhase
+				tc.Status.Pump.Phase = v1alpha1.NormalPhase
+				tc.Status.TiDB.Phase = v1alpha1.NormalPhase
+				tc.Status.TiCDC.Synced = true
+			},
+			changeOldSet: func(oldSet *apps.StatefulSet) {
+				mngerutils.SetStatefulSetLastAppliedConfigAnnotation(oldSet)
+			},
+			errorExpect: false,
+			expectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster, newSet *apps.StatefulSet) {
+				g.Expect(tc.Status.TiCDC.Phase).To(Equal(v1alpha1.NormalPhase))
+				g.Expect(*newSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(int32(1)))
+			},
+		},
+		{
+			name: "ticdc can not upgrade when tikv is upgrading",
+			changeFn: func(tc *v1alpha1.TidbCluster) {
+				tc.Status.PD.Phase = v1alpha1.NormalPhase
+				tc.Status.TiFlash.Phase = v1alpha1.NormalPhase
+				tc.Status.TiKV.Phase = v1alpha1.UpgradePhase
+				tc.Status.Pump.Phase = v1alpha1.NormalPhase
+				tc.Status.TiDB.Phase = v1alpha1.NormalPhase
+				tc.Status.TiCDC.Synced = true
+			},
+			changeOldSet: func(oldSet *apps.StatefulSet) {
+				mngerutils.SetStatefulSetLastAppliedConfigAnnotation(oldSet)
+			},
+			errorExpect: false,
+			expectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster, newSet *apps.StatefulSet) {
+				g.Expect(tc.Status.TiCDC.Phase).To(Equal(v1alpha1.NormalPhase))
+				g.Expect(*newSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(int32(1)))
+			},
+		},
+		{
+			name: "ticdc can not upgrade when pump is upgrading",
+			changeFn: func(tc *v1alpha1.TidbCluster) {
+				tc.Status.PD.Phase = v1alpha1.NormalPhase
+				tc.Status.TiFlash.Phase = v1alpha1.NormalPhase
+				tc.Status.TiKV.Phase = v1alpha1.NormalPhase
+				tc.Status.Pump.Phase = v1alpha1.UpgradePhase
+				tc.Status.TiDB.Phase = v1alpha1.NormalPhase
+				tc.Status.TiCDC.Synced = true
+			},
+			changeOldSet: func(oldSet *apps.StatefulSet) {
+				mngerutils.SetStatefulSetLastAppliedConfigAnnotation(oldSet)
+			},
+			errorExpect: false,
+			expectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster, newSet *apps.StatefulSet) {
+				g.Expect(tc.Status.TiCDC.Phase).To(Equal(v1alpha1.NormalPhase))
+				g.Expect(*newSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(int32(1)))
+			},
+		},
+		{
+			name: "ticdc can not upgrade when tidb is upgrading",
+			changeFn: func(tc *v1alpha1.TidbCluster) {
+				tc.Status.PD.Phase = v1alpha1.NormalPhase
+				tc.Status.TiFlash.Phase = v1alpha1.NormalPhase
+				tc.Status.TiKV.Phase = v1alpha1.NormalPhase
+				tc.Status.Pump.Phase = v1alpha1.NormalPhase
+				tc.Status.TiDB.Phase = v1alpha1.UpgradePhase
+				tc.Status.TiCDC.Synced = true
+			},
+			changeOldSet: func(oldSet *apps.StatefulSet) {
+				mngerutils.SetStatefulSetLastAppliedConfigAnnotation(oldSet)
+			},
+			errorExpect: false,
+			expectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster, newSet *apps.StatefulSet) {
+				g.Expect(tc.Status.TiCDC.Phase).To(Equal(v1alpha1.NormalPhase))
+				g.Expect(*newSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(int32(1)))
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -248,7 +493,8 @@ func newTidbClusterForTiCDCUpgrader() *v1alpha1.TidbCluster {
 				ComponentSpec: v1alpha1.ComponentSpec{
 					Image: "ticdc-test-image",
 				},
-				Replicas: 2,
+				BaseImage: "ticdc-test-image",
+				Replicas:  2,
 			},
 		},
 		Status: v1alpha1.TidbClusterStatus{
@@ -287,6 +533,13 @@ func getTiCDCPods() []*corev1.Pod {
 				Namespace: corev1.NamespaceDefault,
 				Labels:    lc,
 			},
+			Status: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{
+					{
+						Type:   corev1.PodReady,
+						Status: corev1.ConditionTrue},
+				},
+			},
 		},
 		{
 			TypeMeta: metav1.TypeMeta{Kind: "Pod", APIVersion: "v1"},
@@ -294,6 +547,13 @@ func getTiCDCPods() []*corev1.Pod {
 				Name:      ticdcPodName(upgradeTcName, 1),
 				Namespace: corev1.NamespaceDefault,
 				Labels:    lu,
+			},
+			Status: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{
+					{
+						Type:   corev1.PodReady,
+						Status: corev1.ConditionTrue},
+				},
 			},
 		},
 	}

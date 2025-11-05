@@ -14,18 +14,23 @@
 package member
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"path"
+	"strconv"
+	"strings"
 	"time"
 
-	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+	"github.com/pingcap/tidb-operator/pkg/apis/util/toml"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
+	"github.com/pingcap/tidb-operator/pkg/manager/member/startscript"
+	"github.com/pingcap/tidb-operator/pkg/third_party/k8s"
 	"github.com/pingcap/tidb-operator/pkg/util"
-	"github.com/pingcap/tidb-operator/pkg/util/toml"
+
+	"github.com/Masterminds/semver"
+	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -34,9 +39,9 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	corelisters "k8s.io/client-go/listers/core/v1"
-	"k8s.io/klog"
-	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -47,6 +52,10 @@ const (
 	// ErrImagePull is the pod state of image pull failed
 	ErrImagePull = "ErrImagePull"
 )
+
+// The first version that moves the rocksdb info and raft info log to store and rotate as the TiKV log is v5.0.0
+// https://github.com/tikv/tikv/pull/7358
+var tikvLessThanV500, _ = semver.NewConstraint("<v5.0.0-0")
 
 func annotationsMountVolume() (corev1.VolumeMount, corev1.Volume) {
 	m := corev1.VolumeMount{Name: "annotations", ReadOnly: true, MountPath: "/etc/podinfo"}
@@ -64,30 +73,6 @@ func annotationsMountVolume() (corev1.VolumeMount, corev1.Volume) {
 		},
 	}
 	return m, v
-}
-
-// statefulSetIsUpgrading confirms whether the statefulSet is upgrading phase
-func statefulSetIsUpgrading(set *apps.StatefulSet) bool {
-	if set.Status.CurrentRevision != set.Status.UpdateRevision {
-		return true
-	}
-	if set.Generation > set.Status.ObservedGeneration && *set.Spec.Replicas == set.Status.Replicas {
-		return true
-	}
-	return false
-}
-
-// SetStatefulSetLastAppliedConfigAnnotation set last applied config to Statefulset's annotation
-func SetStatefulSetLastAppliedConfigAnnotation(set *apps.StatefulSet) error {
-	setApply, err := util.Encode(set.Spec)
-	if err != nil {
-		return err
-	}
-	if set.Annotations == nil {
-		set.Annotations = map[string]string{}
-	}
-	set.Annotations[LastAppliedConfigAnnotation] = setApply
-	return nil
 }
 
 // GetLastAppliedConfig get last applied config info from Statefulset's annotation and the podTemplate's annotation
@@ -120,12 +105,6 @@ func templateEqual(new *apps.StatefulSet, old *apps.StatefulSet) bool {
 	return false
 }
 
-// setUpgradePartition set statefulSet's rolling update partition
-func setUpgradePartition(set *apps.StatefulSet, upgradeOrdinal int32) {
-	set.Spec.UpdateStrategy.RollingUpdate = &apps.RollingUpdateStatefulSetStrategy{Partition: &upgradeOrdinal}
-	klog.Infof("set %s/%s partition to %d", set.GetNamespace(), set.GetName(), upgradeOrdinal)
-}
-
 func MemberPodName(controllerName, controllerKind string, ordinal int32, memberType v1alpha1.MemberType) (string, error) {
 	switch controllerKind {
 	case v1alpha1.TiDBClusterKind:
@@ -147,6 +126,10 @@ func PdPodName(tcName string, ordinal int32) string {
 	return fmt.Sprintf("%s-%d", controller.PDMemberName(tcName), ordinal)
 }
 
+func PDMSPodName(tcName string, ordinal int32, component string) string {
+	return fmt.Sprintf("%s-%d", controller.PDMSMemberName(tcName, component), ordinal)
+}
+
 func tidbPodName(tcName string, ordinal int32) string {
 	return fmt.Sprintf("%s-%d", controller.TiDBMemberName(tcName), ordinal)
 }
@@ -159,22 +142,35 @@ func DMMasterPodName(dcName string, ordinal int32) string {
 	return fmt.Sprintf("%s-%d", controller.DMMasterMemberName(dcName), ordinal)
 }
 
-func PdName(tcName string, ordinal int32, namespace string, clusterDomain string) string {
+// PdName should match the start arg `--name` of pd-server
+// See the start script of PD in pkg/manager/member/startscript/v1.pdStartScriptTpl
+// and pkg/manager/member/startscript/v2.RenderPDStartScript
+func PdName(tcName string, ordinal int32, namespace string, clusterDomain string, acrossK8s bool) string {
 	if len(clusterDomain) > 0 {
 		return fmt.Sprintf("%s.%s-pd-peer.%s.svc.%s", PdPodName(tcName, ordinal), tcName, namespace, clusterDomain)
 	}
+
+	// clusterDomain is not set
+	if acrossK8s {
+		return fmt.Sprintf("%s.%s-pd-peer.%s.svc", PdPodName(tcName, ordinal), tcName, namespace)
+	}
+
 	return PdPodName(tcName, ordinal)
 }
 
-// CombineAnnotations merges two annotations maps
-func CombineAnnotations(a, b map[string]string) map[string]string {
-	if a == nil {
-		a = make(map[string]string)
+// PDMSName should match the start arg `--name` of pd-server
+// See the start script of PDMS in pkg/manager/member/startscript/v2.renderPDMSStartScript
+func PDMSName(tcName string, ordinal int32, namespace, clusterDomain string, acrossK8s bool, component string) string {
+	if len(clusterDomain) > 0 {
+		return fmt.Sprintf("%s.%s-%s-peer.%s.svc.%s", PDMSPodName(tcName, ordinal, component), tcName, component, namespace, clusterDomain)
 	}
-	for k, v := range b {
-		a[k] = v
+
+	// clusterDomain is not set
+	if acrossK8s {
+		return fmt.Sprintf("%s.%s-%s-peer.%s.svc", PDMSPodName(tcName, ordinal, component), component, tcName, namespace)
 	}
-	return a
+
+	return PDMSPodName(tcName, ordinal, component)
 }
 
 // NeedForceUpgrade check if force upgrade is necessary
@@ -189,16 +185,6 @@ func NeedForceUpgrade(ann map[string]string) bool {
 	return false
 }
 
-// FindConfigMapVolume returns the configmap which's name matches the predicate in a PodSpec, empty indicates not found
-func FindConfigMapVolume(podSpec *corev1.PodSpec, pred func(string) bool) string {
-	for _, vol := range podSpec.Volumes {
-		if vol.ConfigMap != nil && pred(vol.ConfigMap.LocalObjectReference.Name) {
-			return vol.ConfigMap.LocalObjectReference.Name
-		}
-	}
-	return ""
-}
-
 // MarshalTOML is a template function that try to marshal a go value to toml
 func MarshalTOML(v interface{}) ([]byte, error) {
 	return toml.Marshal(v)
@@ -208,52 +194,43 @@ func UnmarshalTOML(b []byte, obj interface{}) error {
 	return toml.Unmarshal(b, obj)
 }
 
-func Sha256Sum(v interface{}) (string, error) {
-	data, err := json.Marshal(v)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(data)
-	return fmt.Sprintf("%x", sum), nil
-}
-
-func AddConfigMapDigestSuffix(cm *corev1.ConfigMap) error {
-	sum, err := Sha256Sum(cm.Data)
-	if err != nil {
-		return err
-	}
-	suffix := fmt.Sprintf("%x", sum)[0:7]
-	cm.Name = fmt.Sprintf("%s-%s", cm.Name, suffix)
-	return nil
-}
-
 // getStsAnnotations gets annotations for statefulset of given component.
 func getStsAnnotations(tcAnns map[string]string, component string) map[string]string {
 	anns := map[string]string{}
 	if tcAnns == nil {
 		return anns
 	}
-	// delete slots
+
+	// ensure the delete-slots annotation
 	var key string
 	switch component {
 	case label.PDLabelVal:
 		key = label.AnnPDDeleteSlots
+	case label.PDMSTSOLabelVal:
+		key = label.AnnTSODeleteSlots
+	case label.PDMSSchedulingLabelVal:
+		key = label.AnnSchedulingDeleteSlots
 	case label.TiDBLabelVal:
 		key = label.AnnTiDBDeleteSlots
 	case label.TiKVLabelVal:
 		key = label.AnnTiKVDeleteSlots
 	case label.TiFlashLabelVal:
 		key = label.AnnTiFlashDeleteSlots
+	case label.TiProxyLabelVal:
+		key = label.AnnTiProxyDeleteSlots
 	case label.DMMasterLabelVal:
 		key = label.AnnDMMasterDeleteSlots
 	case label.DMWorkerLabelVal:
 		key = label.AnnDMWorkerDeleteSlots
+	case label.TiCDCLabelVal:
+		key = label.AnnTiCDCDeleteSlots
 	default:
 		return anns
 	}
 	if val, ok := tcAnns[key]; ok {
 		anns[helper.DeleteSlotsAnn] = val
 	}
+
 	return anns
 }
 
@@ -266,51 +243,13 @@ func MapContainers(podSpec *corev1.PodSpec) map[string]corev1.Container {
 	return m
 }
 
-// UpdateStatefulSet is a template function to update the statefulset of components
-func UpdateStatefulSet(setCtl controller.StatefulSetControlInterface, object runtime.Object, newSet, oldSet *apps.StatefulSet) error {
-	isOrphan := metav1.GetControllerOf(oldSet) == nil
-	if newSet.Annotations == nil {
-		newSet.Annotations = map[string]string{}
+// MapInitContainers index init containers of Pod by container name in favor of looking up
+func MapInitContainers(podSpec *corev1.PodSpec) map[string]corev1.Container {
+	m := map[string]corev1.Container{}
+	for _, c := range podSpec.InitContainers {
+		m[c.Name] = c
 	}
-	if oldSet.Annotations == nil {
-		oldSet.Annotations = map[string]string{}
-	}
-
-	if !util.StatefulSetEqual(*newSet, *oldSet) || isOrphan {
-		set := *oldSet
-		// Retain the deprecated last applied pod template annotation for backward compatibility
-		var podConfig string
-		var hasPodConfig bool
-		if oldSet.Spec.Template.Annotations != nil {
-			podConfig, hasPodConfig = oldSet.Spec.Template.Annotations[LastAppliedConfigAnnotation]
-		}
-		set.Spec.Template = newSet.Spec.Template
-		if hasPodConfig {
-			if set.Spec.Template.Annotations == nil {
-				set.Spec.Template.Annotations = map[string]string{}
-			}
-			set.Spec.Template.Annotations[LastAppliedConfigAnnotation] = podConfig
-		}
-		set.Annotations = newSet.Annotations
-		v, ok := oldSet.Annotations[label.AnnStsLastSyncTimestamp]
-		if ok {
-			set.Annotations[label.AnnStsLastSyncTimestamp] = v
-		}
-		*set.Spec.Replicas = *newSet.Spec.Replicas
-		set.Spec.UpdateStrategy = newSet.Spec.UpdateStrategy
-		if isOrphan {
-			set.OwnerReferences = newSet.OwnerReferences
-			set.Labels = newSet.Labels
-		}
-		err := SetStatefulSetLastAppliedConfigAnnotation(&set)
-		if err != nil {
-			return err
-		}
-		_, err = setCtl.UpdateStatefulSet(object, &set)
-		return err
-	}
-
-	return nil
+	return m
 }
 
 // findContainerByName finds targetContainer by containerName, If not find, then return nil
@@ -323,19 +262,8 @@ func findContainerByName(sts *apps.StatefulSet, containerName string) *corev1.Co
 	return nil
 }
 
-func CopyAnnotations(src map[string]string) map[string]string {
-	if src == nil {
-		return nil
-	}
-	dst := map[string]string{}
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
-}
-
-func getTikVConfigMapForTiKVSpec(tikvSpec *v1alpha1.TiKVSpec, tc *v1alpha1.TidbCluster, scriptModel *TiKVStartScriptModel) (*corev1.ConfigMap, error) {
-	config := tikvSpec.Config
+func getTikVConfigMapForTiKVSpec(tikvSpec *v1alpha1.TiKVSpec, tc *v1alpha1.TidbCluster) (*corev1.ConfigMap, error) {
+	config := tikvSpec.Config.DeepCopy()
 	if tc.IsTLSClusterEnabled() {
 		config.Set("security.ca-path", path.Join(tikvClusterCertPath, tlsSecretRootCAKey))
 		config.Set("security.cert-path", path.Join(tikvClusterCertPath, corev1.TLSCertKey))
@@ -345,10 +273,12 @@ func getTikVConfigMapForTiKVSpec(tikvSpec *v1alpha1.TiKVSpec, tc *v1alpha1.TidbC
 	if err != nil {
 		return nil, err
 	}
-	startScript, err := RenderTiKVStartScript(scriptModel)
+
+	startScript, err := startscript.RenderTiKVStartScript(tc)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("render start-script for tc %s/%s failed: %v", tc.Namespace, tc.Name, err)
 	}
+
 	cm := &corev1.ConfigMap{
 		Data: map[string]string{
 			"config-file":    transformTiKVConfigMap(string(confText), tc),
@@ -394,7 +324,7 @@ func shouldRecover(tc *v1alpha1.TidbCluster, component string, podLister corelis
 			klog.Errorf("pod %s/%s does not exist: %v", tc.Namespace, name, err)
 			return false
 		}
-		if !podutil.IsPodReady(pod) {
+		if !k8s.IsPodReady(pod) {
 			return false
 		}
 		var exist bool
@@ -444,7 +374,7 @@ func shouldRecoverDM(dc *v1alpha1.DMCluster, component string, podLister corelis
 			klog.Errorf("pod %s/%s does not exist: %v", dc.Namespace, name, err)
 			return false
 		}
-		if !podutil.IsPodReady(pod) {
+		if !k8s.IsPodReady(pod) {
 			return false
 		}
 		var exist bool
@@ -510,21 +440,44 @@ func CreateOrUpdateService(serviceLister corelisters.ServiceLister, serviceContr
 }
 
 // addDeferDeletingAnnoToPVC set the label
-func addDeferDeletingAnnoToPVC(tc *v1alpha1.TidbCluster, pvc *corev1.PersistentVolumeClaim, pvcControl controller.PVCControlInterface) error {
+func addDeferDeletingAnnoToPVC(tc *v1alpha1.TidbCluster, pvc *corev1.PersistentVolumeClaim, pvcControl controller.PVCControlInterface, scaleInTime ...string) error {
 	if pvc.Annotations == nil {
 		pvc.Annotations = map[string]string{}
 	}
 	now := time.Now().Format(time.RFC3339)
 	pvc.Annotations[label.AnnPVCDeferDeleting] = now
+	// scaleInTime indicates the time when call scale in, for test only since pvc defer deleting time may be different in same scale in call.
+	if len(scaleInTime) > 0 {
+		pvc.Annotations[label.AnnPVCScaleInTime] = scaleInTime[0]
+	}
 	if _, err := pvcControl.UpdatePVC(tc, pvc); err != nil {
 		klog.Errorf("failed to set PVC %s/%s annotation %q to %q", tc.Namespace, pvc.Name, label.AnnPVCDeferDeleting, now)
 		return err
 	}
-	klog.Infof("set PVC %s/%s annotationq %q to %q successfully", tc.Namespace, pvc.Name, label.AnnPVCDeferDeleting, now)
+	klog.Infof("set PVC %s/%s annotation %q to %q successfully", tc.Namespace, pvc.Name, label.AnnPVCDeferDeleting, now)
 	return nil
 }
 
-func getPVCSelectorForPod(controller runtime.Object, memberType v1alpha1.MemberType, ordinal int32) (labels.Selector, error) {
+// ensureScaleInTimeAnnoInPod set scale in time to pod annotation
+func ensureScaleInTimeAnnoInPod(tc *v1alpha1.TidbCluster, pod *corev1.Pod, podControl controller.PodControlInterface, scaleInTime string) error {
+	val, ok := pod.Annotations[label.AnnoScaleInTime]
+	if ok && val == scaleInTime {
+		return nil
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations[label.AnnoScaleInTime] = scaleInTime
+	if _, err := podControl.UpdatePod(tc, pod); err != nil {
+		klog.Errorf("failed to set pod %s/%s annotation %q to %q", tc.Namespace, pod.Name, label.AnnoScaleInTime, scaleInTime)
+		return err
+	}
+	klog.Infof("set pod %s/%s annotation %q to %q successfully", tc.Namespace, pod.Name, label.AnnoScaleInTime, scaleInTime)
+	return nil
+}
+
+// GetPVCSelectorForPod compose a PVC selector from a tc/dm-cluster member pod at ordinal position
+func GetPVCSelectorForPod(controller runtime.Object, memberType v1alpha1.MemberType, ordinal int32) (labels.Selector, error) {
 	meta := controller.(metav1.Object)
 	var podName string
 	var l label.Label
@@ -543,4 +496,182 @@ func getPVCSelectorForPod(controller runtime.Object, memberType v1alpha1.MemberT
 		return nil, fmt.Errorf("object %s/%s of kind %s has unknown controller", meta.GetNamespace(), meta.GetName(), kind)
 	}
 	return l.Selector()
+}
+
+// TiKVLessThanV50 checks whether the `image` is less than v5.0.0
+func TiKVLessThanV50(image string) bool {
+	_, version := parseImage(image)
+	v, err := semver.NewVersion(version)
+	if err != nil {
+		klog.Errorf("Parse version %s failure, error: %v", version, err)
+		return false
+	}
+	if tikvLessThanV500.Check(v) {
+		return true
+	}
+	return false
+}
+
+// parseImage returns the image name and the tag from the input image string
+func parseImage(image string) (string, string) {
+	var name, tag string
+	colonIdx := strings.LastIndexByte(image, ':')
+	if colonIdx >= 0 {
+		name = image[:colonIdx]
+		tag = image[colonIdx+1:]
+	} else {
+		name = image
+	}
+	return name, tag
+}
+
+func TiKVStoreFromStatus(tc *v1alpha1.TidbCluster, podName string) (v1alpha1.TiKVStore, error) {
+	for _, store := range tc.Status.TiKV.Stores {
+		if store.PodName == podName {
+			return store, nil
+		}
+	}
+	return v1alpha1.TiKVStore{}, fmt.Errorf("store is not found in tikv status")
+}
+
+func TiFlashStoreFromStatus(tc *v1alpha1.TidbCluster, podName string) (v1alpha1.TiKVStore, error) {
+	for _, store := range tc.Status.TiFlash.Stores {
+		if store.PodName == podName {
+			return store, nil
+		}
+	}
+	return v1alpha1.TiKVStore{}, fmt.Errorf("store is not found in tiflash status")
+}
+
+func TiKVStoreIDFromStatus(tc *v1alpha1.TidbCluster, podName string) (uint64, error) {
+	store, err := TiKVStoreFromStatus(tc, podName)
+	if err != nil {
+		return 0, err
+	}
+
+	storeID, err := strconv.ParseUint(store.ID, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+
+	return storeID, nil
+}
+
+func TiKVStoreAndIDFromStatus(tc *v1alpha1.TidbCluster, podName string) (v1alpha1.TiKVStore, uint64, error) {
+	store, err := TiKVStoreFromStatus(tc, podName)
+	if err != nil {
+		return v1alpha1.TiKVStore{}, 0, err
+	}
+
+	storeID, err := strconv.ParseUint(store.ID, 10, 64)
+	if err != nil {
+		return v1alpha1.TiKVStore{}, 0, err
+	}
+
+	return store, storeID, nil
+}
+
+func TiFlashStoreIDFromStatus(tc *v1alpha1.TidbCluster, podName string) (uint64, error) {
+	store, err := TiFlashStoreFromStatus(tc, podName)
+	if err != nil {
+		return 0, err
+	}
+
+	storeID, err := strconv.ParseUint(store.ID, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+
+	return storeID, nil
+}
+
+// MergePatchContainers adds patches to base using a strategic merge patch and
+// iterating by container name, failing on the first error
+func MergePatchContainers(base, patches []corev1.Container) ([]corev1.Container, error) {
+	var out []corev1.Container
+
+	containersByName := make(map[string]corev1.Container)
+	for _, c := range patches {
+		containersByName[c.Name] = c
+	}
+
+	// Patch the containers that exist in base.
+	for _, container := range base {
+		patchContainer, ok := containersByName[container.Name]
+		if !ok {
+			// This container didn't need to be patched.
+			out = append(out, container)
+			continue
+		}
+
+		containerBytes, err := json.Marshal(container)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal JSON for container %s, error: %v", container.Name, err)
+		}
+
+		patchBytes, err := json.Marshal(patchContainer)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal JSON for patch container %s, error: %v", container.Name, err)
+		}
+
+		// Calculate the patch result.
+		jsonResult, err := strategicpatch.StrategicMergePatch(containerBytes, patchBytes, corev1.Container{})
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate merge patch for container %s, error: %v", container.Name, err)
+		}
+
+		var patchResult corev1.Container
+		if err := json.Unmarshal(jsonResult, &patchResult); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal merged container %s, error: %v", container.Name, err)
+		}
+
+		// Add the patch result and remove the corresponding key from the to do list.
+		out = append(out, patchResult)
+		delete(containersByName, container.Name)
+	}
+
+	// Append containers that are left in containersByName.
+	// Iterate over patches to preserve the order.
+	for _, c := range patches {
+		if container, found := containersByName[c.Name]; found {
+			out = append(out, container)
+		}
+	}
+
+	return out, nil
+}
+
+func BuildProbeCommand(tc *v1alpha1.TidbCluster, componentType string) (command []string) {
+	host := "127.0.0.1"
+	var readinessURL string
+	if componentType == label.PDLabelVal {
+		readinessURL = fmt.Sprintf("%s://%s:%d/status", tc.Scheme(), host, v1alpha1.DefaultPDClientPort)
+	}
+	if componentType == label.TiDBLabelVal {
+		readinessURL = fmt.Sprintf("%s://%s:%d/status", tc.Scheme(), host, v1alpha1.DefaultTiDBStatusPort)
+	}
+	command = append(command, "curl")
+	command = append(command, readinessURL)
+
+	// Fail silently (no output at all) on server errors
+	// without this if the server return 500, the exist code will be 0
+	// and probe is success.
+	command = append(command, "--fail")
+	// follow 301 or 302 redirect
+	command = append(command, "--location")
+
+	if tc.IsTLSClusterEnabled() {
+		cacert := path.Join(clusterCertPath, tlsSecretRootCAKey)
+		cert := path.Join(clusterCertPath, corev1.TLSCertKey)
+		key := path.Join(clusterCertPath, corev1.TLSPrivateKeyKey)
+		command = append(command, "--cacert", cacert)
+		command = append(command, "--cert", cert)
+		command = append(command, "--key", key)
+	}
+	return
+}
+
+func SetServiceWhenPreferIPv6(svc *corev1.Service) {
+	policy := corev1.IPFamilyPolicyPreferDualStack
+	svc.Spec.IPFamilyPolicy = &policy
 }

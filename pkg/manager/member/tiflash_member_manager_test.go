@@ -22,9 +22,11 @@ import (
 	"github.com/google/go-cmp/cmp"
 	. "github.com/onsi/gomega"
 	"github.com/pingcap/kvproto/pkg/metapb"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
+	"github.com/pingcap/tidb-operator/pkg/manager/suspender"
+	"github.com/pingcap/tidb-operator/pkg/manager/volumes"
 	"github.com/pingcap/tidb-operator/pkg/pdapi"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -45,6 +47,7 @@ func TestTiFlashMemberManagerSyncCreate(t *testing.T) {
 		prepare                     func(cluster *v1alpha1.TidbCluster)
 		errWhenCreateStatefulSet    bool
 		errWhenCreateTiFlashService bool
+		suspendComponent            func() (bool, error)
 		err                         bool
 		tls                         bool
 		tiflashSvcCreated           bool
@@ -79,6 +82,11 @@ func TestTiFlashMemberManagerSyncCreate(t *testing.T) {
 		}
 		if test.errWhenCreateTiFlashService {
 			fakeSvcControl.SetCreateServiceError(errors.NewInternalError(fmt.Errorf("API server failed")), 0)
+		}
+		if test.suspendComponent != nil {
+			tfmm.suspender.(*suspender.FakeSuspender).SuspendComponentFunc = func(c v1alpha1.Cluster, mt v1alpha1.MemberType) (bool, error) {
+				return test.suspendComponent()
+			}
 		}
 
 		err := tfmm.Sync(tc)
@@ -153,6 +161,16 @@ func TestTiFlashMemberManagerSyncCreate(t *testing.T) {
 			errWhenCreateStatefulSet:    false,
 			errWhenCreateTiFlashService: true,
 			err:                         true,
+			tiflashSvcCreated:           false,
+			setCreated:                  false,
+		},
+		{
+			name:                        "skip create when suspend",
+			suspendComponent:            func() (bool, error) { return true, nil },
+			prepare:                     nil,
+			errWhenCreateStatefulSet:    false,
+			errWhenCreateTiFlashService: false,
+			err:                         false,
 			tiflashSvcCreated:           false,
 			setCreated:                  false,
 		},
@@ -602,7 +620,7 @@ func TestTiFlashMemberManagerSyncTidbClusterStatus(t *testing.T) {
 		tc.Status.PD.Phase = v1alpha1.NormalPhase
 		set := &apps.StatefulSet{
 			Spec: apps.StatefulSetSpec{
-				Replicas: pointer.Int32Ptr(0),
+				Replicas: pointer.Int32Ptr(tc.Spec.TiFlash.Replicas), // default scaled
 			},
 			Status: status,
 		}
@@ -1341,6 +1359,8 @@ func newFakeTiFlashMemberManager(tc *v1alpha1.TidbCluster) (
 		scaler:                   NewFakeTiFlashScaler(),
 		upgrader:                 NewFakeTiFlashUpgrader(),
 		statefulSetIsUpgradingFn: tiflashStatefulSetIsUpgrading,
+		suspender:                suspender.NewFakeSuspender(),
+		podVolumeModifier:        &volumes.FakePodVolumeModifier{},
 	}
 	pdClient := controller.NewFakePDClient(fakeDeps.PDControl.(*pdapi.FakePDControl), tc)
 	setControl := fakeDeps.StatefulSetControl.(*controller.FakeStatefulSetControl)
@@ -1367,7 +1387,7 @@ func TestGetNewServiceForTidbCluster(t *testing.T) {
 			},
 			svcConfig: SvcConfig{
 				Name:       "peer",
-				Port:       20160,
+				Port:       v1alpha1.DefaultTiKVServerPort,
 				Headless:   true,
 				SvcLabel:   func(l label.Label) label.Label { return l.TiFlash() },
 				MemberName: controller.TiFlashPeerMemberName,
@@ -1403,8 +1423,8 @@ func TestGetNewServiceForTidbCluster(t *testing.T) {
 					Ports: []corev1.ServicePort{
 						{
 							Name:       "peer",
-							Port:       20160,
-							TargetPort: intstr.FromInt(20160),
+							Port:       v1alpha1.DefaultTiKVServerPort,
+							TargetPort: intstr.FromInt(int(v1alpha1.DefaultTiKVServerPort)),
 							Protocol:   corev1.ProtocolTCP,
 						},
 					},
@@ -1420,7 +1440,8 @@ func TestGetNewServiceForTidbCluster(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
+	for i := range tests {
+		tt := tests[i]
 		t.Run(tt.name, func(t *testing.T) {
 			svc := getNewServiceForTidbCluster(&tt.tc, tt.svcConfig)
 			if diff := cmp.Diff(tt.expected, *svc); diff != "" {
@@ -1655,10 +1676,63 @@ func TestGetNewTiFlashSetForTidbCluster(t *testing.T) {
 				}), "Expected the CAPACITY of tiflash is properly set")
 			},
 		},
+		{
+			name: "configure initializer",
+			tc: v1alpha1.TidbCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tc",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.TidbClusterSpec{
+					TiDB: &v1alpha1.TiDBSpec{},
+					TiFlash: &v1alpha1.TiFlashSpec{
+						Initializer: &v1alpha1.InitContainerSpec{
+							ResourceRequirements: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("1"),
+									corev1.ResourceMemory: resource.MustParse("2Gi"),
+								},
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("1"),
+									corev1.ResourceMemory: resource.MustParse("2Gi"),
+								},
+							},
+						},
+						StorageClaims: []v1alpha1.StorageClaim{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceStorage: resource.MustParse("100Gi"),
+									},
+								},
+							},
+						},
+					},
+					PD:   &v1alpha1.PDSpec{},
+					TiKV: &v1alpha1.TiKVSpec{},
+				},
+			},
+			testSts: func(sts *apps.StatefulSet) {
+				g := NewGomegaWithT(t)
+				nameToContainer := MapInitContainers(&sts.Spec.Template.Spec)
+				initContainer := nameToContainer["init"]
+				g.Expect(initContainer.Resources).To(Equal(corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("1"),
+						corev1.ResourceMemory: resource.MustParse("2Gi"),
+					},
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("1"),
+						corev1.ResourceMemory: resource.MustParse("2Gi"),
+					},
+				}))
+			},
+		},
 		// TODO add more tests
 	}
 
-	for _, tt := range tests {
+	for i := range tests {
+		tt := tests[i]
 		t.Run(tt.name, func(t *testing.T) {
 			sts, err := getNewStatefulSet(&tt.tc, nil)
 			if (err != nil) != tt.wantErr {

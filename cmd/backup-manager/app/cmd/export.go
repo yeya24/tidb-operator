@@ -25,7 +25,7 @@ import (
 	"github.com/pingcap/tidb-operator/pkg/controller"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 )
 
@@ -46,6 +46,7 @@ func NewExportCommand() *cobra.Command {
 	cmd.Flags().StringVar(&bo.ResourceName, "backupName", "", "Backup CRD object name")
 	cmd.Flags().StringVar(&bo.Bucket, "bucket", "", "Bucket in which to store the backup data")
 	cmd.Flags().BoolVar(&bo.TLSClient, "client-tls", false, "Whether client tls is enabled")
+	cmd.Flags().BoolVar(&bo.SkipClientCA, "skipClientCA", false, "Whether to skip tidb server's certificates validation")
 	cmd.Flags().StringVar(&bo.StorageType, "storageType", "", "Backend storage type")
 	return cmd
 }

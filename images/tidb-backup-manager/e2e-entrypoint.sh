@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # Copyright 2020 PingCAP, Inc.
 #
@@ -14,6 +14,16 @@
 # limitations under the License.
 
 set -e
+
+# The trap command is to make sure the sidecars are terminated when the jobs are finished
+cleanup() {
+    if [ ! -d "/tmp/pod" ]; then
+        mkdir -p /tmp/pod
+    fi
+    touch /tmp/pod/main-terminated
+}
+
+trap cleanup EXIT
 
 export GOOGLE_APPLICATION_CREDENTIALS=/tmp/google-credentials.json
 echo "Create rclone.conf file."
@@ -83,8 +93,13 @@ case "$1" in
         echo "$BACKUP_BIN $E2E_ARGS clean $@"
         exec $BACKUP_BIN $E2E_ARGS clean "$@"
         ;;
+    compact)
+        shift 1
+        echo "$BACKUP_BIN $E2E_ARGS compact $@"
+        exec $BACKUP_BIN $E2E_ARGS compact "$@"
+        ;;
     *)
-        echo "Usage: $0 {backup|restore|clean}"
+        echo "Usage: $0 {backup|restore|clean|compact}"
         echo "Now runs your command."
         echo "$@"
 

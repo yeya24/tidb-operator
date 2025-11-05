@@ -14,13 +14,16 @@
 package member
 
 import (
+	"context"
 	"fmt"
 	"path"
 
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
+	startscriptv1 "github.com/pingcap/tidb-operator/pkg/manager/member/startscript/v1"
 	"github.com/pingcap/tidb-operator/pkg/util"
+
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -28,7 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/pointer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -37,7 +40,7 @@ const (
 	initContainerName   = "wait"
 	containerName       = "mysql-client"
 	passwdKey           = "password"
-	passwdPath          = "/etc/tidb/password"
+	passwdPath          = "/etc/tidb/password" // nolint: gosec
 	sqlKey              = "init-sql"
 	sqlPath             = "init.sql"
 	sqlDir              = "/data"
@@ -75,7 +78,7 @@ func (m *tidbInitManager) Sync(ti *v1alpha1.TidbInitializer) error {
 		return nil
 	}
 
-	err = m.syncTiDBInitConfigMap(ti)
+	err = m.syncTiDBInitConfigMap(ti, tc)
 	if err != nil {
 		return err
 	}
@@ -134,7 +137,7 @@ func (m *tidbInitManager) updateInitializer(ti *v1alpha1.TidbInitializer) (*v1al
 	// don't wait due to limited number of clients, but backoff after the default number of steps
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var updateErr error
-		update, updateErr = m.deps.Clientset.PingcapV1alpha1().TidbInitializers(ns).Update(ti)
+		update, updateErr = m.deps.Clientset.PingcapV1alpha1().TidbInitializers(ns).Update(context.TODO(), ti, metav1.UpdateOptions{})
 		if updateErr == nil {
 			klog.Infof("TidbInitializer: [%s/%s] updated successfully", ns, tiName)
 			return nil
@@ -157,11 +160,14 @@ func (m *tidbInitManager) updateInitializer(ti *v1alpha1.TidbInitializer) (*v1al
 	return update, err
 }
 
-func (m *tidbInitManager) syncTiDBInitConfigMap(ti *v1alpha1.TidbInitializer) error {
+func (m *tidbInitManager) syncTiDBInitConfigMap(ti *v1alpha1.TidbInitializer, tc *v1alpha1.TidbCluster) error {
 	name := controller.TiDBInitializerMemberName(ti.Spec.Clusters.Name)
 	ns := ti.Namespace
 	cm := &corev1.ConfigMap{}
-	tcName := ti.Spec.Clusters.Name
+
+	if tc == nil {
+		return fmt.Errorf("tc of TidbInitializer %s/%s is nil", ns, ti.Name)
+	}
 
 	exist, err := m.deps.TypedControl.Exist(client.ObjectKey{
 		Namespace: ns,
@@ -174,16 +180,13 @@ func (m *tidbInitManager) syncTiDBInitConfigMap(ti *v1alpha1.TidbInitializer) er
 		return nil
 	}
 
-	tc, err := m.deps.TiDBClusterLister.TidbClusters(ns).Get(tcName)
-	if err != nil {
-		return fmt.Errorf("syncTiDBInitConfigMap: failed to get tidbcluster %s for TidbInitializer %s/%s, error: %s", tcName, ns, ti.Name, err)
-	}
-
-	tlsClientEnabled := false
+	tlsClientEnabled, skipCA := false, false
 	if tc.Spec.TiDB.IsTLSClientEnabled() && !tc.SkipTLSWhenConnectTiDB() {
 		tlsClientEnabled = true
+		skipCA = tc.Spec.TiDB.TLSClient.SkipInternalClientCA
 	}
-	newCm, err := getTiDBInitConfigMap(ti, tlsClientEnabled)
+	tidbSvcPort := tc.Spec.TiDB.GetServicePort()
+	newCm, err := getTiDBInitConfigMap(ti, tlsClientEnabled, skipCA, tidbSvcPort)
 	if err != nil {
 		return err
 	}
@@ -254,11 +257,6 @@ func (m *tidbInitManager) makeTiDBInitJob(ti *v1alpha1.TidbInitializer) (*batchv
 	var vs []corev1.Volume
 
 	if tc.Spec.TiDB.IsTLSClientEnabled() && !tc.SkipTLSWhenConnectTiDB() {
-		secretName := util.TiDBClientTLSSecretName(tcName)
-		if ti.Spec.TLSClientSecretName != nil {
-			secretName = *ti.Spec.TLSClientSecretName
-		}
-
 		vms = append(vms, corev1.VolumeMount{
 			Name:      "tidb-client-tls",
 			ReadOnly:  true,
@@ -268,7 +266,7 @@ func (m *tidbInitManager) makeTiDBInitJob(ti *v1alpha1.TidbInitializer) (*batchv
 			Name: "tidb-client-tls",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: secretName,
+					SecretName: util.TiDBClientTLSSecretName(tcName, ti.Spec.TLSClientSecretName),
 				},
 			},
 		})
@@ -350,7 +348,8 @@ func (m *tidbInitManager) makeTiDBInitJob(ti *v1alpha1.TidbInitializer) (*batchv
 
 	podSpec := &corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
-			Labels: initLabel.Labels(),
+			Labels:      util.CombineStringMap(initLabel, ti.ObjectMeta.Labels),
+			Annotations: util.CopyStringMap(ti.ObjectMeta.Annotations),
 		},
 		Spec: corev1.PodSpec{
 			ImagePullSecrets: ti.Spec.ImagePullSecrets,
@@ -382,6 +381,8 @@ func (m *tidbInitManager) makeTiDBInitJob(ti *v1alpha1.TidbInitializer) (*batchv
 			},
 			RestartPolicy: corev1.RestartPolicyNever,
 			Volumes:       vs,
+			Tolerations:   ti.Spec.Tolerations,
+			NodeSelector:  ti.Spec.NodeSelector,
 		},
 	}
 
@@ -405,7 +406,7 @@ func (m *tidbInitManager) makeTiDBInitJob(ti *v1alpha1.TidbInitializer) (*batchv
 	return job, nil
 }
 
-func getTiDBInitConfigMap(ti *v1alpha1.TidbInitializer, tlsClientEnabled bool) (*corev1.ConfigMap, error) {
+func getTiDBInitConfigMap(ti *v1alpha1.TidbInitializer, tlsClientEnabled bool, skipCA bool, tidbSvcPort int32) (*corev1.ConfigMap, error) {
 	var initSQL, passwdSet bool
 
 	permitHost := ti.GetPermitHost()
@@ -417,26 +418,29 @@ func getTiDBInitConfigMap(ti *v1alpha1.TidbInitializer, tlsClientEnabled bool) (
 		passwdSet = true
 	}
 
-	initStartScript, err := RenderTiDBInitInitStartScript(&TiDBInitInitStartScriptModel{
-		ClusterName: ti.Spec.Clusters.Name,
+	initStartScript, err := startscriptv1.RenderTiDBInitInitStartScript(&startscriptv1.TiDBInitInitStartScriptModel{
+		ClusterName:     ti.Spec.Clusters.Name,
+		TiDBServicePort: tidbSvcPort,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	initModel := &TiDBInitStartScriptModel{
-		ClusterName: ti.Spec.Clusters.Name,
-		PermitHost:  permitHost,
-		InitSQL:     initSQL,
-		PasswordSet: passwdSet,
+	initModel := &startscriptv1.TiDBInitStartScriptModel{
+		ClusterName:     ti.Spec.Clusters.Name,
+		PermitHost:      permitHost,
+		InitSQL:         initSQL,
+		PasswordSet:     passwdSet,
+		TiDBServicePort: tidbSvcPort,
 	}
 	if tlsClientEnabled {
 		initModel.TLS = true
+		initModel.SkipCA = skipCA
 		initModel.CAPath = path.Join(util.TiDBClientTLSPath, corev1.ServiceAccountRootCAKey)
 		initModel.CertPath = path.Join(util.TiDBClientTLSPath, corev1.TLSCertKey)
 		initModel.KeyPath = path.Join(util.TiDBClientTLSPath, corev1.TLSPrivateKeyKey)
 	}
-	startScript, err := RenderTiDBInitStartScript(initModel)
+	startScript, err := startscriptv1.RenderTiDBInitStartScript(initModel)
 	if err != nil {
 		return nil, err
 	}
@@ -463,9 +467,10 @@ func getInitMeta(ti *v1alpha1.TidbInitializer) (metav1.ObjectMeta, label.Label) 
 	initLabel := label.NewInitializer().Instance(ti.Name).Initializer(ti.Name)
 
 	objMeta := metav1.ObjectMeta{
-		Name:      name,
-		Namespace: ti.Namespace,
-		Labels:    initLabel,
+		Name:        name,
+		Namespace:   ti.Namespace,
+		Labels:      util.CombineStringMap(initLabel, ti.ObjectMeta.Labels),
+		Annotations: util.CopyStringMap(ti.ObjectMeta.Annotations),
 	}
 	return objMeta, initLabel
 }

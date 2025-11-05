@@ -15,19 +15,21 @@ package fixture
 
 import (
 	"fmt"
+	"math/rand"
 
 	"github.com/Masterminds/semver"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1beta1 "k8s.io/api/rbac/v1beta1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/pointer"
 
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
-	"github.com/pingcap/tidb-operator/pkg/label"
-	"github.com/pingcap/tidb-operator/pkg/tkctl/util"
-	tcconfig "github.com/pingcap/tidb-operator/pkg/util/config"
+	tcconfig "github.com/pingcap/tidb-operator/pkg/apis/util/config"
+	"github.com/pingcap/tidb-operator/pkg/controller"
 	utilimage "github.com/pingcap/tidb-operator/tests/e2e/util/image"
+	"github.com/pingcap/tidb-operator/tests/third_party/k8s/log"
 )
 
 var (
@@ -74,8 +76,30 @@ var (
 	tikvV4Beta = semver.MustParse("v4.0.0-beta")
 )
 
+// ClusterCustomKey for label and ann to test
+const ClusterCustomKey = "cluster-test-key"
+
+// ComponentCustomKey for label and ann to test
+const ComponentCustomKey = "component-test-key"
+
 // GetTidbCluster returns a TidbCluster resource configured for testing
 func GetTidbCluster(ns, name, version string) *v1alpha1.TidbCluster {
+	tc := GetTidbClusterWithoutPDMS(ns, name, version)
+
+	random := rand.Intn(2)
+	if random != 0 && version == utilimage.PDMSImage {
+		log.Logf("[GetTidbCluster] tidbcluster's pd mode is micro-service in this situation, "+
+			"version: %s, tc name: %s, namespace: %s", version, name, ns)
+		// 50% random in pdms mode
+		tc = AddPDMSForTidbCluster(tc)
+	}
+
+	return tc
+}
+
+// GetTidbClusterWithoutPDMS returns a TidbCluster resource configured for testing.
+// in some cases, it won't support pdms mode, so we can't use pdms mode in this situation.
+func GetTidbClusterWithoutPDMS(ns, name, version string) *v1alpha1.TidbCluster {
 	// We assume all unparsable versions are greater or equal to v4.0.0-beta,
 	// e.g. nightly.
 	tikvConfig := v1alpha1.NewTiKVConfig()
@@ -90,8 +114,10 @@ func GetTidbCluster(ns, name, version string) *v1alpha1.TidbCluster {
 
 	tidbConfig := v1alpha1.NewTiDBConfig()
 	tidbConfig.Set("log.level", "info")
+	// workaround for https://docs.pingcap.com/tidb/stable/backup-and-restore-faq#why-does-br-report-new_collations_enabled_on_first_bootstrap-mismatch
+	tidbConfig.Set("new_collations_enabled_on_first_bootstrap", true)
 
-	return &v1alpha1.TidbCluster{
+	tc := &v1alpha1.TidbCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
@@ -101,8 +127,17 @@ func GetTidbCluster(ns, name, version string) *v1alpha1.TidbCluster {
 			ImagePullPolicy:      corev1.PullIfNotPresent,
 			PVReclaimPolicy:      &deletePVP,
 			ConfigUpdateStrategy: v1alpha1.ConfigUpdateStrategyRollingUpdate,
-			SchedulerName:        "tidb-scheduler",
-			Timezone:             "Asia/Shanghai",
+			Helper: &v1alpha1.HelperSpec{
+				Image: pointer.StringPtr(utilimage.HelperImage),
+			},
+			// SchedulerName: "tidb-scheduler", // use the default k8s scheduler now
+			Timezone: "Asia/Shanghai",
+			Labels: map[string]string{
+				ClusterCustomKey: "value",
+			},
+			Annotations: map[string]string{
+				ClusterCustomKey: "value",
+			},
 			PD: &v1alpha1.PDSpec{
 				Replicas:             3,
 				BaseImage:            "pingcap/pd",
@@ -115,6 +150,12 @@ func GetTidbCluster(ns, name, version string) *v1alpha1.TidbCluster {
 				}(),
 				ComponentSpec: v1alpha1.ComponentSpec{
 					Affinity: buildAffinity(name, ns, v1alpha1.PDMemberType),
+					Labels: map[string]string{
+						ComponentCustomKey: "value",
+					},
+					Annotations: map[string]string{
+						ComponentCustomKey: "value",
+					},
 				},
 			},
 
@@ -126,8 +167,14 @@ func GetTidbCluster(ns, name, version string) *v1alpha1.TidbCluster {
 				Config:               tikvConfig,
 				ComponentSpec: v1alpha1.ComponentSpec{
 					Affinity: buildAffinity(name, ns, v1alpha1.TiKVMemberType),
+					Labels: map[string]string{
+						ComponentCustomKey: "value",
+					},
+					Annotations: map[string]string{
+						ComponentCustomKey: "value",
+					},
 				},
-				EvictLeaderTimeout: pointer.StringPtr("3m"),
+				EvictLeaderTimeout: pointer.StringPtr("1m"),
 			},
 
 			TiDB: &v1alpha1.TiDBSpec{
@@ -137,6 +184,12 @@ func GetTidbCluster(ns, name, version string) *v1alpha1.TidbCluster {
 				Service: &v1alpha1.TiDBServiceSpec{
 					ServiceSpec: v1alpha1.ServiceSpec{
 						Type: corev1.ServiceTypeClusterIP,
+						Labels: map[string]string{
+							ComponentCustomKey: "value",
+						},
+						Annotations: map[string]string{
+							ComponentCustomKey: "value",
+						},
 					},
 					ExposeStatus: pointer.BoolPtr(true),
 				},
@@ -145,8 +198,106 @@ func GetTidbCluster(ns, name, version string) *v1alpha1.TidbCluster {
 				Config:           tidbConfig,
 				ComponentSpec: v1alpha1.ComponentSpec{
 					Affinity: buildAffinity(name, ns, v1alpha1.TiDBMemberType),
+					Labels: map[string]string{
+						ComponentCustomKey: "value",
+					},
+					Annotations: map[string]string{
+						ComponentCustomKey: "value",
+					},
 				},
 			},
+		},
+	}
+
+	return tc
+}
+
+// GetDMCluster returns a DmCluster resource configured for testing.
+func GetDMCluster(ns, name, version string) *v1alpha1.DMCluster {
+	deletePVP := corev1.PersistentVolumeReclaimDelete
+	return &v1alpha1.DMCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: ns,
+		},
+		Spec: v1alpha1.DMClusterSpec{
+			Version:         version,
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			PVReclaimPolicy: &deletePVP,
+			// SchedulerName:   "tidb-scheduler",
+			Timezone: "Asia/Shanghai",
+			Labels: map[string]string{
+				ClusterCustomKey: "value",
+			},
+			Annotations: map[string]string{
+				ClusterCustomKey: "value",
+			},
+			Master: v1alpha1.MasterSpec{
+				Replicas:             3,
+				BaseImage:            "pingcap/dm",
+				MaxFailoverCount:     pointer.Int32Ptr(3),
+				StorageSize:          "1Gi",
+				ResourceRequirements: WithStorage(BurstableSmall, "1Gi"),
+				Config:               v1alpha1.NewMasterConfig(),
+				Service: &v1alpha1.MasterServiceSpec{
+					ServiceSpec: v1alpha1.ServiceSpec{
+						Type: corev1.ServiceTypeClusterIP,
+						Labels: map[string]string{
+							ComponentCustomKey: "value",
+						},
+						Annotations: map[string]string{
+							ComponentCustomKey: "value",
+						},
+					},
+				},
+				ComponentSpec: v1alpha1.ComponentSpec{
+					Affinity: buildAffinity(name, ns, v1alpha1.DMMasterMemberType),
+					Labels: map[string]string{
+						ComponentCustomKey: "value",
+					},
+					Annotations: map[string]string{
+						ComponentCustomKey: "value",
+					},
+				},
+			},
+			Worker: &v1alpha1.WorkerSpec{
+				Replicas:             3,
+				BaseImage:            "pingcap/dm",
+				MaxFailoverCount:     pointer.Int32Ptr(3),
+				ResourceRequirements: WithStorage(BurstableSmall, "1Gi"),
+				Config:               v1alpha1.NewWorkerConfig(),
+				ComponentSpec: v1alpha1.ComponentSpec{
+					Affinity: buildAffinity(name, ns, v1alpha1.DMWorkerMemberType),
+					Labels: map[string]string{
+						ComponentCustomKey: "value",
+					},
+					Annotations: map[string]string{
+						ComponentCustomKey: "value",
+					},
+				},
+			},
+		},
+	}
+}
+
+func UpdateTidbMonitorForDM(tm *v1alpha1.TidbMonitor, dc *v1alpha1.DMCluster) {
+	imagePullPolicy := *tm.Spec.Initializer.ImagePullPolicy
+	tm.Spec.ClusterScoped = true
+	tm.Spec.DM = &v1alpha1.DMMonitorSpec{
+		Clusters: []v1alpha1.ClusterRef{
+			{
+				Name:      dc.Name,
+				Namespace: dc.Namespace,
+			},
+		},
+		Initializer: v1alpha1.InitializerSpec{
+			MonitorContainer: v1alpha1.MonitorContainer{
+				BaseImage:            utilimage.TiDBMonitorInitializerImage,
+				Version:              utilimage.TiDBMonitorInitializerVersion,
+				ImagePullPolicy:      &imagePullPolicy,
+				ResourceRequirements: corev1.ResourceRequirements{},
+			},
+			Envs: map[string]string{},
 		},
 	}
 }
@@ -180,6 +331,12 @@ func GetTidbInitializer(ns, tcName, initName, initPassWDName, initTLSName string
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      initName,
 			Namespace: ns,
+			Labels: map[string]string{
+				ClusterCustomKey: "value",
+			},
+			Annotations: map[string]string{
+				ClusterCustomKey: "value",
+			},
 		},
 		Spec: v1alpha1.TidbInitializerSpec{
 			Image: "tnir/mysqlclient",
@@ -206,12 +363,23 @@ func NewTidbMonitor(name, namespace string, tc *v1alpha1.TidbCluster, grafanaEna
 					Namespace: tc.Namespace,
 				},
 			},
+			Labels: map[string]string{
+				ClusterCustomKey: "value",
+			},
+			Annotations: map[string]string{
+				ClusterCustomKey: "value",
+			},
 			Prometheus: v1alpha1.PrometheusSpec{
 				ReserveDays: 7,
 				LogLevel:    "info",
 				Service: v1alpha1.ServiceSpec{
-					Type:        "ClusterIP",
-					Annotations: map[string]string{},
+					Type: "ClusterIP",
+					Labels: map[string]string{
+						ComponentCustomKey: "value",
+					},
+					Annotations: map[string]string{
+						ComponentCustomKey: "value",
+					},
 				},
 				MonitorContainer: v1alpha1.MonitorContainer{
 					BaseImage:            utilimage.PrometheusImage,
@@ -228,8 +396,13 @@ func NewTidbMonitor(name, namespace string, tc *v1alpha1.TidbCluster, grafanaEna
 					ResourceRequirements: corev1.ResourceRequirements{},
 				},
 				Service: v1alpha1.ServiceSpec{
-					Type:        "ClusterIP",
-					Annotations: map[string]string{},
+					Type: "ClusterIP",
+					Labels: map[string]string{
+						ComponentCustomKey: "value",
+					},
+					Annotations: map[string]string{
+						ComponentCustomKey: "value",
+					},
 				},
 			},
 			Initializer: v1alpha1.InitializerSpec{
@@ -266,8 +439,13 @@ func NewTidbMonitor(name, namespace string, tc *v1alpha1.TidbCluster, grafanaEna
 			Username: "admin",
 			Password: "admin",
 			Service: v1alpha1.ServiceSpec{
-				Type:        corev1.ServiceTypeClusterIP,
-				Annotations: map[string]string{},
+				Type: corev1.ServiceTypeClusterIP,
+				Labels: map[string]string{
+					ComponentCustomKey: "value",
+				},
+				Annotations: map[string]string{
+					ComponentCustomKey: "value",
+				},
 			},
 			Envs: map[string]string{
 				"A":    "B",
@@ -284,14 +462,14 @@ func NewTidbMonitor(name, namespace string, tc *v1alpha1.TidbCluster, grafanaEna
 	return monitor
 }
 
-func GetBackupRole(tc *v1alpha1.TidbCluster, serviceAccountName string) *rbacv1beta1.Role {
-	return &rbacv1beta1.Role{
+func GetBackupRole(tc *v1alpha1.TidbCluster, serviceAccountName string) *rbacv1.Role {
+	return &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      serviceAccountName,
 			Namespace: tc.GetNamespace(),
 			Labels:    map[string]string{label.ComponentLabelKey: serviceAccountName},
 		},
-		Rules: []rbacv1beta1.PolicyRule{
+		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{""},
 				Resources: []string{"events"},
@@ -315,20 +493,20 @@ func GetBackupServiceAccount(tc *v1alpha1.TidbCluster, serviceAccountName string
 	}
 }
 
-func GetBackupRoleBinding(tc *v1alpha1.TidbCluster, serviceAccountName string) *rbacv1beta1.RoleBinding {
-	return &rbacv1beta1.RoleBinding{
+func GetBackupRoleBinding(tc *v1alpha1.TidbCluster, serviceAccountName string) *rbacv1.RoleBinding {
+	return &rbacv1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      serviceAccountName,
 			Namespace: tc.GetNamespace(),
 			Labels:    map[string]string{label.ComponentLabelKey: serviceAccountName},
 		},
-		Subjects: []rbacv1beta1.Subject{
+		Subjects: []rbacv1.Subject{
 			{
-				Kind: rbacv1beta1.ServiceAccountKind,
+				Kind: rbacv1.ServiceAccountKind,
 				Name: serviceAccountName,
 			},
 		},
-		RoleRef: rbacv1beta1.RoleRef{
+		RoleRef: rbacv1.RoleRef{
 			APIGroup: "rbac.authorization.k8s.io",
 			Kind:     "Role",
 			Name:     serviceAccountName,
@@ -376,23 +554,6 @@ func GetS3Secret(namespace, accessKey, secretKey string) *corev1.Secret {
 	}
 }
 
-func GetTidbClusterAutoScaler(name, ns string, tc *v1alpha1.TidbCluster, tm *v1alpha1.TidbMonitor) *v1alpha1.TidbClusterAutoScaler {
-	return &v1alpha1.TidbClusterAutoScaler{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: ns,
-		},
-		Spec: v1alpha1.TidbClusterAutoScalerSpec{
-			Cluster: v1alpha1.TidbClusterRef{
-				Name:      tc.Name,
-				Namespace: tc.Namespace,
-			},
-			TiKV: nil,
-			TiDB: nil,
-		},
-	}
-}
-
 const (
 	BRType     = "br"
 	DumperType = "dumper"
@@ -414,9 +575,9 @@ func GetBackupCRDWithS3(tc *v1alpha1.TidbCluster, fromSecretName, brType string,
 				S3: s3config,
 			},
 			From: &v1alpha1.TiDBAccessConfig{
-				Host:       util.GetTidbServiceName(tc.Name),
+				Host:       controller.TiDBMemberName(tc.Name),
 				SecretName: fromSecretName,
-				Port:       4000,
+				Port:       v1alpha1.DefaultTiDBServerPort,
 				User:       "root",
 			},
 			BR: &v1alpha1.BRConfig{
@@ -450,9 +611,9 @@ func GetRestoreCRDWithS3(tc *v1alpha1.TidbCluster, toSecretName, restoreType str
 				S3: s3config,
 			},
 			To: &v1alpha1.TiDBAccessConfig{
-				Host:       util.GetTidbServiceName(tc.Name),
+				Host:       controller.TiDBMemberName(tc.Name),
 				SecretName: toSecretName,
-				Port:       4000,
+				Port:       v1alpha1.DefaultTiDBServerPort,
 				User:       "root",
 			},
 			BR: &v1alpha1.BRConfig{
@@ -468,6 +629,71 @@ func GetRestoreCRDWithS3(tc *v1alpha1.TidbCluster, toSecretName, restoreType str
 		restore.Spec.S3.Path = fmt.Sprintf("s3://%s/%s", s3config.Bucket, s3config.Path)
 	}
 	return restore
+}
+
+func GetTidbDashboard(ns, name string, tc *v1alpha1.TidbCluster) *v1alpha1.TidbDashboard {
+	deletePVC := corev1.PersistentVolumeReclaimDelete
+	version := utilimage.TiDBLatest
+
+	td := &v1alpha1.TidbDashboard{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: ns,
+		},
+		Spec: v1alpha1.TidbDashboardSpec{
+			Clusters: []v1alpha1.TidbClusterRef{
+				{
+					Name:      tc.Name,
+					Namespace: tc.Namespace,
+				},
+			},
+			ComponentSpec: v1alpha1.ComponentSpec{
+				Version: &version,
+			},
+			// FIXME(@sabaping): use pingcap/tidb-dashboard after dashboard cicd ready.
+			BaseImage:            "sabaping/tidb-dashboard",
+			ResourceRequirements: WithStorage(BurstableSmall, "1Gi"),
+			PVReclaimPolicy:      &deletePVC,
+		},
+	}
+
+	return td
+}
+
+func GetTidbNGMonitoring(ns, name string, tc *v1alpha1.TidbCluster) *v1alpha1.TidbNGMonitoring {
+	deletePVP := corev1.PersistentVolumeReclaimDelete
+	version := utilimage.TiDBNGMonitoringLatest
+	cfgUpdateStrategy := v1alpha1.ConfigUpdateStrategyRollingUpdate
+
+	tngm := &v1alpha1.TidbNGMonitoring{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: ns,
+		},
+		Spec: v1alpha1.TidbNGMonitoringSpec{
+			Clusters: []v1alpha1.TidbClusterRef{
+				{
+					Name:      tc.Name,
+					Namespace: tc.Namespace,
+				},
+			},
+
+			ComponentSpec: v1alpha1.ComponentSpec{
+				ConfigUpdateStrategy: &cfgUpdateStrategy,
+			},
+			PVReclaimPolicy: &deletePVP,
+			NGMonitoring: v1alpha1.NGMonitoringSpec{
+				ComponentSpec: v1alpha1.ComponentSpec{
+					Version: &version,
+				},
+
+				BaseImage:            "pingcap/ng-monitoring",
+				ResourceRequirements: WithStorage(BurstableSmall, "1Gi"),
+			},
+		},
+	}
+
+	return tngm
 }
 
 func AddTiFlashForTidbCluster(tc *v1alpha1.TidbCluster) *v1alpha1.TidbCluster {
@@ -494,6 +720,11 @@ func AddTiCDCForTidbCluster(tc *v1alpha1.TidbCluster) *v1alpha1.TidbCluster {
 	tc.Spec.TiCDC = &v1alpha1.TiCDCSpec{
 		BaseImage: "pingcap/ticdc",
 		Replicas:  1,
+		Config: func() *v1alpha1.CDCConfigWraper {
+			cfg := v1alpha1.NewCDCConfig()
+			cfg.SetIfNil("log-file", "") // to avoid rolling upgrade due to PR #4494 when upgrading operator
+			return cfg
+		}(),
 	}
 	return tc
 }
@@ -539,11 +770,40 @@ func AddPumpForTidbCluster(tc *v1alpha1.TidbCluster) *v1alpha1.TidbCluster {
 			},
 		},
 		Config: tcconfig.New(map[string]interface{}{
-			"addr":               "0.0.0.0:8250",
+			"addr":               fmt.Sprintf("0.0.0.0:%d", v1alpha1.DefaultPumpPort),
 			"gc":                 7,
 			"data-dir":           "/data",
 			"heartbeat-interval": 2,
 		}),
 	}
+	return tc
+}
+
+const (
+	tsoService        = "tso"
+	schedulingService = "scheduling"
+)
+
+func AddPDMSForTidbCluster(tc *v1alpha1.TidbCluster) *v1alpha1.TidbCluster {
+	tc.Spec.PD.Mode = "ms"
+	if tc.Spec.PDMS != nil {
+		return tc
+	}
+	pdmsImage := "pingcap/pd"
+	tc.Spec.PDMS = []*v1alpha1.PDMSSpec{
+		{
+			Name:                 tsoService,
+			BaseImage:            &pdmsImage,
+			Replicas:             2,
+			ResourceRequirements: WithStorage(BurstableSmall, "10Gi"),
+		},
+		{
+			Name:                 schedulingService,
+			BaseImage:            &pdmsImage,
+			Replicas:             1,
+			ResourceRequirements: WithStorage(BurstableSmall, "10Gi"),
+		},
+	}
+
 	return tc
 }

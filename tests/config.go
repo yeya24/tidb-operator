@@ -24,9 +24,8 @@ import (
 	utiloperator "github.com/pingcap/tidb-operator/tests/e2e/util/operator"
 	"github.com/pingcap/tidb-operator/tests/pkg/blockwriter"
 	"github.com/pingcap/tidb-operator/tests/slack"
+	"github.com/pingcap/tidb-operator/tests/third_party/k8s/log"
 	"gopkg.in/yaml.v2"
-
-	"k8s.io/kubernetes/test/e2e/framework/log"
 )
 
 const (
@@ -42,6 +41,7 @@ type Config struct {
 
 	TidbVersions         string          `yaml:"tidb_versions" json:"tidb_versions"`
 	InstallOperator      bool            `yaml:"install_opeartor" json:"install_opeartor"`
+	InstallDMMysql       bool            `yaml:"install_dm_mysql" json:"install_dm_mysql"`
 	OperatorTag          string          `yaml:"operator_tag" json:"operator_tag"`
 	OperatorImage        string          `yaml:"operator_image" json:"operator_image"`
 	BackupImage          string          `yaml:"backup_image" json:"backup_image"`

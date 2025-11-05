@@ -15,12 +15,24 @@ package member
 
 import (
 	"fmt"
+	"strconv"
 
-	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
+	mngerutils "github.com/pingcap/tidb-operator/pkg/manager/utils"
+	"github.com/pingcap/tidb-operator/pkg/third_party/k8s"
+
+	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
 	apps "k8s.io/api/apps/v1"
-	"k8s.io/klog"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
+)
+
+const (
+	// TODO: change to use minReadySeconds in sts spec
+	// See https://kubernetes.io/blog/2021/08/27/minreadyseconds-statefulsets/
+	annoKeyTiDBMinReadySeconds = "tidb.pingcap.com/tidb-min-ready-seconds"
 )
 
 type tidbUpgrader struct {
@@ -44,16 +56,15 @@ func (u *tidbUpgrader) Upgrade(tc *v1alpha1.TidbCluster, oldSet *apps.StatefulSe
 	ns := tc.GetNamespace()
 	tcName := tc.GetName()
 
-	if tc.Status.TiCDC.Phase == v1alpha1.UpgradePhase ||
-		tc.Status.PD.Phase == v1alpha1.UpgradePhase ||
-		tc.Status.TiKV.Phase == v1alpha1.UpgradePhase ||
-		tc.Status.TiFlash.Phase == v1alpha1.UpgradePhase ||
-		tc.Status.Pump.Phase == v1alpha1.UpgradePhase ||
+	if tc.Status.PD.Phase == v1alpha1.UpgradePhase || tc.Status.PD.Phase == v1alpha1.ScalePhase ||
+		tc.Status.TiKV.Phase == v1alpha1.UpgradePhase || tc.Status.TiKV.Phase == v1alpha1.ScalePhase ||
+		tc.Status.TiFlash.Phase == v1alpha1.UpgradePhase || tc.Status.TiFlash.Phase == v1alpha1.ScalePhase ||
+		tc.Status.Pump.Phase == v1alpha1.UpgradePhase || tc.Status.Pump.Phase == v1alpha1.ScalePhase ||
 		tc.TiDBScaling() {
-		klog.Infof("TidbCluster: [%s/%s]'s ticdc status is %s, pd status is %s, "+
+		klog.Infof("TidbCluster: [%s/%s]'s pd status is %s, "+
 			"tikv status is %s, tiflash status is %s, pump status is %s, "+
 			"tidb status is %s, can not upgrade tidb",
-			ns, tcName, tc.Status.TiCDC.Phase,
+			ns, tcName,
 			tc.Status.PD.Phase, tc.Status.TiKV.Phase, tc.Status.TiFlash.Phase,
 			tc.Status.Pump.Phase, tc.Status.TiDB.Phase)
 		_, podSpec, err := GetLastAppliedConfig(oldSet)
@@ -69,10 +80,6 @@ func (u *tidbUpgrader) Upgrade(tc *v1alpha1.TidbCluster, oldSet *apps.StatefulSe
 		return nil
 	}
 
-	if tc.Status.TiDB.StatefulSet.UpdateRevision == tc.Status.TiDB.StatefulSet.CurrentRevision {
-		return nil
-	}
-
 	if oldSet.Spec.UpdateStrategy.Type == apps.OnDeleteStatefulSetStrategyType || oldSet.Spec.UpdateStrategy.RollingUpdate == nil {
 		// Manually bypass tidb-operator to modify statefulset directly, such as modify tidb statefulset's RollingUpdate strategy to OnDelete strategy,
 		// or set RollingUpdate to nil, skip tidb-operator's rolling update logic in order to speed up the upgrade in the test environment occasionally.
@@ -83,7 +90,18 @@ func (u *tidbUpgrader) Upgrade(tc *v1alpha1.TidbCluster, oldSet *apps.StatefulSe
 		return nil
 	}
 
-	setUpgradePartition(newSet, *oldSet.Spec.UpdateStrategy.RollingUpdate.Partition)
+	minReadySeconds := 0
+	s, ok := tc.Annotations[annoKeyTiDBMinReadySeconds]
+	if ok {
+		i, err := strconv.Atoi(s)
+		if err != nil {
+			klog.Warningf("tidbcluster: [%s/%s] annotation %s should be an integer: %v", ns, tcName, annoKeyTiDBMinReadySeconds, err)
+		} else {
+			minReadySeconds = i
+		}
+	}
+
+	mngerutils.SetUpgradePartition(newSet, *oldSet.Spec.UpdateStrategy.RollingUpdate.Partition)
 	podOrdinals := helper.GetPodOrdinals(*oldSet.Spec.Replicas, oldSet).List()
 	for _i := len(podOrdinals) - 1; _i >= 0; _i-- {
 		i := podOrdinals[_i]
@@ -98,6 +116,14 @@ func (u *tidbUpgrader) Upgrade(tc *v1alpha1.TidbCluster, oldSet *apps.StatefulSe
 		}
 
 		if revision == tc.Status.TiDB.StatefulSet.UpdateRevision {
+			if !k8s.IsPodAvailable(pod, int32(minReadySeconds), metav1.Now()) {
+				readyCond := k8s.GetPodReadyCondition(pod.Status)
+				if readyCond == nil || readyCond.Status != corev1.ConditionTrue {
+					return controller.RequeueErrorf("tidbcluster: [%s/%s]'s upgraded tidb pod: [%s] is not ready", ns, tcName, podName)
+
+				}
+				return controller.RequeueErrorf("tidbcluster: [%s/%s]'s upgraded tidb pod: [%s] is not available, last transition time is %v", ns, tcName, podName, readyCond.LastTransitionTime)
+			}
 			if member, exist := tc.Status.TiDB.Members[podName]; !exist || !member.Health {
 				return controller.RequeueErrorf("tidbcluster: [%s/%s]'s tidb upgraded pod: [%s] is not ready", ns, tcName, podName)
 			}
@@ -110,7 +136,7 @@ func (u *tidbUpgrader) Upgrade(tc *v1alpha1.TidbCluster, oldSet *apps.StatefulSe
 }
 
 func (u *tidbUpgrader) upgradeTiDBPod(tc *v1alpha1.TidbCluster, ordinal int32, newSet *apps.StatefulSet) error {
-	setUpgradePartition(newSet, ordinal)
+	mngerutils.SetUpgradePartition(newSet, ordinal)
 	return nil
 }
 

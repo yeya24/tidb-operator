@@ -14,17 +14,23 @@
 package statefulset
 
 import (
+	"context"
+	"fmt"
 	"regexp"
 	"strconv"
 
-	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
-	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
-	"k8s.io/kubernetes/test/e2e/framework/log"
+	typedappsv1 "k8s.io/client-go/kubernetes/typed/apps/v1"
+
+	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
+	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+	"github.com/pingcap/tidb-operator/pkg/third_party/k8s"
+	"github.com/pingcap/tidb-operator/tests/third_party/k8s/log"
 )
 
 var statefulPodRegex = regexp.MustCompile("(.*)-([0-9]+)$")
@@ -59,13 +65,55 @@ func IsAllDesiredPodsRunningAndReady(c kubernetes.Interface, sts *appsv1.Statefu
 		return false
 	}
 	for _, pod := range actualPodList.Items {
-		if !podutil.IsPodReady(&pod) {
-			log.Logf("pod %s of sts %s/%s is not ready, got: %v", pod.Name, sts.Namespace, sts.Name, podutil.GetPodReadyCondition(pod.Status))
+		if !k8s.IsPodReady(&pod) {
+			log.Logf("pod %s of sts %s/%s is not ready, got: %v", pod.Name, sts.Namespace, sts.Name, k8s.GetPodReadyCondition(pod.Status))
 			return false
 		}
 	}
 	// log.Logf("desired pods of sts %s/%s are running and ready (%v)", sts.Namespace, sts.Name, actualPodOrdinals.List())
 	return true
+}
+
+// GetMemberContainersFromSts returns the member containers of the sts.
+//
+// If no container is found, return a error.
+func GetMemberContainersFromSts(cli kubernetes.Interface, stsGetter typedappsv1.StatefulSetsGetter, namespace, stsName string, component v1alpha1.MemberType) ([]corev1.Container, error) {
+	sts, err := stsGetter.StatefulSets(namespace).Get(context.TODO(), stsName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get sts %s/%s: %v", namespace, stsName, err)
+	}
+
+	listOption := metav1.ListOptions{
+		LabelSelector: labels.SelectorFromSet(sts.Spec.Selector.MatchLabels).String(),
+	}
+	podList, err := cli.CoreV1().Pods(sts.Namespace).List(context.TODO(), listOption)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list pods of sts %s/%s: %v", namespace, stsName, err)
+	}
+	if len(podList.Items) == 0 {
+		return nil, fmt.Errorf("no pod found of sts %s/%s", namespace, stsName)
+	}
+
+	containers := getContainersFromPods(podList.Items, string(component))
+	if len(containers) == 0 {
+		return nil, fmt.Errorf("no container %q found of sts %s/%s", component, namespace, stsName)
+	}
+
+	return containers, nil
+}
+
+func getContainersFromPods(pods []corev1.Pod, containerName string) []corev1.Container {
+	containers := []corev1.Container{}
+
+	for _, pod := range pods {
+		for _, c := range pod.Spec.Containers {
+			if c.Name == containerName {
+				containers = append(containers, c)
+			}
+		}
+	}
+
+	return containers
 }
 
 // GetPodList gets the current Pods in ss.
@@ -75,6 +123,6 @@ func getPodList(c kubernetes.Interface, ss *appsv1.StatefulSet) (*corev1.PodList
 	if err != nil {
 		return nil, err
 	}
-	podList, err := c.CoreV1().Pods(ss.Namespace).List(metav1.ListOptions{LabelSelector: selector.String()})
+	podList, err := c.CoreV1().Pods(ss.Namespace).List(context.TODO(), metav1.ListOptions{LabelSelector: selector.String()})
 	return podList, err
 }

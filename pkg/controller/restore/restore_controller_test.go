@@ -21,9 +21,8 @@ import (
 
 	. "github.com/onsi/gomega"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
-	"github.com/pingcap/tidb-operator/pkg/backup/constants"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
@@ -48,22 +47,26 @@ func TestRestoreControllerEnqueueRestoreFailed(t *testing.T) {
 func TestRestoreControllerUpdateRestore(t *testing.T) {
 	g := NewGomegaWithT(t)
 
-	// create a pod with failed status in the pod informer.
-	createFailedPod := func(g *GomegaWithT, rtc *Controller, restore *v1alpha1.Restore) {
-		pod := &corev1.Pod{
+	// create a job with failed status in the job informer.
+	createFailedJob := func(g *GomegaWithT, rtc *Controller, restore *v1alpha1.Restore) {
+		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      restore.Name,
+				Name:      restore.GetRestoreJobName(),
 				Namespace: restore.Namespace,
-				Labels:    label.NewRestore().Instance(restore.GetInstanceName()).RestoreJob().Restore(restore.Name),
 			},
-			Status: corev1.PodStatus{
-				Phase: corev1.PodFailed,
+			Status: batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{
+					{
+						Type:   batchv1.JobFailed,
+						Status: corev1.ConditionTrue,
+					},
+				},
 			},
 		}
-		_, err := rtc.deps.KubeClientset.CoreV1().Pods(restore.Namespace).Create(pod)
+		_, err := rtc.deps.KubeClientset.BatchV1().Jobs(restore.Namespace).Create(context.TODO(), job, metav1.CreateOptions{})
 		g.Expect(err).To(Succeed())
 		rtc.deps.KubeInformerFactory.Start(context.TODO().Done())
-		cache.WaitForCacheSync(context.TODO().Done(), rtc.deps.KubeInformerFactory.Core().V1().Pods().Informer().HasSynced)
+		cache.WaitForCacheSync(context.TODO().Done(), rtc.deps.KubeInformerFactory.Batch().V1().Jobs().Informer().HasSynced)
 	}
 
 	updatingToFail := func(g *GomegaWithT, rtc *Controller, restore *v1alpha1.Restore) {
@@ -119,7 +122,7 @@ func TestRestoreControllerUpdateRestore(t *testing.T) {
 		{
 			name:           "restore has been scheduled with failed pod",
 			conditionType:  v1alpha1.RestoreScheduled,
-			beforeUpdateFn: createFailedPod,
+			beforeUpdateFn: createFailedJob,
 			expectFn: func(g *GomegaWithT, rtc *Controller) {
 				g.Expect(rtc.queue.Len()).To(Equal(0))
 			},
@@ -128,7 +131,16 @@ func TestRestoreControllerUpdateRestore(t *testing.T) {
 		{
 			name:           "restore has been running with failed pod",
 			conditionType:  v1alpha1.RestoreRunning,
-			beforeUpdateFn: createFailedPod,
+			beforeUpdateFn: createFailedJob,
+			expectFn: func(g *GomegaWithT, rtc *Controller) {
+				g.Expect(rtc.queue.Len()).To(Equal(0))
+			},
+			afterUpdateFn: updatingToFail,
+		},
+		{
+			name:           "restore has been tikv complete with failed pod",
+			conditionType:  v1alpha1.RestoreTiKVComplete,
+			beforeUpdateFn: createFailedJob,
 			expectFn: func(g *GomegaWithT, rtc *Controller) {
 				g.Expect(rtc.queue.Len()).To(Equal(0))
 			},
@@ -268,8 +280,8 @@ func newRestore() *v1alpha1.Restore {
 		Spec: v1alpha1.RestoreSpec{
 			To: &v1alpha1.TiDBAccessConfig{
 				Host:       "10.1.1.2",
-				Port:       constants.DefaultTidbPort,
-				User:       constants.DefaultTidbUser,
+				Port:       v1alpha1.DefaultTiDBServerPort,
+				User:       v1alpha1.DefaultTidbUser,
 				SecretName: "demo1-tidb-secret",
 			},
 			StorageProvider: v1alpha1.StorageProvider{

@@ -16,12 +16,13 @@ package meta
 import (
 	"fmt"
 
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
 	"github.com/pingcap/tidb-operator/pkg/manager"
 	"github.com/pingcap/tidb-operator/pkg/util"
-	"k8s.io/klog"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/klog/v2"
 )
 
 type metaManager struct {
@@ -55,14 +56,29 @@ func (m *metaManager) Sync(tc *v1alpha1.TidbCluster) error {
 			return err
 		}
 
-		if component := pod.Labels[label.ComponentLabelKey]; component != label.PDLabelVal && component != label.TiKVLabelVal && component != label.TiFlashLabelVal {
+		var mustUsePV bool
+		switch pod.Labels[label.ComponentLabelKey] {
+		case label.PDLabelVal,
+			label.TiKVLabelVal,
+			label.TiFlashLabelVal,
+			label.PumpLabelVal:
+			// Currently PD/TiKV/TiFlash/Pump must uses PV
+			mustUsePV = true
+		case label.TiDBLabelVal,
+			label.TiCDCLabelVal:
+			// Currently TiDB/TiCDC maybe uses PV
+			mustUsePV = false
+		default:
 			// Skip syncing meta info for pod that doesn't use PV
-			// Currently only PD/TiKV/TiFlash uses PV
 			continue
 		}
+
 		// update meta info for pvc
 		pvcs, err := util.ResolvePVCFromPod(pod, m.deps.PVCLister)
 		if err != nil {
+			if errors.IsNotFound(err) && !mustUsePV {
+				continue
+			}
 			return err
 		}
 		for _, pvc := range pvcs {

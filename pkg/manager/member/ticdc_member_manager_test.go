@@ -19,9 +19,11 @@ import (
 	"testing"
 
 	. "github.com/onsi/gomega"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
+	"github.com/pingcap/tidb-operator/pkg/manager/suspender"
+	"github.com/pingcap/tidb-operator/pkg/manager/volumes"
 	"github.com/pingcap/tidb-operator/pkg/pdapi"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -36,10 +38,11 @@ import (
 func TestTiCDCMemberManagerSyncCreate(t *testing.T) {
 	g := NewGomegaWithT(t)
 	type testcase struct {
-		name    string
-		errSync bool
-		err     bool
-		tls     bool
+		name             string
+		errSync          bool
+		err              bool
+		tls              bool
+		suspendComponent func() (bool, error)
 	}
 
 	testFn := func(test *testcase, t *testing.T) {
@@ -56,6 +59,11 @@ func TestTiCDCMemberManagerSyncCreate(t *testing.T) {
 
 		if test.errSync {
 			fakeSetControl.SetCreateStatefulSetError(errors.NewInternalError(fmt.Errorf("API server failed")), 0)
+		}
+		if test.suspendComponent != nil {
+			tmm.suspender.(*suspender.FakeSuspender).SuspendComponentFunc = func(c v1alpha1.Cluster, mt v1alpha1.MemberType) (bool, error) {
+				return test.suspendComponent()
+			}
 		}
 
 		err := tmm.Sync(tc)
@@ -84,6 +92,12 @@ func TestTiCDCMemberManagerSyncCreate(t *testing.T) {
 			name:    "error when sync",
 			errSync: true,
 			err:     true,
+		},
+		{
+			name:             "skip create when suspend",
+			suspendComponent: func() (bool, error) { return true, nil },
+			errSync:          true,
+			err:              false,
 		},
 	}
 
@@ -166,7 +180,7 @@ func TestTiCDCMemberManagerSyncUpdate(t *testing.T) {
 			status:  v1alpha1.NormalPhase,
 			expectStatefulSetFn: func(g *GomegaWithT, set *apps.StatefulSet, err error) {
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(int(*set.Spec.Replicas)).To(Equal(5))
+				g.Expect(int(*set.Spec.Replicas)).To(Equal(4)) // scale out one-by-one now
 			},
 		},
 		{
@@ -294,13 +308,14 @@ func TestTiCDCMemberManagerTiCDCStatefulSetIsUpgrading(t *testing.T) {
 func TestTiCDCMemberManagerSyncTidbClusterStatus(t *testing.T) {
 	g := NewGomegaWithT(t)
 	type testcase struct {
-		name        string
-		updateTC    func(*v1alpha1.TidbCluster)
-		updateSts   func(*apps.StatefulSet)
-		upgradingFn func(corelisters.PodLister, pdapi.PDControlInterface, *apps.StatefulSet, *v1alpha1.TidbCluster) (bool, error)
-		healthInfo  map[string]bool
-		errExpectFn func(*GomegaWithT, error)
-		tcExpectFn  func(*GomegaWithT, *v1alpha1.TidbCluster)
+		name             string
+		updateTC         func(*v1alpha1.TidbCluster)
+		updateSts        func(*apps.StatefulSet)
+		upgradingFn      func(corelisters.PodLister, pdapi.PDControlInterface, *apps.StatefulSet, *v1alpha1.TidbCluster) (bool, error)
+		healthInfo       map[string]bool
+		beforeSyncStatus func(tc *v1alpha1.TidbCluster, pmm *ticdcMemberManager, indexer *fakeIndexers)
+		errExpectFn      func(*GomegaWithT, error)
+		tcExpectFn       func(*GomegaWithT, *v1alpha1.TidbCluster)
 	}
 	spec := apps.StatefulSetSpec{
 		Replicas: pointer.Int32Ptr(3),
@@ -322,13 +337,17 @@ func TestTiCDCMemberManagerSyncTidbClusterStatus(t *testing.T) {
 		if test.updateSts != nil {
 			test.updateSts(set)
 		}
-		pmm, _, tidbControl, _ := newFakeTiCDCMemberManager()
+		pmm, _, tidbControl, indexers := newFakeTiCDCMemberManager()
 
 		if test.upgradingFn != nil {
 			pmm.statefulSetIsUpgradingFn = test.upgradingFn
 		}
 		if test.healthInfo != nil {
 			tidbControl.SetHealth(test.healthInfo)
+		}
+
+		if test.beforeSyncStatus != nil {
+			test.beforeSyncStatus(tc, pmm, indexers)
 		}
 
 		err := pmm.syncTiCDCStatus(tc, set)
@@ -398,6 +417,95 @@ func TestTiCDCMemberManagerSyncTidbClusterStatus(t *testing.T) {
 				g.Expect(tc.Status.TiCDC.StatefulSet.Replicas).To(Equal(int32(0)))
 			},
 		},
+		{
+			name:     "pod 1 isn't existing",
+			updateTC: nil,
+			updateSts: func(sts *apps.StatefulSet) {
+				sts.Status = apps.StatefulSetStatus{
+					Replicas: 3,
+				}
+			},
+			beforeSyncStatus: func(tc *v1alpha1.TidbCluster, m *ticdcMemberManager, indexer *fakeIndexers) {
+				// mock pods
+				for i := int32(0); i < 3; i++ {
+					if i == 1 {
+						continue
+					}
+					indexer.pod.Add(&corev1.Pod{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      ordinalPodName(v1alpha1.TiCDCMemberType, tc.GetName(), i),
+							Namespace: metav1.NamespaceDefault,
+							Labels:    label.New().Instance(tc.GetInstanceName()).TiCDC().Labels(),
+						},
+					})
+				}
+
+				// mock status of captures
+				cdcControl := m.deps.CDCControl.(*controller.FakeTiCDCControl)
+				cdcControl.GetStatusFn = func(tc *v1alpha1.TidbCluster, ordinal int32) (*controller.CaptureStatus, error) {
+					return &controller.CaptureStatus{}, nil
+				}
+			},
+			tcExpectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster) {
+				// check status of statefulset
+				g.Expect(tc.Status.TiCDC.StatefulSet.Replicas).To(Equal(int32(3)))
+				// check status of captures
+				g.Expect(tc.Status.TiCDC.Captures).To(HaveLen(2))
+				for podName, capture := range tc.Status.TiCDC.Captures {
+					g.Expect(podName).NotTo(Equal(ordinalPodName(v1alpha1.TiCDCMemberType, tc.GetName(), 1)))
+					g.Expect(capture.Ready).To(BeTrue())
+				}
+				// check synced
+				g.Expect(tc.Status.TiCDC.Synced).To(BeFalse())
+			},
+		},
+		{
+			name:     "capture 1 is unready",
+			updateTC: nil,
+			updateSts: func(sts *apps.StatefulSet) {
+				sts.Status = apps.StatefulSetStatus{
+					Replicas: 3,
+				}
+			},
+			beforeSyncStatus: func(tc *v1alpha1.TidbCluster, m *ticdcMemberManager, indexer *fakeIndexers) {
+				// mock pods
+				for i := int32(0); i < 3; i++ {
+					indexer.pod.Add(&corev1.Pod{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      ordinalPodName(v1alpha1.TiCDCMemberType, tc.GetName(), i),
+							Namespace: metav1.NamespaceDefault,
+							Labels:    label.New().Instance(tc.GetInstanceName()).TiCDC().Labels(),
+						},
+					})
+				}
+
+				// mock status of captures
+				cdcControl := m.deps.CDCControl.(*controller.FakeTiCDCControl)
+				cdcControl.GetStatusFn = func(tc *v1alpha1.TidbCluster, ordinal int32) (*controller.CaptureStatus, error) {
+					if ordinal == 1 {
+						return nil, fmt.Errorf("mock err")
+					}
+
+					return &controller.CaptureStatus{}, nil
+				}
+			},
+			errExpectFn: errExpectNil,
+			tcExpectFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster) {
+				// check status of statefulset
+				g.Expect(tc.Status.TiCDC.StatefulSet.Replicas).To(Equal(int32(3)))
+				// check status of captures
+				g.Expect(tc.Status.TiCDC.Captures).To(HaveLen(3))
+				for podName, capture := range tc.Status.TiCDC.Captures {
+					if podName == ordinalPodName(v1alpha1.TiCDCMemberType, tc.GetName(), 1) {
+						g.Expect(capture.Ready).To(BeFalse())
+					} else {
+						g.Expect(capture.Ready).To(BeTrue())
+					}
+				}
+				// check synced
+				g.Expect(tc.Status.TiCDC.Synced).To(BeFalse())
+			},
+		},
 	}
 
 	for i := range tests {
@@ -406,10 +514,91 @@ func TestTiCDCMemberManagerSyncTidbClusterStatus(t *testing.T) {
 	}
 }
 
+func TestGetNewTiCDCStatefulSet(t *testing.T) {
+	tests := []struct {
+		name    string
+		tc      v1alpha1.TidbCluster
+		testSts func(sts *apps.StatefulSet)
+	}{
+		{
+			name: "TiCDC spec storageVolumes",
+			tc: v1alpha1.TidbCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tc",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.TidbClusterSpec{
+					TiCDC: &v1alpha1.TiCDCSpec{StorageVolumes: []v1alpha1.StorageVolume{
+						{
+							Name:        "sort-dir",
+							StorageSize: "2Gi",
+							MountPath:   "/var/lib/sort-dir",
+						},
+					}},
+				},
+			},
+			testSts: func(sts *apps.StatefulSet) {
+				g := NewGomegaWithT(t)
+				q, _ := resource.ParseQuantity("2Gi")
+				g.Expect(sts.Spec.VolumeClaimTemplates).To(Equal([]corev1.PersistentVolumeClaim{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: v1alpha1.TiCDCMemberType.String() + "-sort-dir",
+						},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{
+								corev1.ReadWriteOnce,
+							},
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: q,
+								},
+							},
+						},
+					},
+				}))
+				index := 0
+				g.Expect(sts.Spec.Template.Spec.Containers[0].VolumeMounts[index]).To(Equal(corev1.VolumeMount{
+					Name:      fmt.Sprintf("%s-%s", v1alpha1.TiCDCMemberType, "sort-dir"),
+					MountPath: "/var/lib/sort-dir",
+				}))
+			},
+		},
+		{
+			name: "TiCDC additional volumes",
+			tc: v1alpha1.TidbCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tc",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.TidbClusterSpec{
+					TiCDC: &v1alpha1.TiCDCSpec{
+						ComponentSpec: v1alpha1.ComponentSpec{
+							AdditionalVolumes: []corev1.Volume{{Name: "test", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+						},
+					},
+				},
+			},
+			testSts: testAdditionalVolumes(t, []corev1.Volume{{Name: "test", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}),
+		},
+	}
+
+	for i := range tests {
+		tt := tests[i]
+		t.Run(tt.name, func(t *testing.T) {
+			sts, _ := getNewTiCDCStatefulSet(&tt.tc, nil)
+			tt.testSts(sts)
+		})
+	}
+}
+
 func newFakeTiCDCMemberManager() (*ticdcMemberManager, *controller.FakeStatefulSetControl, *controller.FakeTiDBControl, *fakeIndexers) {
 	fakeDeps := controller.NewFakeDependencies()
 	tmm := &ticdcMemberManager{
-		deps: fakeDeps,
+		deps:              fakeDeps,
+		scaler:            NewTiCDCScaler(fakeDeps),
+		suspender:         suspender.NewFakeSuspender(),
+		podVolumeModifier: &volumes.FakePodVolumeModifier{},
 	}
 	tmm.statefulSetIsUpgradingFn = ticdcStatefulSetIsUpgrading
 	indexers := &fakeIndexers{

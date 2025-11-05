@@ -21,15 +21,16 @@ import (
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/backup/backupschedule"
 	"github.com/pingcap/tidb-operator/pkg/controller"
+	"github.com/pingcap/tidb-operator/pkg/metrics"
 	"k8s.io/apimachinery/pkg/api/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
-// Controller controls restore.
+// Controller controls backupSchedules.
 type Controller struct {
 	deps *controller.Dependencies
 	// control returns an interface capable of syncing a restore.
@@ -39,7 +40,7 @@ type Controller struct {
 	queue workqueue.RateLimitingInterface
 }
 
-// NewController creates a backup schedule controller.
+// NewController creates a backupSchedule controller.
 func NewController(deps *controller.Dependencies) *Controller {
 	c := &Controller{
 		deps:    deps,
@@ -60,6 +61,11 @@ func NewController(deps *controller.Dependencies) *Controller {
 	})
 
 	return c
+}
+
+// Name returns backup controller name.
+func (c *Controller) Name() string {
+	return "backup"
 }
 
 // Run runs the backup schedule controller.
@@ -86,6 +92,9 @@ func (c *Controller) worker() {
 // processNextWorkItem dequeues items, processes them, and marks them done. It enforces that the syncHandler is never
 // invoked concurrently with the same key.
 func (c *Controller) processNextWorkItem() bool {
+	metrics.ActiveWorkers.WithLabelValues(c.Name()).Add(1)
+	defer metrics.ActiveWorkers.WithLabelValues(c.Name()).Add(-1)
+
 	key, quit := c.queue.Get()
 	if quit {
 		return false
@@ -108,10 +117,22 @@ func (c *Controller) processNextWorkItem() bool {
 }
 
 // sync syncs the given backupSchedule.
-func (c *Controller) sync(key string) error {
+func (c *Controller) sync(key string) (err error) {
 	startTime := time.Now()
 	defer func() {
-		klog.V(4).Infof("Finished syncing BackupSchedule %q (%v)", key, time.Since(startTime))
+		duration := time.Since(startTime)
+		metrics.ReconcileTime.WithLabelValues(c.Name()).Observe(duration.Seconds())
+
+		if err == nil {
+			metrics.ReconcileTotal.WithLabelValues(c.Name(), metrics.LabelSuccess).Inc()
+		} else if perrors.Find(err, controller.IsRequeueError) != nil {
+			metrics.ReconcileTotal.WithLabelValues(c.Name(), metrics.LabelRequeue).Inc()
+		} else {
+			metrics.ReconcileTotal.WithLabelValues(c.Name(), metrics.LabelError).Inc()
+			metrics.ReconcileErrors.WithLabelValues(c.Name()).Inc()
+		}
+
+		klog.V(4).Infof("Finished syncing BackupSchedule %q (%v)", key, duration)
 	}()
 
 	ns, name, err := cache.SplitMetaNamespaceKey(key)

@@ -16,13 +16,16 @@ package v1alpha1
 import (
 	"fmt"
 
-	"github.com/pingcap/tidb-operator/pkg/label"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // GetRestoreJobName return the restore job name
 func (rs *Restore) GetRestoreJobName() string {
+	if IsRestoreVolumeComplete(rs) && !IsRestoreDataComplete(rs) {
+		return fmt.Sprintf("restore-data-%s", rs.GetName())
+	}
 	return fmt.Sprintf("restore-%s", rs.GetName())
 }
 
@@ -63,11 +66,13 @@ func GetRestoreCondition(status *RestoreStatus, conditionType RestoreConditionTy
 // one. Sets LastTransitionTime to now if the status has changed.
 // Returns true if Restore condition has changed or has been added.
 func UpdateRestoreCondition(status *RestoreStatus, condition *RestoreCondition) bool {
+	if condition == nil {
+		return false
+	}
 	condition.LastTransitionTime = metav1.Now()
+	status.Phase = condition.Type
 	// Try to find this Restore condition.
 	conditionIndex, oldCondition := GetRestoreCondition(status, condition.Type)
-
-	status.Phase = condition.Type
 
 	if oldCondition == nil {
 		// We are adding new Restore condition.
@@ -116,5 +121,72 @@ func IsRestoreRunning(restore *Restore) bool {
 // IsRestoreFailed returns true if a Restore is Failed
 func IsRestoreFailed(restore *Restore) bool {
 	_, condition := GetRestoreCondition(&restore.Status, RestoreFailed)
+	return condition != nil && condition.Status == corev1.ConditionTrue
+}
+
+// IsRestoreVolumeComplete returns true if a Restore for volume has successfully completed
+func IsRestoreVolumeComplete(restore *Restore) bool {
+	_, condition := GetRestoreCondition(&restore.Status, RestoreVolumeComplete)
+	return condition != nil && condition.Status == corev1.ConditionTrue
+}
+
+// IsRestoreVolumeFailed returns true if a Restore for volume is Failed
+func IsRestoreVolumeFailed(restore *Restore) bool {
+	return restore.Spec.Mode == RestoreModeVolumeSnapshot &&
+		IsRestoreFailed(restore) &&
+		!IsRestoreVolumeComplete(restore)
+}
+
+// IsCleanVolumeComplete returns true if restored volumes are cleaned
+func IsCleanVolumeComplete(restore *Restore) bool {
+	_, condition := GetRestoreCondition(&restore.Status, CleanVolumeComplete)
+	return condition != nil && condition.Status == corev1.ConditionTrue
+}
+
+// IsRestoreWarmUpStarted returns true if all the warmup jobs has successfully started
+func IsRestoreWarmUpStarted(restore *Restore) bool {
+	_, condition := GetRestoreCondition(&restore.Status, RestoreWarmUpStarted)
+	return condition != nil && condition.Status == corev1.ConditionTrue
+}
+
+// IsRestoreWarmUpComplete returns true if all the warmup jobs has successfully finished
+func IsRestoreWarmUpComplete(restore *Restore) bool {
+	_, condition := GetRestoreCondition(&restore.Status, RestoreWarmUpComplete)
+	return condition != nil && condition.Status == corev1.ConditionTrue
+}
+
+// IsRestoreTiKVComplete returns true if all TiKVs run successfully during volume restore
+func IsRestoreTiKVComplete(restore *Restore) bool {
+	_, condition := GetRestoreCondition(&restore.Status, RestoreTiKVComplete)
+	return condition != nil && condition.Status == corev1.ConditionTrue
+}
+
+// IsRestoreDataComplete returns true if a Restore for data consistency has successfully completed
+func IsRestoreDataComplete(restore *Restore) bool {
+	_, condition := GetRestoreCondition(&restore.Status, RestoreDataComplete)
+	return condition != nil && condition.Status == corev1.ConditionTrue
+}
+
+// IsRestorePruneScheduled returns true if a Restore prune job is scheduled
+func IsRestorePruneScheduled(restore *Restore) bool {
+	_, condition := GetRestoreCondition(&restore.Status, RestorePruneScheduled)
+	return condition != nil && condition.Status == corev1.ConditionTrue
+}
+
+// IsRestorePruneRunning returns true if a Restore prune job is running
+func IsRestorePruneRunning(restore *Restore) bool {
+	_, condition := GetRestoreCondition(&restore.Status, RestorePruneRunning)
+	return condition != nil && condition.Status == corev1.ConditionTrue
+}
+
+// IsRestorePruneComplete returns true if a Restore prune job has successfully completed
+func IsRestorePruneComplete(restore *Restore) bool {
+	_, condition := GetRestoreCondition(&restore.Status, RestorePruneComplete)
+	return condition != nil && condition.Status == corev1.ConditionTrue
+}
+
+// IsRestorePruneFailed returns true if a Restore prune job has failed
+func IsRestorePruneFailed(restore *Restore) bool {
+	_, condition := GetRestoreCondition(&restore.Status, RestorePruneFailed)
 	return condition != nil && condition.Status == corev1.ConditionTrue
 }

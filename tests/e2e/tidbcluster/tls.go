@@ -26,20 +26,22 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/go-sql-driver/mysql"
-	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/util"
-	"github.com/pingcap/tidb-operator/tests/e2e/util/portforward"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/kubernetes/test/e2e/framework"
-	"k8s.io/kubernetes/test/e2e/framework/pod"
+
+	"github.com/go-sql-driver/mysql"
+	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+	"github.com/pingcap/tidb-operator/pkg/controller"
+	"github.com/pingcap/tidb-operator/pkg/util"
+	"github.com/pingcap/tidb-operator/tests/e2e/util/portforward"
+	"github.com/pingcap/tidb-operator/tests/third_party/k8s/log"
+	"github.com/pingcap/tidb-operator/tests/third_party/k8s/pod"
 )
 
 var tidbIssuerTmpl = `
-apiVersion: cert-manager.io/v1alpha2
+apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
   name: {{ .ClusterName }}-selfsigned-ca-issuer
@@ -47,7 +49,7 @@ metadata:
 spec:
   selfSigned: {}
 ---
-apiVersion: cert-manager.io/v1alpha2
+apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: {{ .ClusterName }}-ca
@@ -60,7 +62,7 @@ spec:
     name: {{ .ClusterRef }}-selfsigned-ca-issuer
     kind: Issuer
 ---
-apiVersion: cert-manager.io/v1alpha2
+apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
   name: {{ .ClusterName }}-tidb-issuer
@@ -71,7 +73,7 @@ spec:
 `
 
 var tidbCertificatesTmpl = `
-apiVersion: cert-manager.io/v1alpha2
+apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: {{ .ClusterName }}-tidb-server-secret
@@ -80,8 +82,9 @@ spec:
   secretName: {{ .ClusterName }}-tidb-server-secret
   duration: 8760h # 365d
   renewBefore: 360h # 15d
-  organization:
-    - PingCAP
+  subject:
+    organizations:
+      - PingCAP
   commonName: "TiDB Server"
   usages:
     - server auth
@@ -89,9 +92,9 @@ spec:
     - "{{ .ClusterName }}-tidb"
     - "{{ .ClusterName }}-tidb.{{ .Namespace }}"
     - "*.{{ .ClusterName }}-tidb"
-    - "{{ .ClusterName }}-tidb.{{ .Namespace }}.svc"
+    - "{{ .ClusterName }}-tidb.{{ .Namespace }}.svc{{ .ClusterDomain }}"
     - "*.{{ .ClusterName }}-tidb.{{ .Namespace }}"
-    - "*.{{ .ClusterName }}-tidb.{{ .Namespace }}.svc"
+    - "*.{{ .ClusterName }}-tidb.{{ .Namespace }}.svc{{ .ClusterDomain }}"
   ipAddresses:
     - 127.0.0.1
     - ::1
@@ -100,7 +103,7 @@ spec:
     kind: Issuer
     group: cert-manager.io
 ---
-apiVersion: cert-manager.io/v1alpha2
+apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: {{ .ClusterName }}-tidb-client-secret
@@ -109,8 +112,9 @@ spec:
   secretName: {{ .ClusterName }}-tidb-client-secret
   duration: 8760h # 365d
   renewBefore: 360h # 15d
-  organization:
-    - PingCAP
+  subject:
+    organizations:
+      - PingCAP
   commonName: "TiDB Client"
   usages:
     - client auth
@@ -120,8 +124,8 @@ spec:
     group: cert-manager.io
 `
 
-var tidbComponentsCertificatesTmpl = `
-apiVersion: cert-manager.io/v1alpha2
+var tidbComponentsOnlyPDCertificatesTmpl = `
+apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: {{ .ClusterName }}-pd-cluster-secret
@@ -130,8 +134,9 @@ spec:
   secretName: {{ .ClusterName }}-pd-cluster-secret
   duration: 8760h # 365d
   renewBefore: 360h # 15d
-  organization:
-  - PingCAP
+  subject:
+    organizations:
+      - PingCAP
   commonName: "TiDB"
   usages:
     - server auth
@@ -139,13 +144,13 @@ spec:
   dnsNames:
   - "{{ .ClusterName }}-pd"
   - "{{ .ClusterName }}-pd.{{ .Namespace }}"
-  - "{{ .ClusterName }}-pd.{{ .Namespace }}.svc"
+  - "{{ .ClusterName }}-pd.{{ .Namespace }}.svc{{ .ClusterDomain }}"
   - "{{ .ClusterName }}-pd-peer"
   - "{{ .ClusterName }}-pd-peer.{{ .Namespace }}"
-  - "{{ .ClusterName }}-pd-peer.{{ .Namespace }}.svc"
+  - "{{ .ClusterName }}-pd-peer.{{ .Namespace }}.svc{{ .ClusterDomain }}"
   - "*.{{ .ClusterName }}-pd-peer"
   - "*.{{ .ClusterName }}-pd-peer.{{ .Namespace }}"
-  - "*.{{ .ClusterName }}-pd-peer.{{ .Namespace }}.svc"
+  - "*.{{ .ClusterName }}-pd-peer.{{ .Namespace }}.svc{{ .ClusterDomain }}"
   ipAddresses:
   - 127.0.0.1
   - ::1
@@ -153,8 +158,10 @@ spec:
     name: {{ .ClusterRef }}-tidb-issuer
     kind: Issuer
     group: cert-manager.io
----
-apiVersion: cert-manager.io/v1alpha2
+`
+
+var tidbComponentsExceptPDCertificatesTmpl = `
+apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: {{ .ClusterName }}-tikv-cluster-secret
@@ -163,8 +170,9 @@ spec:
   secretName: {{ .ClusterName }}-tikv-cluster-secret
   duration: 8760h # 365d
   renewBefore: 360h # 15d
-  organization:
-  - PingCAP
+  subject:
+    organizations:
+      - PingCAP
   commonName: "TiDB"
   usages:
     - server auth
@@ -172,13 +180,13 @@ spec:
   dnsNames:
   - "{{ .ClusterName }}-tikv"
   - "{{ .ClusterName }}-tikv.{{ .Namespace }}"
-  - "{{ .ClusterName }}-tikv.{{ .Namespace }}.svc"
+  - "{{ .ClusterName }}-tikv.{{ .Namespace }}.svc{{ .ClusterDomain }}"
   - "{{ .ClusterName }}-tikv-peer"
   - "{{ .ClusterName }}-tikv-peer.{{ .Namespace }}"
-  - "{{ .ClusterName }}-tikv-peer.{{ .Namespace }}.svc"
+  - "{{ .ClusterName }}-tikv-peer.{{ .Namespace }}.svc{{ .ClusterDomain }}"
   - "*.{{ .ClusterName }}-tikv-peer"
   - "*.{{ .ClusterName }}-tikv-peer.{{ .Namespace }}"
-  - "*.{{ .ClusterName }}-tikv-peer.{{ .Namespace }}.svc"
+  - "*.{{ .ClusterName }}-tikv-peer.{{ .Namespace }}.svc{{ .ClusterDomain }}"
   ipAddresses:
   - 127.0.0.1
   - ::1
@@ -187,7 +195,7 @@ spec:
     kind: Issuer
     group: cert-manager.io
 ---
-apiVersion: cert-manager.io/v1alpha2
+apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: {{ .ClusterName }}-tidb-cluster-secret
@@ -196,8 +204,9 @@ spec:
   secretName: {{ .ClusterName }}-tidb-cluster-secret
   duration: 8760h # 365d
   renewBefore: 360h # 15d
-  organization:
-  - PingCAP
+  subject:
+    organizations:
+      - PingCAP
   commonName: "TiDB"
   usages:
     - server auth
@@ -205,13 +214,13 @@ spec:
   dnsNames:
   - "{{ .ClusterName }}-tidb"
   - "{{ .ClusterName }}-tidb.{{ .Namespace }}"
-  - "{{ .ClusterName }}-tidb.{{ .Namespace }}.svc"
+  - "{{ .ClusterName }}-tidb.{{ .Namespace }}.svc{{ .ClusterDomain }}"
   - "{{ .ClusterName }}-tidb-peer"
   - "{{ .ClusterName }}-tidb-peer.{{ .Namespace }}"
-  - "{{ .ClusterName }}-tidb-peer.{{ .Namespace }}.svc"
+  - "{{ .ClusterName }}-tidb-peer.{{ .Namespace }}.svc{{ .ClusterDomain }}"
   - "*.{{ .ClusterName }}-tidb-peer"
   - "*.{{ .ClusterName }}-tidb-peer.{{ .Namespace }}"
-  - "*.{{ .ClusterName }}-tidb-peer.{{ .Namespace }}.svc"
+  - "*.{{ .ClusterName }}-tidb-peer.{{ .Namespace }}.svc{{ .ClusterDomain }}"
   ipAddresses:
   - 127.0.0.1
   - ::1
@@ -220,7 +229,7 @@ spec:
     kind: Issuer
     group: cert-manager.io
 ---
-apiVersion: cert-manager.io/v1alpha2
+apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: {{ .ClusterName }}-cluster-client-secret
@@ -229,8 +238,9 @@ spec:
   secretName: {{ .ClusterName }}-cluster-client-secret
   duration: 8760h # 365d
   renewBefore: 360h # 15d
-  organization:
-  - PingCAP
+  subject:
+    organizations:
+      - PingCAP
   commonName: "TiDB"
   usages:
     - client auth
@@ -239,7 +249,7 @@ spec:
     kind: Issuer
     group: cert-manager.io
 ---
-apiVersion: cert-manager.io/v1alpha2
+apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: {{ .ClusterName }}-pump-cluster-secret
@@ -248,8 +258,9 @@ spec:
   secretName: {{ .ClusterName }}-pump-cluster-secret
   duration: 8760h # 365d
   renewBefore: 360h # 15d
-  organization:
-  - PingCAP
+  subject:
+    organizations:
+      - PingCAP
   commonName: "TiDB"
   usages:
     - server auth
@@ -257,7 +268,7 @@ spec:
   dnsNames:
   - "*.{{ .ClusterName }}-pump"
   - "*.{{ .ClusterName }}-pump.{{ .Namespace }}"
-  - "*.{{ .ClusterName }}-pump.{{ .Namespace }}.svc"
+  - "*.{{ .ClusterName }}-pump.{{ .Namespace }}.svc{{ .ClusterDomain }}"
   ipAddresses:
   - 127.0.0.1
   - ::1
@@ -266,7 +277,7 @@ spec:
     kind: Issuer
     group: cert-manager.io
 ---
-apiVersion: cert-manager.io/v1alpha2
+apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: {{ .ClusterName }}-drainer-cluster-secret
@@ -275,8 +286,9 @@ spec:
   secretName: {{ .ClusterName }}-drainer-cluster-secret
   duration: 8760h # 365d
   renewBefore: 360h # 15d
-  organization:
-  - PingCAP
+  subject:
+    organizations:
+      - PingCAP
   commonName: "TiDB"
   usages:
     - server auth
@@ -284,7 +296,7 @@ spec:
   dnsNames:
   - "*.{{ .ClusterName }}-{{ .ClusterName }}-drainer"
   - "*.{{ .ClusterName }}-{{ .ClusterName }}-drainer.{{ .Namespace }}"
-  - "*.{{ .ClusterName }}-{{ .ClusterName }}-drainer.{{ .Namespace }}.svc"
+  - "*.{{ .ClusterName }}-{{ .ClusterName }}-drainer.{{ .Namespace }}.svc{{ .ClusterDomain }}"
   ipAddresses:
   - 127.0.0.1
   - ::1
@@ -293,7 +305,7 @@ spec:
     kind: Issuer
     group: cert-manager.io
 ---
-apiVersion: cert-manager.io/v1alpha2
+apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: {{ .ClusterName }}-tiflash-cluster-secret
@@ -302,8 +314,9 @@ spec:
   secretName: {{ .ClusterName }}-tiflash-cluster-secret
   duration: 8760h # 365d
   renewBefore: 360h # 15d
-  organization:
-  - PingCAP
+  subject:
+    organizations:
+      - PingCAP
   commonName: "TiDB"
   usages:
     - server auth
@@ -311,13 +324,47 @@ spec:
   dnsNames:
   - "{{ .ClusterName }}-tiflash"
   - "{{ .ClusterName }}-tiflash.{{ .Namespace }}"
-  - "{{ .ClusterName }}-tiflash.{{ .Namespace }}.svc"
+  - "{{ .ClusterName }}-tiflash.{{ .Namespace }}.svc{{ .ClusterDomain }}"
   - "{{ .ClusterName }}-tiflash-peer"
   - "{{ .ClusterName }}-tiflash-peer.{{ .Namespace }}"
-  - "{{ .ClusterName }}-tiflash-peer.{{ .Namespace }}.svc"
+  - "{{ .ClusterName }}-tiflash-peer.{{ .Namespace }}.svc{{ .ClusterDomain }}"
   - "*.{{ .ClusterName }}-tiflash-peer"
   - "*.{{ .ClusterName }}-tiflash-peer.{{ .Namespace }}"
-  - "*.{{ .ClusterName }}-tiflash-peer.{{ .Namespace }}.svc"
+  - "*.{{ .ClusterName }}-tiflash-peer.{{ .Namespace }}.svc{{ .ClusterDomain }}"
+  ipAddresses:
+  - 127.0.0.1
+  - ::1
+  issuerRef:
+    name: {{ .ClusterRef }}-tidb-issuer
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .ClusterName }}-ticdc-cluster-secret
+  namespace: {{ .Namespace }}
+spec:
+  secretName: {{ .ClusterName }}-ticdc-cluster-secret
+  duration: 8760h # 365d
+  renewBefore: 360h # 15d
+  subject:
+    organizations:
+      - PingCAP
+  commonName: "TiDB"
+  usages:
+  - server auth
+  - client auth
+  dnsNames:
+  - "{{ .ClusterName }}-ticdc"
+  - "{{ .ClusterName }}-ticdc.{{ .Namespace }}"
+  - "{{ .ClusterName }}-ticdc.{{ .Namespace }}.svc{{ .ClusterDomain }}"
+  - "{{ .ClusterName }}-ticdc-peer"
+  - "{{ .ClusterName }}-ticdc-peer.{{ .Namespace }}"
+  - "{{ .ClusterName }}-ticdc-peer.{{ .Namespace }}.svc{{ .ClusterDomain }}"
+  - "*.{{ .ClusterName }}-ticdc-peer"
+  - "*.{{ .ClusterName }}-ticdc-peer.{{ .Namespace }}"
+  - "*.{{ .ClusterName }}-ticdc-peer.{{ .Namespace }}.svc{{ .ClusterDomain }}"
   ipAddresses:
   - 127.0.0.1
   - ::1
@@ -328,7 +375,7 @@ spec:
 `
 
 var tidbClientCertificateTmpl = `
-apiVersion: cert-manager.io/v1alpha2
+apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: {{ .ClusterName }}-{{ .Component }}-tls
@@ -337,8 +384,9 @@ spec:
   secretName: {{ .ClusterName }}-{{ .Component }}-tls
   duration: 8760h # 365d
   renewBefore: 360h # 15d
-  organization:
-    - PingCAP
+  subject:
+    organizations:
+      - PingCAP
   commonName: "TiDB Client"
   usages:
     - client auth
@@ -346,6 +394,135 @@ spec:
     name: {{ .ClusterRef }}-tidb-issuer
     kind: Issuer
     group: cert-manager.io
+`
+
+var mysqlCertificatesTmpl = `
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .ClusterName }}-mysql-secret
+  namespace: {{ .Namespace }}
+spec:
+  secretName: {{ .ClusterName }}-mysql-secret
+  duration: 8760h # 365d
+  renewBefore: 360h # 15d
+  subject:
+    organizations:
+      - PingCAP
+  commonName: "MySQL Server"
+  usages:
+    - server auth
+    - client auth
+  dnsNames:
+  - "*.dm-mysql"
+  ipAddresses:
+  - 127.0.0.1
+  - ::1
+  issuerRef:
+    name: {{ .ClusterRef }}-tidb-issuer  # use tidb-issuer in E2E tests
+    kind: Issuer
+    group: cert-manager.io
+`
+
+var dmCertificatesTmp = `
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .ClusterName }}-dm-master-cluster-secret
+  namespace: {{ .Namespace }}
+spec:
+  secretName: {{ .ClusterName }}-dm-master-cluster-secret
+  duration: 8760h # 365d
+  renewBefore: 360h # 15d
+  subject:
+    organizations:
+      - PingCAP
+  commonName: "TiDB"
+  usages:
+    - server auth
+    - client auth
+  dnsNames:
+  - "{{ .ClusterName }}-dm-master"
+  - "{{ .ClusterName }}-dm-master.{{ .Namespace }}"
+  - "{{ .ClusterName }}-dm-master.{{ .Namespace }}.svc"
+  - "{{ .ClusterName }}-dm-master-peer"
+  - "{{ .ClusterName }}-dm-master-peer.{{ .Namespace }}"
+  - "{{ .ClusterName }}-dm-master-peer.{{ .Namespace }}.svc"
+  - "*.{{ .ClusterName }}-dm-master-peer"
+  - "*.{{ .ClusterName }}-dm-master-peer.{{ .Namespace }}"
+  - "*.{{ .ClusterName }}-dm-master-peer.{{ .Namespace }}.svc"
+  ipAddresses:
+  - 127.0.0.1
+  - ::1
+  issuerRef:
+    name: {{ .ClusterRef }}-tidb-issuer # use tidb-issuer in E2E tests
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .ClusterName }}-dm-worker-cluster-secret
+  namespace: {{ .Namespace }}
+spec:
+  secretName: {{ .ClusterName }}-dm-worker-cluster-secret
+  duration: 8760h # 365d
+  renewBefore: 360h # 15d
+  subject:
+    organizations:
+      - PingCAP
+  commonName: "TiDB"
+  usages:
+    - server auth
+    - client auth
+  dnsNames:
+  - "{{ .ClusterName }}-dm-worker"
+  - "{{ .ClusterName }}-dm-worker.{{ .Namespace }}"
+  - "{{ .ClusterName }}-dm-worker.{{ .Namespace }}.svc"
+  - "{{ .ClusterName }}-dm-worker-peer"
+  - "{{ .ClusterName }}-dm-worker-peer.{{ .Namespace }}"
+  - "{{ .ClusterName }}-dm-worker-peer.{{ .Namespace }}.svc"
+  - "*.{{ .ClusterName }}-dm-worker-peer"
+  - "*.{{ .ClusterName }}-dm-worker-peer.{{ .Namespace }}"
+  - "*.{{ .ClusterName }}-dm-worker-peer.{{ .Namespace }}.svc"
+  ipAddresses:
+  - 127.0.0.1
+  - ::1
+  issuerRef:
+    name: {{ .ClusterRef }}-tidb-issuer # use tidb-issuer in E2E tests
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .ClusterName }}-dm-client-secret
+  namespace: {{ .Namespace }}
+spec:
+  secretName: {{ .ClusterName }}-dm-client-secret
+  duration: 8760h # 365d
+  renewBefore: 360h # 15d
+  subject:
+    organizations:
+      - PingCAP
+  commonName: "TiDB"
+  usages:
+    - client auth
+  issuerRef:
+    name: {{ .ClusterRef }}-tidb-issuer # use tidb-issuer in E2E tests
+    kind: Issuer
+    group: cert-manager.io
+`
+
+var xK8sTidbIssuerTmpl = `
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ .ClusterName }}-tidb-issuer
+  namespace: {{ .Namespace }}
+spec:
+  ca:
+    secretName: {{ .ClusterRef }}-ca-secret
 `
 
 type tcTmplMeta struct {
@@ -357,6 +534,11 @@ type tcTmplMeta struct {
 type tcCliTmplMeta struct {
 	tcTmplMeta
 	Component string
+}
+
+type tcCertTmplMeta struct {
+	tcTmplMeta
+	ClusterDomain string
 }
 
 func InstallCertManager(cli clientset.Interface) error {
@@ -382,14 +564,14 @@ func DeleteCertManager(cli clientset.Interface) error {
 	}
 
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
-		podList, err := cli.CoreV1().Pods("cert-manager").List(metav1.ListOptions{})
+		podList, err := cli.CoreV1().Pods("cert-manager").List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			return false, nil
 		}
 		for _, _pod := range podList.Items {
 			err := pod.WaitForPodNotFoundInNamespace(cli, _pod.Name, "cert-manager", 5*time.Minute)
 			if err != nil {
-				framework.Logf("failed to wait for pod cert-manager/%s disappear", _pod.Name)
+				log.Logf("failed to wait for pod cert-manager/%s disappear", _pod.Name)
 				return false, nil
 			}
 		}
@@ -398,24 +580,50 @@ func DeleteCertManager(cli clientset.Interface) error {
 	})
 }
 
-func installTiDBIssuer(ns, tcName string) error {
+func InstallTiDBIssuer(ns, tcName string) error {
 	return installCert(tidbIssuerTmpl, tcTmplMeta{ns, tcName, tcName})
 }
 
-func installTiDBCertificates(ns, tcName string) error {
-	return installCert(tidbCertificatesTmpl, tcTmplMeta{ns, tcName, tcName})
+func InstallXK8sTiDBIssuer(ns, tcName, clusterRef string) error {
+	return installCert(xK8sTidbIssuerTmpl, tcTmplMeta{ns, tcName, clusterRef})
+}
+
+func InstallTiDBCertificates(ns, tcName string) error {
+	return installCert(tidbCertificatesTmpl, tcCertTmplMeta{tcTmplMeta{ns, tcName, tcName}, ""})
 }
 
 func installHeterogeneousTiDBCertificates(ns, tcName string, clusterRef string) error {
-	return installCert(tidbCertificatesTmpl, tcTmplMeta{ns, tcName, clusterRef})
+	return installCert(tidbCertificatesTmpl, tcCertTmplMeta{tcTmplMeta{ns, tcName, clusterRef}, ""})
 }
 
-func installTiDBComponentsCertificates(ns, tcName string) error {
-	return installCert(tidbComponentsCertificatesTmpl, tcTmplMeta{ns, tcName, tcName})
+func InstallXK8sTiDBCertificates(ns, tcName, clusterDomain string) error {
+	return installCert(tidbCertificatesTmpl, tcCertTmplMeta{tcTmplMeta{ns, tcName, tcName}, "." + clusterDomain})
+}
+
+func InstallTiDBComponentsCertificates(ns, tcName string) error {
+	err := installCert(tidbComponentsOnlyPDCertificatesTmpl, tcCertTmplMeta{tcTmplMeta{ns, tcName, tcName}, ""})
+	if err != nil {
+		return err
+	}
+	return installCert(tidbComponentsExceptPDCertificatesTmpl, tcCertTmplMeta{tcTmplMeta{ns, tcName, tcName}, ""})
 }
 
 func installHeterogeneousTiDBComponentsCertificates(ns, tcName string, clusterRef string) error {
-	return installCert(tidbComponentsCertificatesTmpl, tcTmplMeta{ns, tcName, clusterRef})
+	err := installCert(tidbComponentsOnlyPDCertificatesTmpl, tcCertTmplMeta{tcTmplMeta{ns, tcName, clusterRef}, ""})
+	if err != nil {
+		return err
+	}
+	return installCert(tidbComponentsExceptPDCertificatesTmpl, tcCertTmplMeta{tcTmplMeta{ns, tcName, clusterRef}, ""})
+}
+
+func InstallXK8sTiDBComponentsCertificates(ns, tcName, clusterDomain string, exceptPD bool) error {
+	if !exceptPD {
+		err := installCert(tidbComponentsOnlyPDCertificatesTmpl, tcCertTmplMeta{tcTmplMeta{ns, tcName, tcName}, "." + clusterDomain})
+		if err != nil {
+			return err
+		}
+	}
+	return installCert(tidbComponentsExceptPDCertificatesTmpl, tcCertTmplMeta{tcTmplMeta{ns, tcName, tcName}, "." + clusterDomain})
 }
 
 func installTiDBInitializerCertificates(ns, tcName string) error {
@@ -426,12 +634,12 @@ func installPDDashboardCertificates(ns, tcName string) error {
 	return installCert(tidbClientCertificateTmpl, tcCliTmplMeta{tcTmplMeta{ns, tcName, tcName}, "dashboard"})
 }
 
-func installBackupCertificates(ns, tcName string) error {
-	return installCert(tidbClientCertificateTmpl, tcCliTmplMeta{tcTmplMeta{ns, tcName, tcName}, "backup"})
+func InstallMySQLCertificates(ns, dcName string) error {
+	return installCert(mysqlCertificatesTmpl, tcTmplMeta{ns, dcName, dcName})
 }
 
-func installRestoreCertificates(ns, tcName string) error {
-	return installCert(tidbClientCertificateTmpl, tcCliTmplMeta{tcTmplMeta{ns, tcName, tcName}, "restore"})
+func InstallDMCertificates(ns, dcName string) error {
+	return installCert(dmCertificatesTmp, tcTmplMeta{ns, dcName, dcName})
 }
 
 func installCert(tmplStr string, tp interface{}) error {
@@ -454,7 +662,7 @@ func installCert(tmplStr string, tp interface{}) error {
 		return err
 	}
 	if data, err := exec.Command("sh", "-c", fmt.Sprintf("kubectl apply -f %s", tmpFile.Name())).CombinedOutput(); err != nil {
-		framework.Logf("failed to create certificate: %s, %v", string(data), err)
+		log.Logf("failed to create certificate: %s, %v", string(data), err)
 		return err
 	}
 
@@ -486,7 +694,7 @@ func tidbIsTLSEnabled(fw portforward.PortForward, c clientset.Interface, ns, tcN
 					return true, fmt.Errorf("the connection to tidb server is not ssl %s/%s", ns, tcName)
 				}
 
-				framework.Logf("The connection to TiDB Server is TLS enabled.")
+				log.Logf("The connection to TiDB Server is TLS enabled.")
 				return true, nil
 			}
 		}
@@ -499,7 +707,7 @@ func insertIntoDataToSourceDB(fw portforward.PortForward, c clientset.Interface,
 	return func() (bool, error) {
 		db, cancel, err := connectToTiDBWithTLSSupport(fw, c, ns, tcName, passwd, tlsEnabled)
 		if err != nil {
-			framework.Logf("failed to connect to source db: %v", err)
+			log.Logf("failed to connect to source db: %v", err)
 			return false, nil
 		}
 		defer db.Close()
@@ -507,13 +715,13 @@ func insertIntoDataToSourceDB(fw portforward.PortForward, c clientset.Interface,
 
 		res, err := db.Exec("CREATE TABLE test.city (name VARCHAR(64) PRIMARY KEY)")
 		if err != nil {
-			framework.Logf("can't create table in source db: %v, %v", res, err)
+			log.Logf("can't create table in source db: %v, %v", res, err)
 			return false, nil
 		}
 
 		res, err = db.Exec("INSERT INTO test.city (name) VALUES (\"beijing\")")
 		if err != nil {
-			framework.Logf("can't insert into table tls in source db: %v, %v", res, err)
+			log.Logf("can't insert into table tls in source db: %v, %v", res, err)
 			return false, nil
 		}
 
@@ -525,7 +733,7 @@ func dataInClusterIsCorrect(fw portforward.PortForward, c clientset.Interface, n
 	return func() (bool, error) {
 		db, cancel, err := connectToTiDBWithTLSSupport(fw, c, ns, tcName, passwd, tlsEnabled)
 		if err != nil {
-			framework.Logf("can't connect to %s/%s, %v", ns, tcName, err)
+			log.Logf("can't connect to %s/%s, %v", ns, tcName, err)
 			return false, nil
 		}
 		defer db.Close()
@@ -536,11 +744,11 @@ func dataInClusterIsCorrect(fw portforward.PortForward, c clientset.Interface, n
 
 		err = row.Scan(&name)
 		if err != nil {
-			framework.Logf("can't scan from %s/%s, %v", ns, tcName, err)
+			log.Logf("can't scan from %s/%s, %v", ns, tcName, err)
 			return false, nil
 		}
 
-		framework.Logf("TABLE test.city name = %s", name)
+		log.Logf("TABLE test.city name = %s", name)
 		if name == "beijing" {
 			return true, nil
 		}
@@ -552,15 +760,15 @@ func dataInClusterIsCorrect(fw portforward.PortForward, c clientset.Interface, n
 func connectToTiDBWithTLSSupport(fw portforward.PortForward, c clientset.Interface, ns, tcName, passwd string, tlsEnabled bool) (*sql.DB, context.CancelFunc, error) {
 	var tlsParams string
 
-	localHost, localPort, cancel, err := portforward.ForwardOnePort(fw, ns, fmt.Sprintf("svc/%s", controller.TiDBMemberName(tcName)), 4000)
+	localHost, localPort, cancel, err := portforward.ForwardOnePort(fw, ns, fmt.Sprintf("svc/%s", controller.TiDBMemberName(tcName)), uint16(v1alpha1.DefaultTiDBServerPort))
 	if err != nil {
 		return nil, nil, err
 	}
 
 	if tlsEnabled {
 		tlsKey := "tidb-server-tls"
-		secretName := util.TiDBClientTLSSecretName(tcName)
-		secret, err := c.CoreV1().Secrets(ns).Get(secretName, metav1.GetOptions{})
+		secretName := util.TiDBClientTLSSecretName(tcName, nil)
+		secret, err := c.CoreV1().Secrets(ns).Get(context.TODO(), secretName, metav1.GetOptions{})
 		if err != nil {
 			return nil, nil, err
 		}

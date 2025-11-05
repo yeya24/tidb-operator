@@ -31,6 +31,14 @@ type BackupScheduleListerExpansion interface{}
 // BackupScheduleNamespaceLister.
 type BackupScheduleNamespaceListerExpansion interface{}
 
+// CompactBackupListerExpansion allows custom methods to be added to
+// CompactBackupLister.
+type CompactBackupListerExpansion interface{}
+
+// CompactBackupNamespaceListerExpansion allows custom methods to be added to
+// CompactBackupNamespaceLister.
+type CompactBackupNamespaceListerExpansion interface{}
+
 // DMClusterListerExpansion allows custom methods to be added to
 // DMClusterLister.
 type DMClusterListerExpansion interface{}
@@ -63,13 +71,13 @@ type TidbClusterListerExpansion interface{}
 // TidbClusterNamespaceLister.
 type TidbClusterNamespaceListerExpansion interface{}
 
-// TidbClusterAutoScalerListerExpansion allows custom methods to be added to
-// TidbClusterAutoScalerLister.
-type TidbClusterAutoScalerListerExpansion interface{}
+// TidbDashboardListerExpansion allows custom methods to be added to
+// TidbDashboardLister.
+type TidbDashboardListerExpansion interface{}
 
-// TidbClusterAutoScalerNamespaceListerExpansion allows custom methods to be added to
-// TidbClusterAutoScalerNamespaceLister.
-type TidbClusterAutoScalerNamespaceListerExpansion interface{}
+// TidbDashboardNamespaceListerExpansion allows custom methods to be added to
+// TidbDashboardNamespaceLister.
+type TidbDashboardNamespaceListerExpansion interface{}
 
 // TidbInitializerListerExpansion allows custom methods to be added to
 // TidbInitializerLister.
@@ -86,3 +94,11 @@ type TidbMonitorListerExpansion interface{}
 // TidbMonitorNamespaceListerExpansion allows custom methods to be added to
 // TidbMonitorNamespaceLister.
 type TidbMonitorNamespaceListerExpansion interface{}
+
+// TidbNGMonitoringListerExpansion allows custom methods to be added to
+// TidbNGMonitoringLister.
+type TidbNGMonitoringListerExpansion interface{}
+
+// TidbNGMonitoringNamespaceListerExpansion allows custom methods to be added to
+// TidbNGMonitoringNamespaceLister.
+type TidbNGMonitoringNamespaceListerExpansion interface{}

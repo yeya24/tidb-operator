@@ -17,18 +17,19 @@ import (
 	"context"
 	"time"
 
-	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb-operator/pkg/controller"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/kubernetes/test/e2e/framework"
-	"k8s.io/kubernetes/test/e2e/framework/log"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/pingcap/errors"
+	"github.com/pingcap/tidb-operator/pkg/controller"
+	framework "github.com/pingcap/tidb-operator/tests/third_party/k8s"
+	"github.com/pingcap/tidb-operator/tests/third_party/k8s/log"
 )
 
 // WaitObjectToBeControlledByOrDie wait desired owner become the controller of the object
-func WaitObjectToBeControlledByOrDie(c client.Client, obj runtime.Object, owner runtime.Object, timeout time.Duration) {
+func WaitObjectToBeControlledByOrDie(c client.Client, obj client.Object, owner runtime.Object, timeout time.Duration) {
 	meta, ok := obj.(metav1.Object)
 	if !ok {
 		log.Failf("object is not a metav1.Object, cannot call WaitObjectToBeControlledByOrDie")
@@ -41,12 +42,9 @@ func WaitObjectToBeControlledByOrDie(c client.Client, obj runtime.Object, owner 
 	if !ok {
 		log.Failf("owner is not a metav1.Object, cannot call WaitObjectToBeControlledByOrDie")
 	}
-	fetched := obj.DeepCopyObject()
+	fetched := controller.DeepCopyClientObject(obj)
 	err = wait.PollImmediate(10*time.Second, timeout, func() (bool, error) {
-		key, err := client.ObjectKeyFromObject(obj)
-		if err != nil {
-			return false, err
-		}
+		key := client.ObjectKeyFromObject(obj)
 		err = c.Get(context.TODO(), key, fetched)
 		if err != nil && errors.IsNotFound(err) {
 			return false, err

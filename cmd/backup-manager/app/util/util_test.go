@@ -14,16 +14,18 @@
 package util
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
 	. "github.com/onsi/gomega"
 	appconstant "github.com/pingcap/tidb-operator/cmd/backup-manager/app/constants"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
-	"github.com/pingcap/tidb-operator/pkg/backup/constants"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -258,7 +260,7 @@ func TestGetRemotePath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p, err := GetStoragePath(tt.backup)
+			p, err := GetStoragePath(&tt.backup.Spec.StorageProvider)
 			if tt.err {
 				g.Expect(err).To(HaveOccurred())
 				return
@@ -292,6 +294,11 @@ func TestSuffix(t *testing.T) {
 		{
 			name:    "invalid version",
 			version: "v4.0.x",
+			expect:  "40",
+		},
+		{
+			name:    "dirty version",
+			version: "v4.0.0-20200909",
 			expect:  "40",
 		},
 	}
@@ -489,6 +496,139 @@ func TestConstructRcloneArgs(t *testing.T) {
 
 }
 
+func TestRetryOnError(t *testing.T) {
+	cases := map[string]struct {
+		setupFunc func() func() error
+		retriable func(error) bool
+		attempts  int
+		sleep     time.Duration
+		expect    func(*WithT, error)
+	}{
+		"succeeded": {
+			setupFunc: func() func() error {
+				return func() error {
+					return nil
+				}
+			},
+			attempts: 5,
+			sleep:    0,
+			expect: func(g *WithT, err error) {
+				g.Expect(err).Should(Succeed())
+			},
+		},
+		"failed": {
+			setupFunc: func() func() error {
+				i := 0
+				return func() error {
+					i++
+					return fmt.Errorf("index %d failed", i)
+				}
+			},
+			attempts: 5,
+			sleep:    0,
+			expect: func(g *WithT, err error) {
+				g.Expect(err).Should(MatchError("index 5 failed"))
+			},
+		},
+		"stop retry when meet specific error": {
+			setupFunc: func() func() error {
+				i := 0
+				return func() error {
+					i++
+					if i == 3 {
+						return fmt.Errorf("stop retry")
+					}
+					return fmt.Errorf("index %d failed", i)
+				}
+			},
+			retriable: func(err error) bool {
+				return err != nil && err.Error() != "stop retry"
+			},
+			attempts: 5,
+			sleep:    0,
+			expect: func(g *WithT, err error) {
+				g.Expect(err).Should(MatchError("stop retry"))
+			},
+		},
+	}
+
+	for name, tt := range cases {
+		t.Run(name, func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			retriable := RetriableOnAnyError
+			if tt.retriable != nil {
+				retriable = tt.retriable
+			}
+			err := RetryOnError(context.TODO(), tt.attempts, tt.sleep, retriable, tt.setupFunc())
+			tt.expect(g, err)
+		})
+	}
+}
+
+func TestParseRestoreProgress(t *testing.T) {
+	g := NewGomegaWithT(t)
+	cases := []struct {
+		testStr        string
+		expectStep     string
+		expectProgress string
+		expectFloat    float64
+	}{
+		{
+			testStr:        "",
+			expectStep:     "",
+			expectProgress: "",
+			expectFloat:    -1,
+		},
+		{
+			testStr:        "abcdef, [progress] [step=\"Full Restore\"] [progress=10%] abcdefeg",
+			expectStep:     "Full Restore",
+			expectProgress: "10",
+			expectFloat:    10,
+		},
+		{
+			testStr:        "abcdef, [progress] [step=\"Restore Meta Files\"] [progress=10%] abcdefeg",
+			expectStep:     "Restore Meta Files",
+			expectProgress: "10",
+			expectFloat:    10,
+		},
+		{
+			testStr:        "abcdef, [progress] [step=\"Restore KV Files\"] [progress=10.9%] abcdefeg",
+			expectStep:     "Restore KV Files",
+			expectProgress: "10.9",
+			expectFloat:    10.9,
+		},
+		{
+			testStr:        "abcdef, [progress] [step=\"Full Restore\"] [progress=?%] abcdefeg",
+			expectStep:     "Full Restore",
+			expectProgress: "?",
+			expectFloat:    -1,
+		},
+		{
+			testStr:        "abcdef, [progress] [step=\"Full Restore\"] [progress=%] abcdefeg",
+			expectStep:     "Full Restore",
+			expectProgress: "",
+			expectFloat:    -1,
+		},
+		{
+			testStr:        "abcdef, [progress] [step=\"Restore KV Files\"] abcdefeg",
+			expectStep:     "",
+			expectProgress: "",
+			expectFloat:    -1,
+		},
+	}
+	for _, test := range cases {
+		step, progress := ParseRestoreProgress(test.testStr)
+		g.Expect(step).To(Equal(test.expectStep))
+		g.Expect(progress).To(Equal(test.expectProgress))
+		fvalue, err := strconv.ParseFloat(progress, 64)
+		if test.expectFloat == -1 {
+			g.Expect(err).ShouldNot(BeNil())
+		} else {
+			g.Expect(fvalue).To(Equal(test.expectFloat))
+		}
+	}
+}
+
 func newBackup() *v1alpha1.Backup {
 	return &v1alpha1.Backup{
 		TypeMeta: metav1.TypeMeta{
@@ -503,8 +643,8 @@ func newBackup() *v1alpha1.Backup {
 		Spec: v1alpha1.BackupSpec{
 			From: &v1alpha1.TiDBAccessConfig{
 				Host:       "10.1.1.2",
-				Port:       constants.DefaultTidbPort,
-				User:       constants.DefaultTidbUser,
+				Port:       v1alpha1.DefaultTiDBServerPort,
+				User:       v1alpha1.DefaultTidbUser,
 				SecretName: "demo1-tidb-secret",
 			},
 			StorageProvider: v1alpha1.StorageProvider{
@@ -535,8 +675,8 @@ func newRestore() *v1alpha1.Restore {
 		Spec: v1alpha1.RestoreSpec{
 			To: &v1alpha1.TiDBAccessConfig{
 				Host:       "10.1.1.2",
-				Port:       constants.DefaultTidbPort,
-				User:       constants.DefaultTidbUser,
+				Port:       v1alpha1.DefaultTiDBServerPort,
+				User:       v1alpha1.DefaultTidbUser,
 				SecretName: "demo1-tidb-secret",
 			},
 			StorageProvider: v1alpha1.StorageProvider{
@@ -550,5 +690,50 @@ func newRestore() *v1alpha1.Restore {
 			StorageClassName: pointer.StringPtr("local-storage"),
 			StorageSize:      "1Gi",
 		},
+	}
+}
+
+func TestGetSliceExcludeOneString(t *testing.T) {
+	g := NewGomegaWithT(t)
+
+	type testcase struct {
+		name   string
+		str    string
+		strs   []string
+		expect []string
+	}
+
+	tests := []*testcase{
+		{
+			name:   "test-1",
+			str:    "--skip-aws",
+			strs:   []string{"--skip-aws=true", "--dry-run=true", "--check-requirements=false"},
+			expect: []string{"--dry-run=true", "--check-requirements=false"},
+		},
+		{
+			name:   "test-2",
+			str:    "--skip-aws",
+			strs:   []string{},
+			expect: []string{},
+		},
+		{
+			name:   "test-3",
+			str:    "--skip-aws",
+			strs:   []string{"--dry-run=true", "--skip-aws=false", "--skip-aws=true"},
+			expect: []string{"--dry-run=true", "--skip-aws=true"},
+		},
+		{
+			name:   "test-4",
+			str:    "--skip-aws",
+			strs:   []string{"--dry-run=true", "--check-requirements=false"},
+			expect: []string{"--dry-run=true", "--check-requirements=false"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			strs := GetSliceExcludeOneString(tt.strs, tt.str)
+			g.Expect(strs).To(Equal(tt.expect))
+		})
 	}
 }

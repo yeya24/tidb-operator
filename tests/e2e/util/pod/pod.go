@@ -14,6 +14,7 @@
 package pod
 
 import (
+	"context"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -21,24 +22,27 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
-	testutils "k8s.io/kubernetes/test/utils"
+	clientset "k8s.io/client-go/kubernetes"
+
+	testutils "github.com/pingcap/tidb-operator/tests/e2e/util"
+	framework "github.com/pingcap/tidb-operator/tests/third_party/k8s"
+	"github.com/pingcap/tidb-operator/tests/third_party/k8s/log"
 )
 
 // PodsAreChanged checks the given pods are changed or not (recreate, update).
 func PodsAreChanged(c kubernetes.Interface, pods []v1.Pod) wait.ConditionFunc {
 	return func() (bool, error) {
 		for _, pod := range pods {
-			podNew, err := c.CoreV1().Pods(pod.Namespace).Get(pod.Name, metav1.GetOptions{})
+			podNew, err := c.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
 			if err != nil {
 				if testutils.IsRetryableAPIError(err) {
 					return false, nil
 				}
 				return false, err
 			}
-			if podNew.UID != pod.UID {
-				return true, nil
-			}
-			if !apiequality.Semantic.DeepEqual(pod.Spec, podNew.Spec) {
+			changed := IsPodsChanged(pod, *podNew)
+			if changed {
+				log.Logf("Pod %s/%s is changed", pod.Namespace, pod.Name)
 				return true, nil
 			}
 		}
@@ -46,8 +50,48 @@ func PodsAreChanged(c kubernetes.Interface, pods []v1.Pod) wait.ConditionFunc {
 	}
 }
 
+func IsPodsChanged(old v1.Pod, cur v1.Pod) bool {
+	if cur.UID != old.UID {
+		return true
+	}
+	if !apiequality.Semantic.DeepEqual(cur.Spec, old.Spec) {
+		return true
+	}
+
+	return false
+}
+
 // WaitForPodsAreChanged waits for given pods are changed.
 // It returns wait.ErrWaitTimeout if the given pods are not changed in specified timeout.
 func WaitForPodsAreChanged(c kubernetes.Interface, pods []v1.Pod, timeout time.Duration) error {
 	return wait.PollImmediate(time.Second*5, timeout, PodsAreChanged(c, pods))
+}
+
+func ListPods(labelSelector string, ns string, c clientset.Interface) ([]v1.Pod, error) {
+	listOptions := metav1.ListOptions{
+		LabelSelector: labelSelector,
+	}
+	podList, err := c.CoreV1().Pods(ns).List(context.TODO(), listOptions)
+	if err != nil {
+		return nil, err
+	}
+
+	return podList.Items, nil
+}
+
+func MustListPods(labelSelector string, ns string, c clientset.Interface) []v1.Pod {
+	pods, err := ListPods(labelSelector, ns, c)
+	framework.ExpectNoError(err, "failed to list pods in ns %s with selector %v", ns, labelSelector)
+
+	return pods
+}
+
+func ListContainerFromPod(spec v1.PodSpec, pred func(container v1.Container) bool) []v1.Container {
+	list := make([]v1.Container, 0)
+	for _, container := range spec.Containers {
+		if pred(container) {
+			list = append(list, container)
+		}
+	}
+	return list
 }

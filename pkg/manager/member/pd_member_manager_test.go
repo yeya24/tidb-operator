@@ -21,12 +21,6 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	. "github.com/onsi/gomega"
-	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
-	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
-	"github.com/pingcap/tidb-operator/pkg/pdapi"
-	"github.com/pingcap/tidb-operator/pkg/util/toml"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
@@ -37,6 +31,15 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/pointer"
+
+	"github.com/pingcap/kvproto/pkg/metapb"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
+	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+	"github.com/pingcap/tidb-operator/pkg/apis/util/toml"
+	"github.com/pingcap/tidb-operator/pkg/controller"
+	"github.com/pingcap/tidb-operator/pkg/manager/suspender"
+	"github.com/pingcap/tidb-operator/pkg/manager/volumes"
+	"github.com/pingcap/tidb-operator/pkg/pdapi"
 )
 
 func TestPDMemberManagerSyncCreate(t *testing.T) {
@@ -47,6 +50,7 @@ func TestPDMemberManagerSyncCreate(t *testing.T) {
 		errWhenCreateStatefulSet   bool
 		errWhenCreatePDService     bool
 		errWhenCreatePDPeerService bool
+		suspendComponent           func() (bool, error)
 		errExpectFn                func(*GomegaWithT, error)
 		pdSvcCreated               bool
 		pdPeerSvcCreated           bool
@@ -78,6 +82,11 @@ func TestPDMemberManagerSyncCreate(t *testing.T) {
 		}
 		if test.errWhenCreatePDPeerService {
 			fakeSvcControl.SetCreateServiceError(errors.NewInternalError(fmt.Errorf("API server failed")), 1)
+		}
+		if test.suspendComponent != nil {
+			pmm.suspender.(*suspender.FakeSuspender).SuspendComponentFunc = func(c v1alpha1.Cluster, mt v1alpha1.MemberType) (bool, error) {
+				return test.suspendComponent()
+			}
 		}
 
 		err := pmm.Sync(tc)
@@ -182,6 +191,37 @@ func TestPDMemberManagerSyncCreate(t *testing.T) {
 			pdSvcCreated:     true,
 			pdPeerSvcCreated: false,
 			setCreated:       false,
+		},
+		{
+			name:                       "skip create when suspend",
+			suspendComponent:           func() (bool, error) { return true, nil },
+			prepare:                    nil,
+			errWhenCreateStatefulSet:   true,
+			errWhenCreatePDService:     true,
+			errWhenCreatePDPeerService: true,
+			errExpectFn: func(g *GomegaWithT, err error) {
+				g.Expect(err).To(Succeed())
+			},
+			pdSvcCreated:     false,
+			pdPeerSvcCreated: false,
+			setCreated:       false,
+		},
+		{
+			name: "patch pod container",
+			prepare: func(cluster *v1alpha1.TidbCluster) {
+				cluster.Spec.PD.AdditionalContainers = []v1.Container{
+					{Name: "pd", Lifecycle: &corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{
+						Exec: &corev1.ExecAction{Command: []string{"sh", "-c", "echo 'test'"}},
+					}}},
+				}
+			},
+			errWhenCreateStatefulSet:   false,
+			errWhenCreatePDService:     false,
+			errWhenCreatePDPeerService: false,
+			errExpectFn:                errExpectRequeue,
+			pdSvcCreated:               true,
+			pdPeerSvcCreated:           true,
+			setCreated:                 true,
 		},
 	}
 
@@ -423,6 +463,70 @@ func TestPDMemberManagerSyncUpdate(t *testing.T) {
 				g.Expect(tc.Status.PD.Members).To(BeNil())
 			},
 		},
+		{
+			name: "patch pd container lifecycle configuration when sync cluster  ",
+			modify: func(tc *v1alpha1.TidbCluster) {
+				tc.Spec.PD.Replicas = 5
+				tc.Spec.PD.AdditionalContainers = []v1.Container{
+					{Name: "pd", Lifecycle: &corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{
+						Exec: &corev1.ExecAction{Command: []string{"sh", "-c", "echo 'test'"}},
+					}}},
+				}
+			},
+			pdHealth: &pdapi.HealthInfo{Healths: []pdapi.MemberHealth{
+				{Name: "pd1", MemberID: uint64(1), ClientUrls: []string{"http://test-pd-1.test-pd-peer.default.svc:2379"}, Health: true},
+				{Name: "pd2", MemberID: uint64(2), ClientUrls: []string{"http://test-pd-2.test-pd-peer.default.svc:2379"}, Health: true},
+				{Name: "pd3", MemberID: uint64(3), ClientUrls: []string{"http://test-pd-3.test-pd-peer.default.svc:2379"}, Health: false},
+			}},
+			errWhenUpdateStatefulSet:   false,
+			errWhenUpdatePDService:     false,
+			errWhenUpdatePDPeerService: false,
+			errWhenGetPDHealth:         false,
+			err:                        false,
+			expectPDServiceFn: func(g *GomegaWithT, svc *corev1.Service, err error) {
+				g.Expect(err).NotTo(HaveOccurred())
+			},
+			expectPDPeerServiceFn: nil,
+			expectStatefulSetFn: func(g *GomegaWithT, set *apps.StatefulSet, err error) {
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(set.Spec.Template.Spec.Containers[0].Lifecycle).To(Equal(
+					&corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{
+						Exec: &corev1.ExecAction{Command: []string{"sh", "-c", "echo 'test'"}},
+					}}))
+			},
+			expectTidbClusterFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster) {
+			},
+		},
+		{
+			name: "patch pd add additional container ",
+			modify: func(tc *v1alpha1.TidbCluster) {
+				tc.Spec.PD.Replicas = 5
+				tc.Spec.PD.AdditionalContainers = []v1.Container{
+					{Name: "additional", Image: "test"},
+				}
+			},
+			pdHealth: &pdapi.HealthInfo{Healths: []pdapi.MemberHealth{
+				{Name: "pd1", MemberID: uint64(1), ClientUrls: []string{"http://test-pd-1.test-pd-peer.default.svc:2379"}, Health: true},
+				{Name: "pd2", MemberID: uint64(2), ClientUrls: []string{"http://test-pd-2.test-pd-peer.default.svc:2379"}, Health: true},
+				{Name: "pd3", MemberID: uint64(3), ClientUrls: []string{"http://test-pd-3.test-pd-peer.default.svc:2379"}, Health: false},
+			}},
+			errWhenUpdateStatefulSet:   false,
+			errWhenUpdatePDService:     false,
+			errWhenUpdatePDPeerService: false,
+			errWhenGetPDHealth:         false,
+			err:                        false,
+			expectPDServiceFn: func(g *GomegaWithT, svc *corev1.Service, err error) {
+				g.Expect(err).NotTo(HaveOccurred())
+			},
+			expectPDPeerServiceFn: nil,
+			expectStatefulSetFn: func(g *GomegaWithT, set *apps.StatefulSet, err error) {
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(len(set.Spec.Template.Spec.Containers)).To(Equal(2))
+				g.Expect(set.Spec.Template.Spec.Containers[1]).To(Equal(v1.Container{Name: "additional", Image: "test"}))
+			},
+			expectTidbClusterFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster) {
+			},
+		},
 	}
 
 	for i := range tests {
@@ -634,6 +738,7 @@ func TestPDMemberManagerSyncPDSts(t *testing.T) {
 	g := NewGomegaWithT(t)
 	type testcase struct {
 		name                string
+		preModify           func(cluster *v1alpha1.TidbCluster)
 		modify              func(cluster *v1alpha1.TidbCluster)
 		pdHealth            *pdapi.HealthInfo
 		err                 bool
@@ -644,6 +749,9 @@ func TestPDMemberManagerSyncPDSts(t *testing.T) {
 
 	testFn := func(test *testcase, t *testing.T) {
 		tc := newTidbClusterForPD()
+		if test.preModify != nil {
+			test.preModify(tc)
+		}
 		ns := tc.Namespace
 		tcName := tc.Name
 
@@ -692,7 +800,7 @@ func TestPDMemberManagerSyncPDSts(t *testing.T) {
 	}
 	tests := []testcase{
 		{
-			name: "force upgrade",
+			name: "force upgrade when annotation is set",
 			modify: func(cluster *v1alpha1.TidbCluster) {
 				cluster.Spec.PD.Image = "pd-test-image:v2"
 				cluster.Spec.PD.Replicas = 1
@@ -720,6 +828,66 @@ func TestPDMemberManagerSyncPDSts(t *testing.T) {
 			},
 			expectTidbClusterFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster) {
 				g.Expect(tc.Status.PD.Phase).To(Equal(v1alpha1.UpgradePhase))
+			},
+		},
+		{
+			name: "force upgrade when PD replicas less than 2 and peer store is empty",
+			preModify: func(cluster *v1alpha1.TidbCluster) {
+				cluster.Spec.PD.Replicas = 1
+				cluster.Status.PD.PeerMembers = nil
+			},
+			modify: func(cluster *v1alpha1.TidbCluster) {
+				cluster.Spec.PD.Image = "pd-test-image:v2"
+			},
+			pdHealth: &pdapi.HealthInfo{Healths: []pdapi.MemberHealth{
+				{Name: "pd1", MemberID: uint64(1), ClientUrls: []string{"http://pd1:2379"}, Health: false},
+			}},
+			err: true,
+			statusChange: func(set *apps.StatefulSet) {
+				set.Status.Replicas = *set.Spec.Replicas
+				set.Status.CurrentRevision = "pd-1"
+				set.Status.UpdateRevision = "pd-1"
+				observedGeneration := int64(1)
+				set.Status.ObservedGeneration = observedGeneration
+			},
+			expectStatefulSetFn: func(g *GomegaWithT, set *apps.StatefulSet, err error) {
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(set.Spec.Template.Spec.Containers[0].Image).To(Equal("pd-test-image:v2"))
+				g.Expect(*set.Spec.Replicas).To(Equal(int32(1)))
+				g.Expect(*set.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(int32(0)))
+			},
+			expectTidbClusterFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster) {
+				g.Expect(tc.Status.PD.Phase).To(Equal(v1alpha1.UpgradePhase))
+			},
+		},
+		{
+			name: "can't force upgrade when PD replicas less than 2 but peer store isn't empty",
+			preModify: func(cluster *v1alpha1.TidbCluster) {
+				cluster.Spec.PD.Replicas = 1
+				cluster.Status.PD.PeerMembers = map[string]v1alpha1.PDMember{"peer-0": {Name: "peer-0", ID: "peer-0", ClientURL: "http://peer-0:2379", Health: true}}
+			},
+			modify: func(cluster *v1alpha1.TidbCluster) {
+				cluster.Spec.PD.Image = "pd-test-image:v2"
+			},
+			pdHealth: &pdapi.HealthInfo{Healths: []pdapi.MemberHealth{
+				{Name: "pd1", MemberID: uint64(1), ClientUrls: []string{"http://pd1:2379"}, Health: false},
+			}},
+			err: true,
+			statusChange: func(set *apps.StatefulSet) {
+				set.Status.Replicas = *set.Spec.Replicas
+				set.Status.CurrentRevision = "pd-1"
+				set.Status.UpdateRevision = "pd-1"
+				observedGeneration := int64(1)
+				set.Status.ObservedGeneration = observedGeneration
+			},
+			expectStatefulSetFn: func(g *GomegaWithT, set *apps.StatefulSet, err error) {
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(set.Spec.Template.Spec.Containers[0].Image).To(Equal("pd-test-image"))
+				g.Expect(*set.Spec.Replicas).To(Equal(int32(1)))
+				g.Expect(*set.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(int32(1)))
+			},
+			expectTidbClusterFn: func(g *GomegaWithT, tc *v1alpha1.TidbCluster) {
+				g.Expect(tc.Status.PD.Phase).To(Equal(v1alpha1.NormalPhase))
 			},
 		},
 		{
@@ -764,10 +932,12 @@ func newFakePDMemberManager() (*pdMemberManager, cache.Indexer, cache.Indexer) {
 	podIndexer := fakeDeps.KubeInformerFactory.Core().V1().Pods().Informer().GetIndexer()
 	pvcIndexer := fakeDeps.KubeInformerFactory.Core().V1().PersistentVolumeClaims().Informer().GetIndexer()
 	pdManager := &pdMemberManager{
-		deps:     fakeDeps,
-		scaler:   NewFakePDScaler(),
-		upgrader: NewFakePDUpgrader(),
-		failover: NewFakePDFailover(),
+		deps:              fakeDeps,
+		scaler:            NewFakePDScaler(),
+		upgrader:          NewFakePDUpgrader(),
+		failover:          NewFakePDFailover(),
+		suspender:         suspender.NewFakeSuspender(),
+		podVolumeModifier: &volumes.FakePodVolumeModifier{},
 	}
 	return pdManager, podIndexer, pvcIndexer
 }
@@ -813,6 +983,20 @@ func newTidbClusterForPD() *v1alpha1.TidbCluster {
 				StorageClassName: pointer.StringPtr("my-storage-class"),
 			},
 			TiDB: &v1alpha1.TiDBSpec{},
+			TiFlash: &v1alpha1.TiFlashSpec{
+				ComponentSpec: v1alpha1.ComponentSpec{
+					Image: "tiflash-test-image",
+				},
+				ResourceRequirements: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:     resource.MustParse("1"),
+						corev1.ResourceMemory:  resource.MustParse("2Gi"),
+						corev1.ResourceStorage: resource.MustParse("100Gi"),
+					},
+				},
+				Replicas: 3,
+			},
+			TiProxy: &v1alpha1.TiProxySpec{},
 		},
 	}
 }
@@ -866,9 +1050,15 @@ func TestGetNewPDHeadlessServiceForTidbCluster(t *testing.T) {
 					ClusterIP: "None",
 					Ports: []corev1.ServicePort{
 						{
-							Name:       "peer",
-							Port:       2380,
-							TargetPort: intstr.FromInt(2380),
+							Name:       "tcp-peer-2380",
+							Port:       v1alpha1.DefaultPDPeerPort,
+							TargetPort: intstr.FromInt(int(v1alpha1.DefaultPDPeerPort)),
+							Protocol:   corev1.ProtocolTCP,
+						},
+						{
+							Name:       "tcp-peer-2379",
+							Port:       v1alpha1.DefaultPDClientPort,
+							TargetPort: intstr.FromInt(int(v1alpha1.DefaultPDClientPort)),
 							Protocol:   corev1.ProtocolTCP,
 						},
 					},
@@ -884,7 +1074,8 @@ func TestGetNewPDHeadlessServiceForTidbCluster(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
+	for i := range tests {
+		tt := tests[i]
 		t.Run(tt.name, func(t *testing.T) {
 			svc := getNewPDHeadlessServiceForTidbCluster(&tt.tc)
 			if diff := cmp.Diff(tt.expected, *svc); diff != "" {
@@ -898,6 +1089,9 @@ func testHostNetwork(t *testing.T, hostNetwork bool, dnsPolicy v1.DNSPolicy) fun
 	return func(sts *apps.StatefulSet) {
 		if hostNetwork != sts.Spec.Template.Spec.HostNetwork {
 			t.Errorf("unexpected hostNetwork %v, want %v", sts.Spec.Template.Spec.HostNetwork, hostNetwork)
+		}
+		if len(dnsPolicy) == 0 {
+			dnsPolicy = v1.DNSClusterFirst
 		}
 		if dnsPolicy != sts.Spec.Template.Spec.DNSPolicy {
 			t.Errorf("unexpected dnsPolicy %v, want %v", sts.Spec.Template.Spec.DNSPolicy, dnsPolicy)
@@ -915,13 +1109,27 @@ func testAnnotations(t *testing.T, annotations map[string]string) func(sts *apps
 
 func testContainerEnv(t *testing.T, env []corev1.EnvVar, memberType v1alpha1.MemberType) func(sts *apps.StatefulSet) {
 	return func(sts *apps.StatefulSet) {
-		got := []corev1.EnvVar{}
+		var got []corev1.EnvVar
 		for _, c := range sts.Spec.Template.Spec.Containers {
 			if c.Name == memberType.String() {
 				got = c.Env
 			}
 		}
 		if diff := cmp.Diff(env, got); diff != "" {
+			t.Errorf("unexpected (-want, +got): %s", diff)
+		}
+	}
+}
+
+func testContainerEnvFrom(t *testing.T, envFrom []corev1.EnvFromSource, memberType v1alpha1.MemberType) func(sts *apps.StatefulSet) {
+	return func(sts *apps.StatefulSet) {
+		var got []corev1.EnvFromSource
+		for _, c := range sts.Spec.Template.Spec.Containers {
+			if c.Name == memberType.String() {
+				got = c.EnvFrom
+			}
+		}
+		if diff := cmp.Diff(envFrom, got); diff != "" {
 			t.Errorf("unexpected (-want, +got): %s", diff)
 		}
 	}
@@ -1745,10 +1953,37 @@ func TestGetNewPDSetForTidbCluster(t *testing.T) {
 				}))
 			},
 		},
-		// TODO add more tests
+		{
+			name: "PD spec readiness",
+			tc: v1alpha1.TidbCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tc",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.TidbClusterSpec{
+					PD: &v1alpha1.PDSpec{
+						ComponentSpec: v1alpha1.ComponentSpec{
+							ReadinessProbe: &v1alpha1.Probe{
+								Type: pointer.StringPtr("tcp"),
+							},
+						},
+					},
+					TiKV: &v1alpha1.TiKVSpec{},
+					TiDB: &v1alpha1.TiDBSpec{},
+				},
+			},
+			testSts: func(sts *apps.StatefulSet) {
+				g := NewGomegaWithT(t)
+				g.Expect(sts.Spec.Template.Spec.Containers[0].ReadinessProbe).To(Equal(&corev1.Probe{
+					ProbeHandler:        buildPDReadinessProbHandler(nil),
+					InitialDelaySeconds: int32(10),
+				}))
+			},
+		},
 	}
 
-	for _, tt := range tests {
+	for i := range tests {
+		tt := tests[i]
 		t.Run(tt.name, func(t *testing.T) {
 			sts, err := getNewPDSetForTidbCluster(&tt.tc, nil)
 			if (err != nil) != tt.wantErr {
@@ -2014,9 +2249,67 @@ func TestGetPDConfigMap(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "tidb version nightly, tidb client tls is enabled and skip ca is configured",
+			tc: v1alpha1.TidbCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tls-nightly",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.TidbClusterSpec{
+					PD: &v1alpha1.PDSpec{
+						ComponentSpec: v1alpha1.ComponentSpec{
+							Image: "pingcap/pd:nightly",
+						},
+						Config: v1alpha1.NewPDConfig(),
+					},
+					TiDB: &v1alpha1.TiDBSpec{
+						TLSClient: &v1alpha1.TiDBTLSClient{
+							Enabled:              true,
+							SkipInternalClientCA: true,
+						},
+					},
+					TiKV: &v1alpha1.TiKVSpec{},
+				},
+			},
+			expected: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tls-nightly-pd",
+					Namespace: "ns",
+					Labels: map[string]string{
+						"app.kubernetes.io/name":       "tidb-cluster",
+						"app.kubernetes.io/managed-by": "tidb-operator",
+						"app.kubernetes.io/instance":   "tls-nightly",
+						"app.kubernetes.io/component":  "pd",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "pingcap.com/v1alpha1",
+							Kind:       "TidbCluster",
+							Name:       "tls-nightly",
+							UID:        "",
+							Controller: func(b bool) *bool {
+								return &b
+							}(true),
+							BlockOwnerDeletion: func(b bool) *bool {
+								return &b
+							}(true),
+						},
+					},
+				},
+				Data: map[string]string{
+					"startup-script": "",
+					"config-file": `[dashboard]
+  tidb-cert-path = "/var/lib/tidb-client-tls/tls.crt"
+  tidb-key-path = "/var/lib/tidb-client-tls/tls.key"
+`,
+				},
+			},
+		},
 	}
 
-	for _, tt := range testCases {
+	for i := range testCases {
+		tt := testCases[i]
 		t.Run(tt.name, func(t *testing.T) {
 			cm, err := getPDConfigMap(&tt.tc)
 			g.Expect(err).To(Succeed())
@@ -2091,8 +2384,8 @@ func TestGetNewPdServiceForTidbCluster(t *testing.T) {
 					Ports: []corev1.ServicePort{
 						{
 							Name:       "client",
-							Port:       2379,
-							TargetPort: intstr.FromInt(2379),
+							Port:       v1alpha1.DefaultPDClientPort,
+							TargetPort: intstr.FromInt(int(v1alpha1.DefaultPDClientPort)),
 							Protocol:   corev1.ProtocolTCP,
 						},
 					},
@@ -2159,8 +2452,8 @@ func TestGetNewPdServiceForTidbCluster(t *testing.T) {
 					Ports: []corev1.ServicePort{
 						{
 							Name:       "client",
-							Port:       2379,
-							TargetPort: intstr.FromInt(2379),
+							Port:       v1alpha1.DefaultPDClientPort,
+							TargetPort: intstr.FromInt(int(v1alpha1.DefaultPDClientPort)),
 							Protocol:   corev1.ProtocolTCP,
 						},
 					},
@@ -2227,8 +2520,8 @@ func TestGetNewPdServiceForTidbCluster(t *testing.T) {
 					Ports: []corev1.ServicePort{
 						{
 							Name:       "client",
-							Port:       2379,
-							TargetPort: intstr.FromInt(2379),
+							Port:       v1alpha1.DefaultPDClientPort,
+							TargetPort: intstr.FromInt(int(v1alpha1.DefaultPDClientPort)),
 							Protocol:   corev1.ProtocolTCP,
 						},
 					},
@@ -2296,8 +2589,8 @@ func TestGetNewPdServiceForTidbCluster(t *testing.T) {
 					Ports: []corev1.ServicePort{
 						{
 							Name:       "client",
-							Port:       2379,
-							TargetPort: intstr.FromInt(2379),
+							Port:       v1alpha1.DefaultPDClientPort,
+							TargetPort: intstr.FromInt(int(v1alpha1.DefaultPDClientPort)),
 							Protocol:   corev1.ProtocolTCP,
 						},
 					},
@@ -2368,8 +2661,8 @@ func TestGetNewPdServiceForTidbCluster(t *testing.T) {
 					Ports: []corev1.ServicePort{
 						{
 							Name:       "http-pd",
-							Port:       2379,
-							TargetPort: intstr.FromInt(2379),
+							Port:       v1alpha1.DefaultPDClientPort,
+							TargetPort: intstr.FromInt(int(v1alpha1.DefaultPDClientPort)),
 							Protocol:   corev1.ProtocolTCP,
 						},
 					},
@@ -2384,7 +2677,8 @@ func TestGetNewPdServiceForTidbCluster(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
+	for i := range tests {
+		tt := tests[i]
 		t.Run(tt.name, func(t *testing.T) {
 			pmm, _, _ := newFakePDMemberManager()
 			svc := pmm.getNewPDServiceForTidbCluster(&tt.tc)
@@ -2875,7 +3169,7 @@ func TestPDShouldRecover(t *testing.T) {
 			defer cancel()
 			fakeDeps := controller.NewFakeDependencies()
 			for _, pod := range tt.pods {
-				fakeDeps.KubeClientset.CoreV1().Pods(pod.Namespace).Create(pod)
+				fakeDeps.KubeClientset.CoreV1().Pods(pod.Namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
 			}
 			kubeInformerFactory := fakeDeps.KubeInformerFactory
 			kubeInformerFactory.Start(ctx.Done())

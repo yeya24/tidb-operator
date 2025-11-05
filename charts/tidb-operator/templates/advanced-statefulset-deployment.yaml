@@ -3,6 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: advanced-statefulset-controller
+  namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/name: {{ template "chart.name" . }}
     app.kubernetes.io/managed-by: {{ .Release.Service }}
@@ -37,6 +38,9 @@ spec:
         - --leader-elect
         - --leader-elect-resource-name=advanced-statefulset-controller
         - --leader-elect-resource-namespace=$(POD_NAMESPACE)
+        {{- if .Values.advancedStatefulset.resourceLock }}
+        - --leader-elect-resource-lock={{ .Values.advancedStatefulset.resourceLock }}
+        {{- end }}
         env:
         - name: POD_NAMESPACE
           valueFrom:

@@ -24,7 +24,7 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	errorutils "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // ControlInterface implements the control logic for updating DMClusters and their children StatefulSets.
@@ -131,7 +131,7 @@ func (c *defaultDMClusterControl) updateDMCluster(dc *v1alpha1.DMCluster) error 
 	if err != nil {
 		return err
 	}
-	if klog.V(10) {
+	if klog.V(10).Enabled() {
 		for podName, reason := range skipReasons {
 			klog.Infof("pod %s of cluster %s/%s is skipped, reason %q", podName, dc.Namespace, dc.Name, reason)
 		}
@@ -142,7 +142,7 @@ func (c *defaultDMClusterControl) updateDMCluster(dc *v1alpha1.DMCluster) error 
 		return err
 	}
 
-	// works that should do to making the dm-master cluster current state match the desired state:
+	// works that should be done to make the dm-master cluster current state match the desired state:
 	//   - create or update the dm-master service
 	//   - create or update the dm-master headless service
 	//   - create the dm-master statefulset
@@ -157,7 +157,7 @@ func (c *defaultDMClusterControl) updateDMCluster(dc *v1alpha1.DMCluster) error 
 		errs = append(errs, err)
 	}
 
-	// works that should do to making the dm-worker cluster current state match the desired state:
+	// works that should be done to make the dm-worker cluster current state match the desired state:
 	//   - waiting for the dm-master cluster available(dm-master cluster is in quorum)
 	//   - create or update dm-worker headless service
 	//   - create the dm-worker statefulset
@@ -181,7 +181,7 @@ func (c *defaultDMClusterControl) updateDMCluster(dc *v1alpha1.DMCluster) error 
 	if err != nil {
 		return err
 	}
-	if klog.V(10) {
+	if klog.V(10).Enabled() {
 		for pvcName, reason := range pvcSkipReasons {
 			klog.Infof("pvc %s of cluster %s/%s is skipped, reason %q", pvcName, dc.Namespace, dc.Name, reason)
 		}
@@ -193,7 +193,7 @@ func (c *defaultDMClusterControl) updateDMCluster(dc *v1alpha1.DMCluster) error 
 	// return c.tidbClusterStatusManager.Sync(dc)
 
 	// resize PVC if necessary
-	if err := c.pvcResizer.ResizeDM(dc); err != nil {
+	if err := c.pvcResizer.SyncDM(dc); err != nil {
 		errs = append(errs, err)
 	}
 	return errorutils.NewAggregate(errs)

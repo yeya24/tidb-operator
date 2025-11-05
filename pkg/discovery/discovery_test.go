@@ -14,6 +14,7 @@
 package discovery
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	"github.com/pingcap/tidb-operator/pkg/pdapi"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kubeinformers "k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 )
 
@@ -46,11 +48,12 @@ func TestDiscoveryDiscovery(t *testing.T) {
 	testFn := func(test testcase, t *testing.T) {
 		cli := fake.NewSimpleClientset()
 		kubeCli := kubefake.NewSimpleClientset()
-		fakePDControl := pdapi.NewFakePDControl(kubeCli)
-		fakeMasterControl := dmapi.NewFakeMasterControl(kubeCli)
+		informer := kubeinformers.NewSharedInformerFactory(kubeCli, 0)
+		fakePDControl := pdapi.NewFakePDControl(informer.Core().V1().Secrets().Lister())
+		fakeMasterControl := dmapi.NewFakeMasterControl(informer.Core().V1().Secrets().Lister())
 		pdClient := pdapi.NewFakePDClient()
 		if test.tc != nil {
-			cli.PingcapV1alpha1().TidbClusters(test.tc.Namespace).Create(test.tc)
+			cli.PingcapV1alpha1().TidbClusters(test.tc.Namespace).Create(context.TODO(), test.tc, metav1.CreateOptions{})
 			fakePDControl.SetPDClient(pdapi.Namespace(test.tc.GetNamespace()), test.tc.GetName(), pdClient)
 		}
 		pdClient.AddReaction(pdapi.GetMembersActionType, func(action *pdapi.Action) (interface{}, error) {
@@ -547,11 +550,12 @@ func TestDiscoveryDMDiscovery(t *testing.T) {
 	testFn := func(test testcase, t *testing.T) {
 		cli := fake.NewSimpleClientset()
 		kubeCli := kubefake.NewSimpleClientset()
-		fakePDControl := pdapi.NewFakePDControl(kubeCli)
-		fakeMasterControl := dmapi.NewFakeMasterControl(kubeCli)
+		informer := kubeinformers.NewSharedInformerFactory(kubeCli, 0)
+		fakePDControl := pdapi.NewFakePDControl(informer.Core().V1().Secrets().Lister())
+		fakeMasterControl := dmapi.NewFakeMasterControl(informer.Core().V1().Secrets().Lister())
 		masterClient := dmapi.NewFakeMasterClient()
 		if test.dc != nil {
-			cli.PingcapV1alpha1().DMClusters(test.dc.Namespace).Create(test.dc)
+			cli.PingcapV1alpha1().DMClusters(test.dc.Namespace).Create(context.TODO(), test.dc, metav1.CreateOptions{})
 			fakeMasterControl.SetMasterClient(test.dc.GetNamespace(), test.dc.GetName(), masterClient)
 		}
 		masterClient.AddReaction(dmapi.GetMastersActionType, func(action *dmapi.Action) (interface{}, error) {
@@ -896,8 +900,9 @@ func TestDiscoveryVerifyPDEndpoint(t *testing.T) {
 	testFn := func(test testcase, t *testing.T) {
 		cli := fake.NewSimpleClientset()
 		kubeCli := kubefake.NewSimpleClientset()
-		fakePDControl := pdapi.NewFakePDControl(kubeCli)
-		fakeMasterControl := dmapi.NewFakeMasterControl(kubeCli)
+		informer := kubeinformers.NewSharedInformerFactory(kubeCli, 0)
+		fakePDControl := pdapi.NewFakePDControl(informer.Core().V1().Secrets().Lister())
+		fakeMasterControl := dmapi.NewFakeMasterControl(informer.Core().V1().Secrets().Lister())
 		tc := newTC()
 
 		ns := "default"
@@ -971,7 +976,7 @@ func TestDiscoveryVerifyPDEndpoint(t *testing.T) {
 			}
 		}
 
-		cli.PingcapV1alpha1().TidbClusters(ns).Create(tc)
+		cli.PingcapV1alpha1().TidbClusters(ns).Create(context.TODO(), tc, metav1.CreateOptions{})
 		td := NewTiDBDiscovery(fakePDControl, fakeMasterControl, cli, kubeCli)
 
 		os.Setenv("MY_POD_NAMESPACE", test.ns)

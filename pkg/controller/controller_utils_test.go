@@ -17,8 +17,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/pingcap/tidb-operator/pkg/label"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	. "github.com/onsi/gomega"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
@@ -34,8 +35,6 @@ func TestRequeueError(t *testing.T) {
 
 	err := RequeueErrorf("i am a requeue %s", "error")
 	g.Expect(IsRequeueError(err)).To(BeTrue())
-	_, ok := err.(error)
-	g.Expect(ok).To(BeTrue())
 	g.Expect(err.Error()).To(Equal("i am a requeue error"))
 	g.Expect(IsRequeueError(fmt.Errorf("i am not a requeue error"))).To(BeFalse())
 }
@@ -45,8 +44,6 @@ func TestIgnoreError(t *testing.T) {
 
 	err := IgnoreErrorf("i am an ignore %s", "error")
 	g.Expect(IsIgnoreError(err)).To(BeTrue())
-	_, ok := err.(error)
-	g.Expect(ok).To(BeTrue())
 	g.Expect(err.Error()).To(Equal("i am an ignore error"))
 	g.Expect(IsIgnoreError(fmt.Errorf("i am not an ignore error"))).To(BeFalse())
 }
@@ -121,15 +118,15 @@ func TestGetBackupScheduleOwnerRef(t *testing.T) {
 	g.Expect(*ref.BlockOwnerDeletion).To(BeTrue())
 }
 
-func TestGetTiDBClusterAutoScalerOwnerRef(t *testing.T) {
+func TestGetTiDBNGMonitoringOwnerRef(t *testing.T) {
 	g := NewGomegaWithT(t)
 
-	tc := newTidbClusterAutoScaler()
-	tc.UID = types.UID("demo-uid")
-	ref := GetTiDBClusterAutoScalerOwnerRef(tc)
-	g.Expect(ref.APIVersion).To(Equal(tidbClusterAutoScalerKind.GroupVersion().String()))
-	g.Expect(ref.Kind).To(Equal(tidbClusterAutoScalerKind.Kind))
-	g.Expect(ref.Name).To(Equal(tc.GetName()))
+	tngm := newTidbNGMonitoring()
+	tngm.UID = types.UID("demo-uid")
+	ref := GetTiDBNGMonitoringOwnerRef(tngm)
+	g.Expect(ref.APIVersion).To(Equal(tidbNGMonitoringKind.GroupVersion().String()))
+	g.Expect(ref.Kind).To(Equal(tidbNGMonitoringKind.Kind))
+	g.Expect(ref.Name).To(Equal(tngm.GetName()))
 	g.Expect(ref.UID).To(Equal(types.UID("demo-uid")))
 	g.Expect(*ref.Controller).To(BeTrue())
 	g.Expect(*ref.BlockOwnerDeletion).To(BeTrue())
@@ -223,6 +220,7 @@ func TestTiKVCapacity(t *testing.T) {
 func TestPDMemberName(t *testing.T) {
 	g := NewGomegaWithT(t)
 	g.Expect(PDMemberName("demo")).To(Equal("demo-pd"))
+	g.Expect(MemberName("demo", v1alpha1.PDMemberType)).To(Equal("demo-pd"))
 }
 
 func TestPDPeerMemberName(t *testing.T) {
@@ -233,6 +231,7 @@ func TestPDPeerMemberName(t *testing.T) {
 func TestTiKVMemberName(t *testing.T) {
 	g := NewGomegaWithT(t)
 	g.Expect(TiKVMemberName("demo")).To(Equal("demo-tikv"))
+	g.Expect(MemberName("demo", v1alpha1.TiKVMemberType)).To(Equal("demo-tikv"))
 }
 
 func TestTiKVPeerMemberName(t *testing.T) {
@@ -243,6 +242,7 @@ func TestTiKVPeerMemberName(t *testing.T) {
 func TestTiDBMemberName(t *testing.T) {
 	g := NewGomegaWithT(t)
 	g.Expect(TiDBMemberName("demo")).To(Equal("demo-tidb"))
+	g.Expect(MemberName("demo", v1alpha1.TiDBMemberType)).To(Equal("demo-tidb"))
 }
 
 func TestTiDBPeerMemberName(t *testing.T) {
@@ -258,6 +258,7 @@ func TestPumpMemberName(t *testing.T) {
 func TestPumpPeerMemberName(t *testing.T) {
 	g := NewGomegaWithT(t)
 	g.Expect(PumpPeerMemberName("demo")).To(Equal("demo-pump"))
+	g.Expect(MemberName("demo", v1alpha1.PumpMemberType)).To(Equal("demo-pump"))
 }
 
 func TestDiscoveryMemberName(t *testing.T) {
@@ -268,6 +269,7 @@ func TestDiscoveryMemberName(t *testing.T) {
 func TestDMMasterMemberName(t *testing.T) {
 	g := NewGomegaWithT(t)
 	g.Expect(DMMasterMemberName("demo")).To(Equal("demo-dm-master"))
+	g.Expect(MemberName("demo", v1alpha1.DMMasterMemberType)).To(Equal("demo-dm-master"))
 }
 
 func TestDMMasterPeerMemberName(t *testing.T) {
@@ -278,6 +280,7 @@ func TestDMMasterPeerMemberName(t *testing.T) {
 func TestDMWorkerMemberName(t *testing.T) {
 	g := NewGomegaWithT(t)
 	g.Expect(DMWorkerMemberName("demo")).To(Equal("demo-dm-worker"))
+	g.Expect(MemberName("demo", v1alpha1.DMWorkerMemberType)).To(Equal("demo-dm-worker"))
 }
 
 func TestDMWorkerPeerMemberName(t *testing.T) {
@@ -288,7 +291,7 @@ func TestDMWorkerPeerMemberName(t *testing.T) {
 func TestAnnProm(t *testing.T) {
 	g := NewGomegaWithT(t)
 
-	ann := AnnProm(int32(9090))
+	ann := AnnProm(int32(9090), "/metrics")
 	g.Expect(ann["prometheus.io/scrape"]).To(Equal("true"))
 	g.Expect(ann["prometheus.io/path"]).To(Equal("/metrics"))
 	g.Expect(ann["prometheus.io/port"]).To(Equal("9090"))
@@ -370,6 +373,102 @@ func TestMemberConfigMapName(t *testing.T) {
 	}
 }
 
+func TestEmptyClone(t *testing.T) {
+	g := NewGomegaWithT(t)
+	type testcase struct {
+		name  string
+		obj   client.Object
+		empty client.Object
+	}
+
+	cases := []testcase{
+		{
+			name:  "tidb-cluster",
+			obj:   newTidbCluster(),
+			empty: &v1alpha1.TidbCluster{},
+		},
+		{
+			name:  "dm-cluster",
+			obj:   newDMCluster(),
+			empty: &v1alpha1.DMCluster{},
+		},
+		{
+			name:  "tidb-ng-monitoring",
+			obj:   newTidbNGMonitoring(),
+			empty: &v1alpha1.TidbNGMonitoring{},
+		},
+		{
+			name:  "backup",
+			obj:   newBackup(),
+			empty: &v1alpha1.Backup{},
+		},
+		{
+			name:  "stateful-set",
+			obj:   newStatefulSet(newTidbCluster(), ""),
+			empty: &apps.StatefulSet{},
+		},
+		{
+			name:  "service",
+			obj:   newService(newTidbCluster(), ""),
+			empty: &corev1.Service{},
+		},
+	}
+
+	for _, tcase := range cases {
+		t.Log(tcase.name)
+
+		tcase.empty.SetName(tcase.obj.GetName())
+		tcase.empty.SetNamespace(tcase.obj.GetNamespace())
+
+		output, err := EmptyClone(tcase.obj)
+		g.Expect(err).Should(Succeed())
+		g.Expect(output).Should(Equal(tcase.empty))
+	}
+}
+
+func TestDeepCopyClientObject(t *testing.T) {
+	g := NewGomegaWithT(t)
+	type testcase struct {
+		name string
+		obj  client.Object
+	}
+
+	cases := []testcase{
+		{
+			name: "tidb-cluster",
+			obj:  newTidbCluster(),
+		},
+		{
+			name: "dm-cluster",
+			obj:  newDMCluster(),
+		},
+		{
+			name: "tidb-ng-monitoring",
+			obj:  newTidbNGMonitoring(),
+		},
+		{
+			name: "backup",
+			obj:  newBackup(),
+		},
+		{
+			name: "stateful-set",
+			obj:  newStatefulSet(newTidbCluster(), ""),
+		},
+		{
+			name: "service",
+			obj:  newService(newTidbCluster(), ""),
+		},
+	}
+
+	for _, tcase := range cases {
+		t.Log(tcase.name)
+
+		obj := DeepCopyClientObject(tcase.obj)
+		g.Expect(obj == tcase.obj).Should(BeFalse()) // compare pointer
+		g.Expect(obj).Should(Equal(tcase.obj))       // compare content
+	}
+}
+
 func TestSetIfNotEmpty(t *testing.T) {
 	g := NewGomegaWithT(t)
 
@@ -427,6 +526,15 @@ func TestSetIfNotEmpty(t *testing.T) {
 	}
 }
 
+func TestTrimName(t *testing.T) {
+	g := NewGomegaWithT(t)
+	name := "basic-tso-peer"
+	g.Expect(PDMSTrimName(name)).To(Equal("tso"))
+
+	name = "basic-tso"
+	g.Expect(PDMSTrimName(name)).To(Equal("tso"))
+}
+
 func collectEvents(source <-chan string) []string {
 	done := false
 	events := make([]string, 0)
@@ -458,22 +566,6 @@ func newTidbCluster() *v1alpha1.TidbCluster {
 	return tc
 }
 
-func newTidbClusterAutoScaler() *v1alpha1.TidbClusterAutoScaler {
-	tc := &v1alpha1.TidbClusterAutoScaler{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "demo",
-			Namespace: metav1.NamespaceDefault,
-		},
-		Spec: v1alpha1.TidbClusterAutoScalerSpec{
-			Cluster: v1alpha1.TidbClusterRef{
-				Name:      "demo",
-				Namespace: metav1.NamespaceDefault,
-			},
-		},
-	}
-	return tc
-}
-
 func newDMCluster() *v1alpha1.DMCluster {
 	retainPVP := corev1.PersistentVolumeReclaimRetain
 	dc := &v1alpha1.DMCluster{
@@ -489,6 +581,18 @@ func newDMCluster() *v1alpha1.DMCluster {
 		},
 	}
 	return dc
+}
+
+func newTidbNGMonitoring() *v1alpha1.TidbNGMonitoring {
+	tngm := &v1alpha1.TidbNGMonitoring{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: metav1.NamespaceDefault,
+		},
+		Spec: v1alpha1.TidbNGMonitoringSpec{},
+	}
+
+	return tngm
 }
 
 func newService(tc *v1alpha1.TidbCluster, _ string) *corev1.Service {

@@ -20,11 +20,13 @@ import (
 	"time"
 
 	"github.com/pingcap/tidb-operator/tests"
+	"github.com/pingcap/tidb-operator/tests/e2e/util"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	cliflag "k8s.io/component-base/cli/flag"
-	"k8s.io/kubernetes/test/e2e/framework"
+
+	framework "github.com/pingcap/tidb-operator/tests/third_party/k8s"
 )
 
 // Global Test configuration.
@@ -36,6 +38,7 @@ func RegisterTiDBOperatorFlags(flags *flag.FlagSet) {
 	flags.IntVar(&TestConfig.FaultTriggerPort, "fault-trigger-port", 23332, "the http port of fault trigger service")
 	flags.StringVar(&TestConfig.E2EImage, "e2e-image", "", "e2e image")
 	flags.BoolVar(&TestConfig.InstallOperator, "install-operator", true, "install a default operator")
+	flags.BoolVar(&TestConfig.InstallDMMysql, "install-dm-mysql", true, "install mysql and tidb for dm test")
 	flags.StringVar(&TestConfig.OperatorTag, "operator-tag", "master", "operator tag used to choose charts")
 	flags.StringVar(&TestConfig.OperatorImage, "operator-image", "pingcap/tidb-operator:latest", "operator image")
 	flags.Var(cliflag.NewMapStringBool(&TestConfig.OperatorFeatures), "operator-features", "a set of key=value pairs that describe feature gates for operator")
@@ -94,9 +97,9 @@ func NewDefaultOperatorConfig(cfg *tests.Config) *tests.OperatorConfig {
 		ReleaseName:               "operator",
 		Image:                     cfg.OperatorImage,
 		Tag:                       cfg.OperatorTag,
-		ControllerManagerReplicas: tests.IntPtr(2),
-		SchedulerImage:            "k8s.gcr.io/kube-scheduler",
-		SchedulerReplicas:         tests.IntPtr(2),
+		ControllerManagerReplicas: util.IntPtr(2),
+		SchedulerImage:            "registry.k8s.io/kube-scheduler",
+		SchedulerReplicas:         util.IntPtr(2),
 		Features:                  features,
 		LogLevel:                  "4",
 		WebhookServiceName:        "webhook-service",
@@ -106,7 +109,6 @@ func NewDefaultOperatorConfig(cfg *tests.Config) *tests.OperatorConfig {
 		TestMode:                  true,
 		WebhookEnabled:            true,
 		StsWebhookEnabled:         true,
-		PodWebhookEnabled:         false,
 		Cabundle:                  "",
 		BackupImage:               cfg.BackupImage,
 		StringValues: map[string]string{

@@ -22,6 +22,8 @@ import (
 	"github.com/pingcap/tidb-operator/pkg/controller"
 	mm "github.com/pingcap/tidb-operator/pkg/manager/member"
 	"github.com/pingcap/tidb-operator/pkg/manager/meta"
+	"github.com/pingcap/tidb-operator/pkg/manager/suspender"
+	"github.com/pingcap/tidb-operator/pkg/metrics"
 
 	apps "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -30,7 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // Controller controls dmclusters.
@@ -42,14 +44,16 @@ type Controller struct {
 	queue workqueue.RateLimitingInterface
 }
 
-// NewController creates a dm controller.
+// NewController creates a dmcluster controller.
 func NewController(deps *controller.Dependencies) *Controller {
+	suspender := suspender.NewSuspender(deps)
+
 	c := &Controller{
 		deps: deps,
 		control: NewDefaultDMClusterControl(
 			deps.DMClusterControl,
-			mm.NewMasterMemberManager(deps, mm.NewMasterScaler(deps), mm.NewMasterUpgrader(deps), mm.NewMasterFailover(deps)),
-			mm.NewWorkerMemberManager(deps, mm.NewWorkerScaler(deps), mm.NewWorkerFailover(deps)),
+			mm.NewMasterMemberManager(deps, mm.NewMasterScaler(deps), mm.NewMasterUpgrader(deps), mm.NewMasterFailover(deps), suspender),
+			mm.NewWorkerMemberManager(deps, mm.NewWorkerScaler(deps), mm.NewWorkerFailover(deps), suspender),
 			meta.NewReclaimPolicyManager(deps),
 			mm.NewOrphanPodsCleaner(deps),
 			mm.NewRealPVCCleaner(deps),
@@ -83,6 +87,11 @@ func NewController(deps *controller.Dependencies) *Controller {
 	return c
 }
 
+// Name returns the dmcluster controller name
+func (c *Controller) Name() string {
+	return "dmcluster"
+}
+
 // Run runs the dmcluster controller.
 func (c *Controller) Run(workers int, stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
@@ -107,6 +116,9 @@ func (c *Controller) worker() {
 // processNextWorkItem dequeues items, processes them, and marks them done. It enforces that the syncHandler is never
 // invoked concurrently with the same key.
 func (c *Controller) processNextWorkItem() bool {
+	metrics.ActiveWorkers.WithLabelValues(c.Name()).Add(1)
+	defer metrics.ActiveWorkers.WithLabelValues(c.Name()).Add(-1)
+
 	key, quit := c.queue.Get()
 	if quit {
 		return false
@@ -126,10 +138,22 @@ func (c *Controller) processNextWorkItem() bool {
 }
 
 // sync syncs the given dmcluster.
-func (c *Controller) sync(key string) error {
+func (c *Controller) sync(key string) (err error) {
 	startTime := time.Now()
 	defer func() {
-		klog.V(4).Infof("Finished syncing DMCluster %q (%v)", key, time.Since(startTime))
+		duration := time.Since(startTime)
+		metrics.ReconcileTime.WithLabelValues(c.Name()).Observe(duration.Seconds())
+
+		if err == nil {
+			metrics.ReconcileTotal.WithLabelValues(c.Name(), metrics.LabelSuccess).Inc()
+		} else if perrors.Find(err, controller.IsRequeueError) != nil {
+			metrics.ReconcileTotal.WithLabelValues(c.Name(), metrics.LabelRequeue).Inc()
+		} else {
+			metrics.ReconcileTotal.WithLabelValues(c.Name(), metrics.LabelError).Inc()
+			metrics.ReconcileErrors.WithLabelValues(c.Name()).Inc()
+		}
+
+		klog.V(4).Infof("Finished syncing DMCluster %q (%v)", key, duration)
 	}()
 
 	ns, name, err := cache.SplitMetaNamespaceKey(key)
@@ -208,8 +232,6 @@ func (c *Controller) updateStatefulSet(old, cur interface{}) {
 // deleteStatefulSet enqueues the dmcluster for the statefulset accounting for deletion tombstones.
 func (c *Controller) deleteStatefulSet(obj interface{}) {
 	set, ok := obj.(*apps.StatefulSet)
-	ns := set.GetNamespace()
-	setName := set.GetName()
 
 	// When a delete is dropped, the relist will notice a statefuset in the store not
 	// in the list, leading to the insertion of a tombstone object which contains
@@ -226,6 +248,9 @@ func (c *Controller) deleteStatefulSet(obj interface{}) {
 			return
 		}
 	}
+
+	ns := set.GetNamespace()
+	setName := set.GetName()
 
 	// If it has a DMCluster, that's all that matters.
 	dc := c.resolveDMClusterFromSet(ns, set)

@@ -10,6 +10,7 @@ metadata:
   {{- else }}
   name: {{ .Values.controllerManager.serviceAccount }}
   {{- end }}
+  namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/name: {{ template "chart.name" . }}
     app.kubernetes.io/managed-by: {{ .Release.Service }}
@@ -37,6 +38,9 @@ rules:
 - apiGroups: [""]
   resources: ["endpoints","configmaps"]
   verbs: ["create", "get", "list", "watch", "update","delete"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["create", "get", "list", "watch", "update","delete"]
 - apiGroups: [""]
   resources: ["serviceaccounts"]
   verbs: ["create","get","update","delete"]
@@ -56,6 +60,9 @@ rules:
   resources: ["statefulsets","deployments", "controllerrevisions"]
   verbs: ["*"]
 - apiGroups: ["extensions"]
+  resources: ["ingresses"]
+  verbs: ["*"]
+- apiGroups: ["networking.k8s.io"]
   resources: ["ingresses"]
   verbs: ["*"]
 - apiGroups: ["apps.pingcap.com"]
@@ -79,7 +86,7 @@ rules:
   verbs: ["get", "list", "watch"]
 - apiGroups: [""]
   resources: ["persistentvolumes"]
-  verbs: ["get", "list", "watch", "patch","update"]
+  verbs: ["get", "list", "watch", "patch", "update", "create"]
 - apiGroups: ["storage.k8s.io"]
   resources: ["storageclasses"]
   verbs: ["get", "list", "watch"]
@@ -139,7 +146,7 @@ rules:
   {{- if (eq (include "controller-manager.cluster-permissions.persistentvolumes" . | trim) "true") }}
   - apiGroups: [""]
     resources: ["persistentvolumes"]
-    verbs: ["get", "list", "watch", "patch","update"]
+    verbs: ["create", "get", "list", "watch", "patch", "update"]
   {{- end }}
   {{- if (eq (include "controller-manager.cluster-permissions.storageclasses" . | trim) "true") }}
   - apiGroups: ["storage.k8s.io"]
@@ -175,6 +182,7 @@ kind: Role
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: {{ .Release.Name }}:tidb-controller-manager
+  namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/name: {{ template "chart.name" . }}
     app.kubernetes.io/managed-by: {{ .Release.Service }}
@@ -190,6 +198,9 @@ rules:
 - apiGroups: [""]
   resources: ["endpoints","configmaps"]
   verbs: ["create", "get", "list", "watch", "update", "delete"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["create", "get", "list", "watch", "update","delete"]
 - apiGroups: [""]
   resources: ["serviceaccounts"]
   verbs: ["create","get","update","delete"]
@@ -214,6 +225,9 @@ rules:
 - apiGroups: ["extensions"]
   resources: ["ingresses"]
   verbs: ["*"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["*"]
 - apiGroups: ["pingcap.com"]
   resources: ["*"]
   verbs: ["*"]
@@ -236,6 +250,7 @@ kind: RoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: {{ .Release.Name }}:tidb-controller-manager
+  namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/name: {{ template "chart.name" . }}
     app.kubernetes.io/managed-by: {{ .Release.Service }}

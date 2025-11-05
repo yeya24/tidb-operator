@@ -14,23 +14,33 @@
 package util
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
+	"path"
 	"strings"
+	"time"
+	"unsafe"
 
 	"github.com/Masterminds/semver"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+	"github.com/pingcap/tidb-operator/pkg/apis/util/config"
 	"github.com/pingcap/tidb-operator/pkg/backup/constants"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/klog"
+	"k8s.io/apimachinery/pkg/util/wait"
+	corelisterv1 "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
 )
 
 var (
 	// the first version which allows skipping setting tikv_gc_life_time
 	// https://github.com/pingcap/br/pull/553
-	tikvV408 = semver.MustParse("v4.0.8")
+	tikvLessThanV408, _ = semver.NewConstraint("<v4.0.8-0")
+	// the first version which supports log backup
+	tikvLessThanV610, _ = semver.NewConstraint("<v6.1.0-0")
 )
 
 // CheckAllKeysExistInSecret check if all keys are included in the specific secret
@@ -173,8 +183,77 @@ func generateGcsCertEnvVar(gcs *v1alpha1.GcsStorageProvider) ([]corev1.EnvVar, s
 	return envVars, "", nil
 }
 
+// generateAzblobCertEnvVar generate the env info in order to access azure blob storage
+func generateAzblobCertEnvVar(azblob *v1alpha1.AzblobStorageProvider, secret *corev1.Secret, useSasToken bool) ([]corev1.EnvVar, string, error) {
+	if len(azblob.AccessTier) == 0 {
+		azblob.AccessTier = "Cool"
+	}
+	envVars := []corev1.EnvVar{
+		{
+			Name:  "AZURE_ACCESS_TIER",
+			Value: azblob.AccessTier,
+		},
+		{
+			Name:  "AZURE_STORAGE_ACCOUNT",
+			Value: azblob.StorageAccount,
+		},
+	}
+	if useSasToken {
+		return envVars, "", nil
+	}
+	_, exist := CheckAllKeysExistInSecret(secret, constants.AzblobClientID, constants.AzblobClientScrt, constants.AzblobTenantID)
+	if exist { // using AAD auth
+		envVars = append(envVars, []corev1.EnvVar{
+			{
+				Name: "AZURE_CLIENT_ID",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: azblob.SecretName},
+						Key:                  constants.AzblobClientID,
+					},
+				},
+			},
+			{
+				Name: "AZURE_CLIENT_SECRET",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: azblob.SecretName},
+						Key:                  constants.AzblobClientScrt,
+					},
+				},
+			},
+			{
+				Name: "AZURE_TENANT_ID",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: azblob.SecretName},
+						Key:                  constants.AzblobTenantID,
+					},
+				},
+			},
+		}...)
+		return envVars, "", nil
+	}
+	_, exist = CheckAllKeysExistInSecret(secret, constants.AzblobAccountKey)
+	if exist { // use access key auth
+		envVars = append(envVars, []corev1.EnvVar{
+			{
+				Name: "AZURE_STORAGE_KEY",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: azblob.SecretName},
+						Key:                  constants.AzblobAccountKey,
+					},
+				},
+			},
+		}...)
+		return envVars, "", nil
+	}
+	return nil, "azblobKeyOrAADMissing", fmt.Errorf("secret %s/%s missing some keys", secret.Namespace, secret.Name)
+}
+
 // GenerateStorageCertEnv generate the env info in order to access backend backup storage
-func GenerateStorageCertEnv(ns string, useKMS bool, provider v1alpha1.StorageProvider, kubeCli kubernetes.Interface) ([]corev1.EnvVar, string, error) {
+func GenerateStorageCertEnv(ns string, useKMS bool, provider v1alpha1.StorageProvider, secretLister corelisterv1.SecretLister) ([]corev1.EnvVar, string, error) {
 	var certEnv []corev1.EnvVar
 	var reason string
 	var err error
@@ -184,7 +263,7 @@ func GenerateStorageCertEnv(ns string, useKMS bool, provider v1alpha1.StoragePro
 	case v1alpha1.BackupStorageTypeS3:
 		s3SecretName := provider.S3.SecretName
 		if s3SecretName != "" {
-			secret, err := kubeCli.CoreV1().Secrets(ns).Get(s3SecretName, metav1.GetOptions{})
+			secret, err := secretLister.Secrets(ns).Get(s3SecretName)
 			if err != nil {
 				err := fmt.Errorf("get s3 secret %s/%s failed, err: %v", ns, s3SecretName, err)
 				return certEnv, "GetS3SecretFailed", err
@@ -204,7 +283,7 @@ func GenerateStorageCertEnv(ns string, useKMS bool, provider v1alpha1.StoragePro
 	case v1alpha1.BackupStorageTypeGcs:
 		gcsSecretName := provider.Gcs.SecretName
 		if gcsSecretName != "" {
-			secret, err := kubeCli.CoreV1().Secrets(ns).Get(gcsSecretName, metav1.GetOptions{})
+			secret, err := secretLister.Secrets(ns).Get(gcsSecretName)
 			if err != nil {
 				err := fmt.Errorf("get gcs secret %s/%s failed, err: %v", ns, gcsSecretName, err)
 				return certEnv, "GetGcsSecretFailed", err
@@ -218,6 +297,30 @@ func GenerateStorageCertEnv(ns string, useKMS bool, provider v1alpha1.StoragePro
 		}
 
 		certEnv, reason, err = generateGcsCertEnvVar(provider.Gcs)
+
+		if err != nil {
+			return certEnv, reason, err
+		}
+	case v1alpha1.BackupStorageTypeAzblob:
+		azblobSecretName := provider.Azblob.SecretName
+		var secret *corev1.Secret
+		if azblobSecretName != "" {
+			secret, err = secretLister.Secrets(ns).Get(azblobSecretName)
+			if err != nil {
+				err := fmt.Errorf("get azblob secret %s/%s failed, err: %v", ns, azblobSecretName, err)
+				return certEnv, "GetAzblobSecretFailed", err
+			}
+		}
+		if provider.Azblob.StorageAccount == "" { // try to get storageAccount from secret
+			account := string(secret.Data[constants.AzblobAccountName])
+			if account == "" {
+				err := fmt.Errorf("secret %s/%s missing some keys, storage account unspecified: %v", ns, azblobSecretName, secret.Data)
+				return certEnv, "azblobAccountNotExist", err
+			}
+			provider.Azblob.StorageAccount = account
+		}
+		useSasToken := provider.Azblob.SasToken != ""
+		certEnv, reason, err = generateAzblobCertEnvVar(provider.Azblob, secret, useSasToken)
 
 		if err != nil {
 			return certEnv, reason, err
@@ -240,10 +343,10 @@ func getPasswordKey(useKMS bool) string {
 }
 
 // GenerateTidbPasswordEnv generate the password EnvVar
-func GenerateTidbPasswordEnv(ns, tcName, tidbSecretName string, useKMS bool, kubeCli kubernetes.Interface) ([]corev1.EnvVar, string, error) {
+func GenerateTidbPasswordEnv(ns, tcName, tidbSecretName string, useKMS bool, secretLister corelisterv1.SecretLister) ([]corev1.EnvVar, string, error) {
 	var certEnv []corev1.EnvVar
 	var passwordKey string
-	secret, err := kubeCli.CoreV1().Secrets(ns).Get(tidbSecretName, metav1.GetOptions{})
+	secret, err := secretLister.Secrets(ns).Get(tidbSecretName)
 	if err != nil {
 		err = fmt.Errorf("backup %s/%s get tidb secret %s failed, err: %v", ns, tcName, tidbSecretName, err)
 		return certEnv, "GetTidbSecretFailed", err
@@ -316,6 +419,9 @@ func GetStorageType(provider v1alpha1.StorageProvider) v1alpha1.BackupStorageTyp
 	if provider.Gcs != nil {
 		return v1alpha1.BackupStorageTypeGcs
 	}
+	if provider.Azblob != nil {
+		return v1alpha1.BackupStorageTypeAzblob
+	}
 	if provider.Local != nil {
 		return v1alpha1.BackupStorageTypeLocal
 	}
@@ -359,7 +465,7 @@ func validateAccessConfig(config *v1alpha1.TiDBAccessConfig) string {
 }
 
 // ValidateBackup validates backup sepc
-func ValidateBackup(backup *v1alpha1.Backup, tikvImage string) error {
+func ValidateBackup(backup *v1alpha1.Backup, tikvImage string, tc *v1alpha1.TidbCluster) error {
 	ns := backup.Namespace
 	name := backup.Name
 
@@ -409,12 +515,57 @@ func ValidateBackup(backup *v1alpha1.Backup, tikvImage string) error {
 				return err
 			}
 		}
+
+		// validate log backup
+		if backup.Spec.Mode == v1alpha1.BackupModeLog {
+			if !isLogBackSupport(tikvImage) {
+				return fmt.Errorf("tikv %s doesn't support log backup in spec of %s/%s, the first version is v6.1.0", tikvImage, ns, name)
+			}
+			var err error
+			_, err = config.ParseTSString(backup.Spec.CommitTs)
+			if err != nil {
+				return err
+			}
+			if v1alpha1.ParseLogBackupSubcommand(backup) == v1alpha1.LogTruncateCommand && backup.Spec.LogTruncateUntil == "" {
+				return fmt.Errorf("log backup %s/%s truncate command missing 'logTruncateUntil'", ns, name)
+
+			}
+			_, err = config.ParseTSString(backup.Spec.LogTruncateUntil)
+			if err != nil {
+				return err
+			}
+		}
+
+		// validate volume snapshot backup
+		if backup.Spec.Mode == v1alpha1.BackupModeVolumeSnapshot {
+			// only support across k8s now. TODO compatible for single k8s
+			if tc == nil || !tc.AcrossK8s() {
+				return errors.New("only support volume snapshot backup across k8s clusters")
+			}
+
+			if len(tc.Status.TiKV.Stores) == 0 || tc.Spec.TiKV.Replicas == 0 {
+				return errors.New("not support backup TiDB cluster with no tikv replica")
+			}
+		}
+
+		if backup.Spec.BackoffRetryPolicy.MinRetryDuration != "" {
+			_, err := time.ParseDuration(backup.Spec.BackoffRetryPolicy.MinRetryDuration)
+			if err != nil {
+				return fmt.Errorf("fail to parse minRetryDuration %s of backup %s/%s, %v", backup.Spec.BackoffRetryPolicy.MinRetryDuration, backup.Namespace, backup.Name, err)
+			}
+		}
+		if backup.Spec.BackoffRetryPolicy.RetryTimeout != "" {
+			_, err := time.ParseDuration(backup.Spec.BackoffRetryPolicy.RetryTimeout)
+			if err != nil {
+				return fmt.Errorf("fail to parse retryTimeout %s of backup %s/%s, %v", backup.Spec.BackoffRetryPolicy.RetryTimeout, backup.Namespace, backup.Name, err)
+			}
+		}
 	}
 	return nil
 }
 
 // ValidateRestore checks whether a restore spec is valid.
-func ValidateRestore(restore *v1alpha1.Restore, tikvImage string) error {
+func ValidateRestore(restore *v1alpha1.Restore, tikvImage string, acrossK8s bool) error {
 	ns := restore.Namespace
 	name := restore.Name
 
@@ -446,6 +597,18 @@ func ValidateRestore(restore *v1alpha1.Restore, tikvImage string) error {
 			return fmt.Errorf("DB should be configured for BR with restore type %s in spec of %s/%s", restore.Spec.Type, ns, name)
 		}
 
+		if restore.Spec.Mode == v1alpha1.RestoreModePiTR {
+			_, err := GetStoragePath(restore.Spec.PitrFullBackupStorageProvider)
+			// err is nil when there is a valid storage provider
+			if err == nil && restore.Spec.LogRestoreStartTs != "" {
+				return fmt.Errorf("pitrFullBackupStorageProvider and logRestoreStartTs option can not co-exists in pitr mode")
+			}
+
+			if err != nil && restore.Spec.LogRestoreStartTs == "" {
+				return fmt.Errorf("either pitrFullBackupStorageProvider or logRestoreStartTs option needs to be passed in pitr mode")
+			}
+		}
+
 		if restore.Spec.Type == v1alpha1.BackupTypeTable && restore.Spec.BR.Table == "" {
 			return fmt.Errorf("table should be configured for BR with restore type table in spec of %s/%s", ns, name)
 		}
@@ -462,6 +625,13 @@ func ValidateRestore(restore *v1alpha1.Restore, tikvImage string) error {
 		} else if restore.Spec.Local != nil {
 			if err := validateLocal(ns, name, restore.Spec.Local); err != nil {
 				return err
+			}
+		}
+
+		if restore.Spec.Mode == v1alpha1.RestoreModeVolumeSnapshot {
+			// only support across k8s now. TODO compatible for single k8s
+			if !acrossK8s {
+				return errors.New("only support volume snapshot restore across k8s clusters")
 			}
 		}
 	}
@@ -506,7 +676,7 @@ func validateLocal(ns, name string, local *v1alpha1.LocalStorageProvider) error 
 		return fmt.Errorf("Spec.Local.Volume.Name != Spec.Local.VolumeMount.Name is %s", configuredForBR)
 	}
 	if local.VolumeMount.MountPath == "" {
-		return fmt.Errorf("Empty Spec.Local.VolumeMount.MountPath is %s", configuredForBR)
+		return fmt.Errorf("empty Spec.Local.VolumeMount.MountPath is %s", configuredForBR)
 	}
 	if strings.Contains(local.VolumeMount.MountPath, ":") {
 		return fmt.Errorf("Spec.Local.VolumeMount.MountPath cannot contain ':' %s", configuredForBR)
@@ -535,8 +705,128 @@ func canSkipSetGCLifeTime(image string) bool {
 		klog.Errorf("Parse version %s failure, error: %v", version, err)
 		return true
 	}
-	if v.LessThan(tikvV408) {
+	if tikvLessThanV408.Check(v) {
 		return false
 	}
 	return true
+}
+
+func BytesToString(b []byte) string {
+	return *(*string)(unsafe.Pointer(&b))
+}
+
+func StringToBytes(s string) []byte {
+	return *(*[]byte)(unsafe.Pointer(
+		&struct {
+			string
+			Cap int
+		}{s, len(s)},
+	))
+}
+
+// isLogBackSupport returns whether tikv supports log backup
+func isLogBackSupport(tikvImage string) bool {
+	_, version := ParseImage(tikvImage)
+	v, err := semver.NewVersion(version)
+	if err != nil {
+		klog.Errorf("Parse version %s failure, error: %v", version, err)
+		return true
+	}
+	if tikvLessThanV610.Check(v) {
+		return false
+	}
+	return true
+}
+
+// GetStorageRestorePath generate the path of a specific storage from Restore
+func GetStoragePath(privoder v1alpha1.StorageProvider) (string, error) {
+	var url, bucket, prefix string
+	st := GetStorageType(privoder)
+	switch st {
+	case v1alpha1.BackupStorageTypeS3:
+		prefix = privoder.S3.Prefix
+		bucket = privoder.S3.Bucket
+		url = fmt.Sprintf("s3://%s", path.Join(bucket, prefix))
+		return url, nil
+	case v1alpha1.BackupStorageTypeGcs:
+		prefix = privoder.Gcs.Prefix
+		bucket = privoder.Gcs.Bucket
+		url = fmt.Sprintf("gcs://%s/", path.Join(bucket, prefix))
+		return url, nil
+	case v1alpha1.BackupStorageTypeAzblob:
+		prefix = privoder.Azblob.Prefix
+		bucket = privoder.Azblob.Container
+		url = fmt.Sprintf("azure://%s/", path.Join(bucket, prefix))
+		return url, nil
+	case v1alpha1.BackupStorageTypeLocal:
+		prefix = privoder.Local.Prefix
+		mountPath := privoder.Local.VolumeMount.MountPath
+		url = fmt.Sprintf("local://%s", path.Join(mountPath, prefix))
+		return url, nil
+	default:
+		return "", fmt.Errorf("storage %s not supported yet", st)
+	}
+}
+
+// GetOptions gets the rclone options
+func GetOptions(provider v1alpha1.StorageProvider) []string {
+	st := GetStorageType(provider)
+	switch st {
+	case v1alpha1.BackupStorageTypeS3:
+		return provider.S3.Options
+	default:
+		return nil
+	}
+}
+
+// getVolSnapBackupMetaData get backup metadata from cloud storage
+func GetVolSnapBackupMetaData(r *v1alpha1.Restore, secretLister corelisterv1.SecretLister) (*EBSBasedBRMeta, error) {
+	// since the restore meta is small (~5M), assume 1 minutes is enough
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(time.Minute*1))
+	defer cancel()
+
+	klog.Infof("read the backup meta from external storage")
+	cred := GetStorageCredential(r.Namespace, r.Spec.StorageProvider, secretLister)
+	s, err := NewStorageBackend(r.Spec.StorageProvider, cred)
+	if err != nil {
+		return nil, err
+	}
+	defer s.Close()
+
+	var metaInfo []byte
+	// use exponential backoff, every retry duration is duration * factor ^ (used_step - 1)
+	backoff := wait.Backoff{
+		Duration: time.Second,
+		Steps:    6,
+		Factor:   2.0,
+		Cap:      time.Minute,
+	}
+	readBackupMeta := func() error {
+		exist, err := s.Exists(ctx, constants.MetaFile)
+		if err != nil {
+			return err
+		}
+		if !exist {
+			return fmt.Errorf("%s not exist", constants.MetaFile)
+		}
+		metaInfo, err = s.ReadAll(ctx, constants.MetaFile)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+	isRetry := func(err error) bool {
+		return !strings.Contains(err.Error(), "not exist")
+	}
+	err = retry.OnError(backoff, isRetry, readBackupMeta)
+	if err != nil {
+		return nil, fmt.Errorf("read backup meta from bucket %s and prefix %s, err: %v", s.GetBucket(), s.GetPrefix(), err)
+	}
+
+	backupMeta := &EBSBasedBRMeta{}
+	err = json.Unmarshal(metaInfo, backupMeta)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal backup meta from bucket %s and prefix %s, err: %v", s.GetBucket(), s.GetPrefix(), err)
+	}
+	return backupMeta, nil
 }

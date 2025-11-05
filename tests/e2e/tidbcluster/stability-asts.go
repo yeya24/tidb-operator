@@ -31,14 +31,11 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
 	aggregatorclient "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset"
-	"k8s.io/kubernetes/test/e2e/framework"
-	"k8s.io/kubernetes/test/e2e/framework/log"
-	e2esset "k8s.io/kubernetes/test/e2e/framework/statefulset"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
 	"github.com/pingcap/tidb-operator/pkg/scheme"
 	"github.com/pingcap/tidb-operator/tests"
 	e2econfig "github.com/pingcap/tidb-operator/tests/e2e/config"
@@ -49,6 +46,9 @@ import (
 	utilstatefulset "github.com/pingcap/tidb-operator/tests/e2e/util/statefulset"
 	utiltc "github.com/pingcap/tidb-operator/tests/e2e/util/tidbcluster"
 	"github.com/pingcap/tidb-operator/tests/pkg/fixture"
+	framework "github.com/pingcap/tidb-operator/tests/third_party/k8s"
+	"github.com/pingcap/tidb-operator/tests/third_party/k8s/log"
+	e2esset "github.com/pingcap/tidb-operator/tests/third_party/k8s/statefulset"
 )
 
 var _ = ginkgo.Describe("[Stability]", func() {
@@ -108,7 +108,7 @@ var _ = ginkgo.Describe("[Stability]", func() {
 				ReleaseName:    "operator",
 				Image:          cfg.OperatorImage,
 				Tag:            cfg.OperatorTag,
-				SchedulerImage: "k8s.gcr.io/kube-scheduler",
+				SchedulerImage: "registry.k8s.io/kube-scheduler",
 				Features: []string{
 					"StableScheduling=true",
 					"AdvancedStatefulSet=true",
@@ -117,13 +117,12 @@ var _ = ginkgo.Describe("[Stability]", func() {
 				ImagePullPolicy:   v1.PullIfNotPresent,
 				TestMode:          true,
 				WebhookEnabled:    true,
-				PodWebhookEnabled: true,
 				StsWebhookEnabled: false,
 			}
-			oa = tests.NewOperatorActions(cli, c, asCli, aggrCli, apiExtCli, tests.DefaultPollInterval, ocfg, e2econfig.TestConfig, nil, fw, f)
+			oa = tests.NewOperatorActions(cli, c, asCli, aggrCli, apiExtCli, tests.DefaultPollInterval, ocfg, e2econfig.TestConfig, fw, f)
 			ginkgo.By("Installing CRDs")
 			oa.CleanCRDOrDie()
-			oa.InstallCRDOrDie(ocfg)
+			oa.CreateCRDOrDie(ocfg)
 			ginkgo.By("Installing tidb-operator")
 			oa.CleanOperatorOrDie(ocfg)
 			oa.DeployOperatorOrDie(ocfg)
@@ -141,7 +140,7 @@ var _ = ginkgo.Describe("[Stability]", func() {
 
 		ginkgo.It("Scaling tidb cluster with advanced statefulset", func() {
 			clusterName := "scaling-with-asts"
-			tc := fixture.GetTidbCluster(ns, clusterName, utilimage.TiDBV4)
+			tc := fixture.GetTidbCluster(ns, clusterName, utilimage.TiDBLatest)
 			tc = fixture.AddTiFlashForTidbCluster(tc)
 			tc.Spec.PD.Replicas = 3
 			tc.Spec.TiKV.Replicas = 5
@@ -233,6 +232,30 @@ var _ = ginkgo.Describe("[Stability]", func() {
 					replicas:    5,
 					deleteSlots: sets.NewInt32(0, 3),
 				},
+				{
+					name:        "Scaling in ticdc from 3 to 2 by deleting pod 1",
+					component:   "ticdc",
+					replicas:    2,
+					deleteSlots: sets.NewInt32(1),
+				},
+				{
+					name:        "Scaling in ticdc from 2 to 0",
+					component:   "ticdc",
+					replicas:    0,
+					deleteSlots: sets.NewInt32(),
+				},
+				{
+					name:        "Scaling out ticdc from 0 to 2 by adding pods 0 and 2",
+					component:   "ticdc",
+					replicas:    2,
+					deleteSlots: sets.NewInt32(1),
+				},
+				{
+					name:        "Scaling ticdc from 2 to 4 by deleting pods 2 and adding pods 3, 4 and 5",
+					component:   "ticdc",
+					replicas:    4,
+					deleteSlots: sets.NewInt32(1, 2),
+				},
 			}
 
 			for _, st := range scalingTests {
@@ -240,13 +263,13 @@ var _ = ginkgo.Describe("[Stability]", func() {
 				replicas := st.replicas
 				stsName := fmt.Sprintf("%s-%s", clusterName, st.component)
 
-				sts, err := hc.AppsV1().StatefulSets(ns).Get(stsName, metav1.GetOptions{})
+				sts, err := hc.AppsV1().StatefulSets(ns).Get(context.TODO(), stsName, metav1.GetOptions{})
 				framework.ExpectNoError(err, "failed to get statefulset %s/%s", ns, stsName)
 
 				oldPodList := e2esset.GetPodList(c, sts)
 
 				ginkgo.By(fmt.Sprintf("Scaling sts %s/%s to replicas %d and setting deleting pods to %v (old replicas: %d, old delete slots: %v)", ns, stsName, replicas, st.deleteSlots.List(), *sts.Spec.Replicas, helper.GetDeleteSlots(sts).List()))
-				tc, err := cli.PingcapV1alpha1().TidbClusters(ns).Get(clusterName, metav1.GetOptions{})
+				tc, err := cli.PingcapV1alpha1().TidbClusters(ns).Get(context.TODO(), clusterName, metav1.GetOptions{})
 				framework.ExpectNoError(err, "failed to get TidbCluster %s/%s", ns, clusterName)
 				err = controller.GuaranteedUpdate(genericCli, tc, func() error {
 					if tc.Annotations == nil {
@@ -264,6 +287,9 @@ var _ = ginkgo.Describe("[Stability]", func() {
 					} else if st.component == "tidb" {
 						tc.Annotations[label.AnnTiDBDeleteSlots] = mustToString(st.deleteSlots)
 						tc.Spec.TiDB.Replicas = replicas
+					} else if st.component == "ticdc" {
+						tc.Annotations[label.AnnTiCDCDeleteSlots] = mustToString(st.deleteSlots)
+						tc.Spec.TiCDC.Replicas = replicas
 					} else {
 						return fmt.Errorf("unsupported component: %v", st.component)
 					}
@@ -274,7 +300,7 @@ var _ = ginkgo.Describe("[Stability]", func() {
 				ginkgo.By(fmt.Sprintf("Waiting for all pods of tidb cluster component %s (sts: %s/%s) are in desired state (replicas: %d, delete slots: %v)", st.component, ns, stsName, st.replicas, st.deleteSlots.List()))
 				err = wait.PollImmediate(time.Second*5, time.Minute*15, func() (bool, error) {
 					// check replicas and delete slots are synced
-					sts, err = hc.AppsV1().StatefulSets(ns).Get(stsName, metav1.GetOptions{})
+					sts, err = hc.AppsV1().StatefulSets(ns).Get(context.TODO(), stsName, metav1.GetOptions{})
 					if err != nil {
 						return false, nil
 					}
@@ -298,7 +324,7 @@ var _ = ginkgo.Describe("[Stability]", func() {
 					for _, oldPod := range oldPodList.Items {
 						// if the pod is not new or deleted in scaling, it should not be affected
 						if oldPod.Name == newPod.Name && oldPod.UID != newPod.UID {
-							framework.Failf("pod %s/%s should not be affected (UID: %s, OLD UID: %s)", newPod.Namespace, newPod.Name, newPod.UID, oldPod.UID)
+							log.Failf("pod %s/%s should not be affected (UID: %s, OLD UID: %s)", newPod.Namespace, newPod.Name, newPod.UID, oldPod.UID)
 						}
 					}
 				}
@@ -319,7 +345,7 @@ var _ = ginkgo.Describe("[Stability]", func() {
 			ReleaseName:    "operator",
 			Image:          cfg.OperatorImage,
 			Tag:            cfg.OperatorTag,
-			SchedulerImage: "k8s.gcr.io/kube-scheduler",
+			SchedulerImage: "registry.k8s.io/kube-scheduler",
 			Features: []string{
 				"StableScheduling=true",
 				"AdvancedStatefulSet=false",
@@ -328,10 +354,10 @@ var _ = ginkgo.Describe("[Stability]", func() {
 			ImagePullPolicy: v1.PullIfNotPresent,
 			TestMode:        true,
 		}
-		oa = tests.NewOperatorActions(cli, c, asCli, aggrCli, apiExtCli, tests.DefaultPollInterval, ocfg, e2econfig.TestConfig, nil, fw, f)
+		oa = tests.NewOperatorActions(cli, c, asCli, aggrCli, apiExtCli, tests.DefaultPollInterval, ocfg, e2econfig.TestConfig, fw, f)
 		ginkgo.By("Installing CRDs")
 		oa.CleanCRDOrDie()
-		oa.InstallCRDOrDie(ocfg)
+		oa.CreateCRDOrDie(ocfg)
 		ginkgo.By("Installing tidb-operator without AdvancedStatefulSet feature")
 		oa.CleanOperatorOrDie(ocfg)
 		oa.DeployOperatorOrDie(ocfg)
@@ -346,7 +372,7 @@ var _ = ginkgo.Describe("[Stability]", func() {
 			oa.CleanCRDOrDie()
 		}()
 
-		tc := fixture.GetTidbCluster(ns, "sts", utilimage.TiDBV4)
+		tc := fixture.GetTidbCluster(ns, "sts", utilimage.TiDBLatest)
 		err = genericCli.Create(context.TODO(), tc)
 		framework.ExpectNoError(err, "failed to create TidbCluster: %v", tc)
 		err = oa.WaitForTidbClusterReady(tc, 30*time.Minute, 15*time.Second)
@@ -357,13 +383,13 @@ var _ = ginkgo.Describe("[Stability]", func() {
 				label.InstanceLabelKey: tc.Name,
 			}).String(),
 		}
-		stsList, err := c.AppsV1().StatefulSets(tc.Namespace).List(listOption)
+		stsList, err := c.AppsV1().StatefulSets(tc.Namespace).List(context.TODO(), listOption)
 		framework.ExpectNoError(err, "failed to list statefulsets in ns %s: %v", tc.Namespace, listOption)
 		if len(stsList.Items) < 3 {
 			log.Failf("at least 3 statefulsets must be created, got %d", len(stsList.Items))
 		}
 
-		podListBeforeUpgrade, err := c.CoreV1().Pods(tc.Namespace).List(listOption)
+		podListBeforeUpgrade, err := c.CoreV1().Pods(tc.Namespace).List(context.TODO(), listOption)
 		framework.ExpectNoError(err, "failed to list pods in ns %s: %v", tc.Namespace, listOption)
 
 		ginkgo.By("Upgrading tidb-operator with AdvancedStatefulSet feature")
@@ -371,12 +397,12 @@ var _ = ginkgo.Describe("[Stability]", func() {
 			"StableScheduling=true",
 			"AdvancedStatefulSet=true",
 		}
-		oa.InstallCRDOrDie(ocfg)
+		oa.ReplaceCRDOrDie(ocfg)
 		oa.UpgradeOperatorOrDie(ocfg)
 
 		ginkgo.By("Wait for the advanced statefulsets are created and Kubernetes statfulsets are deleted")
 		err = wait.PollImmediate(time.Second*5, time.Minute*5, func() (bool, error) {
-			advancedStsList, err := asCli.AppsV1().StatefulSets(tc.Namespace).List(listOption)
+			advancedStsList, err := asCli.AppsV1().StatefulSets(tc.Namespace).List(context.TODO(), listOption)
 			if err != nil {
 				return false, nil
 			}
@@ -384,7 +410,7 @@ var _ = ginkgo.Describe("[Stability]", func() {
 				log.Logf("advanced statefulsets got %d, expect %d", len(advancedStsList.Items), len(stsList.Items))
 				return false, nil
 			}
-			stsListAfterUpgrade, err := c.AppsV1().StatefulSets(tc.Namespace).List(listOption)
+			stsListAfterUpgrade, err := c.AppsV1().StatefulSets(tc.Namespace).List(context.TODO(), listOption)
 			if err != nil {
 				return false, nil
 			}
@@ -411,7 +437,7 @@ var _ = ginkgo.Describe("[Stability]", func() {
 			ReleaseName:    "operator",
 			Image:          cfg.OperatorImage,
 			Tag:            cfg.OperatorTag,
-			SchedulerImage: "k8s.gcr.io/kube-scheduler",
+			SchedulerImage: "registry.k8s.io/kube-scheduler",
 			Features: []string{
 				"StableScheduling=true",
 				"AdvancedStatefulSet=false",
@@ -420,10 +446,10 @@ var _ = ginkgo.Describe("[Stability]", func() {
 			ImagePullPolicy: v1.PullIfNotPresent,
 			TestMode:        true,
 		}
-		oa = tests.NewOperatorActions(cli, c, asCli, aggrCli, apiExtCli, tests.DefaultPollInterval, ocfg, e2econfig.TestConfig, nil, fw, f)
+		oa = tests.NewOperatorActions(cli, c, asCli, aggrCli, apiExtCli, tests.DefaultPollInterval, ocfg, e2econfig.TestConfig, fw, f)
 		ginkgo.By("Installing CRDs")
 		oa.CleanCRDOrDie()
-		oa.InstallCRDOrDie(ocfg)
+		oa.ReplaceCRDOrDie(ocfg)
 		ginkgo.By("Installing tidb-operator without AdvancedStatefulSet feature")
 		oa.CleanOperatorOrDie(ocfg)
 		oa.DeployOperatorOrDie(ocfg)
@@ -438,7 +464,7 @@ var _ = ginkgo.Describe("[Stability]", func() {
 			oa.CleanCRDOrDie()
 		}()
 
-		tc := fixture.GetTidbCluster(ns, "upgrade-cluster", utilimage.TiDBV4Prev)
+		tc := fixture.GetTidbCluster(ns, "upgrade-cluster", utilimage.TiDBLatestPrev)
 		tc.Spec.PD.Replicas = 5
 		tc.Spec.TiKV.Replicas = 4
 		tc.Spec.TiDB.Replicas = 3
@@ -448,7 +474,7 @@ var _ = ginkgo.Describe("[Stability]", func() {
 		framework.ExpectNoError(err, "failed to wait for TidbCluster ready: %v", tc)
 
 		ginkgo.By("Scaling in the cluster by deleting some pods not at the end")
-		tc, err = cli.PingcapV1alpha1().TidbClusters(ns).Get(tc.Name, metav1.GetOptions{})
+		tc, err = cli.PingcapV1alpha1().TidbClusters(ns).Get(context.TODO(), tc.Name, metav1.GetOptions{})
 		framework.ExpectNoError(err, "failed to get TidbCluster %s/%s", ns, tc.Name)
 		err = controller.GuaranteedUpdate(genericCli, tc, func() error {
 			if tc.Annotations == nil {
@@ -469,7 +495,7 @@ var _ = ginkgo.Describe("[Stability]", func() {
 
 		ginkgo.By("Upgrading the cluster")
 		err = controller.GuaranteedUpdate(genericCli, tc, func() error {
-			tc.Spec.Version = utilimage.TiDBV4
+			tc.Spec.Version = utilimage.TiDBLatest
 			return nil
 		})
 		framework.ExpectNoError(err, "failed to upgrade TidbCluster %s/%s", ns, tc.Name)

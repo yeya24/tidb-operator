@@ -21,14 +21,15 @@ import (
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/backup/restore"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
+	"github.com/pingcap/tidb-operator/pkg/metrics"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // Controller controls restore.
@@ -63,6 +64,11 @@ func NewController(deps *controller.Dependencies) *Controller {
 	return c
 }
 
+// Name returns the name of the restore controller
+func (c *Controller) Name() string {
+	return "restore"
+}
+
 // Run runs the restore controller.
 func (c *Controller) Run(workers int, stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
@@ -87,6 +93,9 @@ func (c *Controller) worker() {
 // processNextWorkItem dequeues items, processes them, and marks them done. It enforces that the syncHandler is never
 // invoked concurrently with the same key.
 func (c *Controller) processNextWorkItem() bool {
+	metrics.ActiveWorkers.WithLabelValues(c.Name()).Add(1)
+	defer metrics.ActiveWorkers.WithLabelValues(c.Name()).Add(-1)
+
 	key, quit := c.queue.Get()
 	if quit {
 		return false
@@ -109,10 +118,22 @@ func (c *Controller) processNextWorkItem() bool {
 }
 
 // sync syncs the given restore.
-func (c *Controller) sync(key string) error {
+func (c *Controller) sync(key string) (err error) {
 	startTime := time.Now()
 	defer func() {
-		klog.V(4).Infof("Finished syncing Restore %q (%v)", key, time.Since(startTime))
+		duration := time.Since(startTime)
+		metrics.ReconcileTime.WithLabelValues(c.Name()).Observe(duration.Seconds())
+
+		if err == nil {
+			metrics.ReconcileTotal.WithLabelValues(c.Name(), metrics.LabelSuccess).Inc()
+		} else if perrors.Find(err, controller.IsRequeueError) != nil {
+			metrics.ReconcileTotal.WithLabelValues(c.Name(), metrics.LabelRequeue).Inc()
+		} else {
+			metrics.ReconcileTotal.WithLabelValues(c.Name(), metrics.LabelError).Inc()
+			metrics.ReconcileErrors.WithLabelValues(c.Name()).Inc()
+		}
+
+		klog.V(4).Infof("Finished syncing Restore %q (%v)", key, duration)
 	}()
 
 	ns, name, err := cache.SplitMetaNamespaceKey(key)
@@ -131,12 +152,14 @@ func (c *Controller) sync(key string) error {
 	return c.syncRestore(restore.DeepCopy())
 }
 
-func (c *Controller) syncRestore(tc *v1alpha1.Restore) error {
-	return c.control.UpdateRestore(tc)
+func (c *Controller) syncRestore(restore *v1alpha1.Restore) error {
+	return c.control.UpdateRestore(restore)
 }
 
 func (c *Controller) updateRestore(cur interface{}) {
 	newRestore := cur.(*v1alpha1.Restore)
+	klog.V(4).Infof("restore-manager update %v", newRestore)
+
 	ns := newRestore.GetNamespace()
 	name := newRestore.GetName()
 
@@ -145,42 +168,118 @@ func (c *Controller) updateRestore(cur interface{}) {
 		return
 	}
 
+	// Handle prune states - if we're in any of these states, either enqueue for processing or skip
+	if v1alpha1.IsRestorePruneComplete(newRestore) || v1alpha1.IsRestorePruneFailed(newRestore) {
+		klog.V(4).Infof("restore %s/%s is in terminal prune state, skipping.", ns, name)
+		return
+	}
+
+	if v1alpha1.IsRestorePruneRunning(newRestore) {
+		klog.V(4).Infof("restore %s/%s prune job is running, skipping.", ns, name)
+		return
+	}
+
+	if v1alpha1.IsRestorePruneScheduled(newRestore) {
+		klog.V(4).Infof("restore %s/%s prune job is scheduled, enqueuing.", ns, name)
+		c.enqueueRestore(newRestore)
+		return
+	}
+
 	if v1alpha1.IsRestoreComplete(newRestore) {
+		if newRestore.Spec.Warmup == v1alpha1.RestoreWarmupModeASync {
+			if !v1alpha1.IsRestoreWarmUpComplete(newRestore) {
+				c.enqueueRestore(newRestore)
+				return
+			}
+		}
+
 		klog.V(4).Infof("restore %s/%s is Complete, skipping.", ns, name)
 		return
 	}
 
+	if v1alpha1.IsRestoreVolumeFailed(newRestore) && !v1alpha1.IsCleanVolumeComplete(newRestore) {
+		// restore volume failed, need to clean created volumes
+		c.enqueueRestore(newRestore)
+		return
+	}
+
 	if v1alpha1.IsRestoreFailed(newRestore) {
+		// If prune is enabled and not yet complete, schedule a prune job
+		if newRestore.Spec.Mode != v1alpha1.RestoreModeVolumeSnapshot && newRestore.Spec.Prune == v1alpha1.PruneTypeAfterFailed && !v1alpha1.IsRestorePruneComplete(newRestore) {
+			if !v1alpha1.IsRestorePruneScheduled(newRestore) {
+				klog.Infof("restore %s/%s failed with prune enabled, setting PruneScheduled state", ns, name)
+				err := c.control.UpdateCondition(newRestore, &v1alpha1.RestoreCondition{
+					Type:    v1alpha1.RestorePruneScheduled,
+					Status:  corev1.ConditionTrue,
+					Reason:  "RestoreFailedPruneScheduled",
+					Message: "Restore failed, prune job will be scheduled for cleanup.",
+				})
+				if err != nil {
+					klog.Errorf("Fail to update restore %s/%s condition to PruneScheduled: %v", ns, name, err)
+				}
+				return
+			}
+			c.enqueueRestore(newRestore)
+			return
+		}
 		klog.V(4).Infof("restore %s/%s is Failed, skipping.", ns, name)
 		return
 	}
 
+	// check if job failed, but restore status not failed
+	jobFailed, reason, err := c.isRestoreJobFailed(newRestore)
+	if err != nil {
+		klog.Warningf("restore %s/%s check is job failed error: %s", ns, name, err.Error())
+		return
+	}
+	if jobFailed {
+		klog.Errorf("restore %s/%s job failed: %s", ns, name, reason)
+
+		err = c.control.UpdateCondition(newRestore, &v1alpha1.RestoreCondition{
+			Type:    v1alpha1.RestoreFailed,
+			Status:  corev1.ConditionTrue,
+			Reason:  "AlreadyFailed",
+			Message: reason,
+		})
+
+		if err != nil {
+			klog.Errorf("Fail to update the condition of restore %s/%s, %v", ns, name, err)
+		}
+		return
+	}
+
+	if v1alpha1.IsRestoreDataComplete(newRestore) {
+		tc, err := c.getTC(newRestore)
+		if err != nil {
+			klog.Errorf("Fail to get tidbcluster for restore %s/%s, %v", ns, name, err)
+			return
+		}
+		if tc.IsRecoveryMode() && newRestore.Spec.FederalVolumeRestorePhase == v1alpha1.FederalVolumeRestoreFinish {
+			c.enqueueRestore(newRestore)
+			return
+		}
+
+		klog.V(4).Infof("restore %s/%s is already DataComplete, skipping.", ns, name)
+		return
+	}
+
+	if v1alpha1.IsRestoreTiKVComplete(newRestore) {
+		if newRestore.Spec.FederalVolumeRestorePhase == v1alpha1.FederalVolumeRestoreData ||
+			newRestore.Spec.FederalVolumeRestorePhase == v1alpha1.FederalVolumeRestoreFinish {
+			c.enqueueRestore(newRestore)
+			return
+		}
+
+		klog.V(4).Infof("restore %s/%s is already TikvComplete, skipping.", ns, name)
+		return
+	}
+
+	if v1alpha1.IsRestoreVolumeComplete(newRestore) {
+		c.enqueueRestore(newRestore)
+		return
+	}
+
 	if v1alpha1.IsRestoreScheduled(newRestore) || v1alpha1.IsRestoreRunning(newRestore) {
-		selector, err := label.NewRestore().Instance(newRestore.GetInstanceName()).RestoreJob().Restore(name).Selector()
-		if err != nil {
-			klog.Errorf("Fail to generate selector for restore %s/%s, %v", ns, name, err)
-			return
-		}
-		pods, err := c.deps.PodLister.Pods(ns).List(selector)
-		if err != nil {
-			klog.Errorf("Fail to list pod for restore %s/%s with selector %s, %v", ns, name, selector, err)
-			return
-		}
-		for _, pod := range pods {
-			if pod.Status.Phase == corev1.PodFailed {
-				klog.Infof("restore %s/%s has failed pod %s.", ns, name, pod.Name)
-				err = c.control.UpdateCondition(newRestore, &v1alpha1.RestoreCondition{
-					Type:    v1alpha1.RestoreFailed,
-					Status:  corev1.ConditionTrue,
-					Reason:  "AlreadyFailed",
-					Message: fmt.Sprintf("Pod %s has failed", pod.Name),
-				})
-				if err != nil {
-					klog.Errorf("Fail to update the condition of restore %s/%s, %v", ns, name, err)
-				}
-				break
-			}
-		}
 		klog.V(4).Infof("restore %s/%s is already Scheduled, Running or Failed, skipping.", ns, name)
 		return
 	}
@@ -193,8 +292,38 @@ func (c *Controller) updateRestore(cur interface{}) {
 func (c *Controller) enqueueRestore(obj interface{}) {
 	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 	if err != nil {
-		utilruntime.HandleError(fmt.Errorf("Cound't get key for object %+v: %v", obj, err))
+		utilruntime.HandleError(fmt.Errorf("cound't get key for object %+v: %v", obj, err))
 		return
 	}
 	c.queue.Add(key)
+}
+
+func (c *Controller) getTC(restore *v1alpha1.Restore) (*v1alpha1.TidbCluster, error) {
+	restoreNamespace := restore.GetNamespace()
+	if restore.Spec.BR.ClusterNamespace != "" {
+		restoreNamespace = restore.Spec.BR.ClusterNamespace
+	}
+
+	return c.deps.TiDBClusterLister.TidbClusters(restoreNamespace).Get(restore.Spec.BR.Cluster)
+}
+
+func (c *Controller) isRestoreJobFailed(restore *v1alpha1.Restore) (jobFailed bool, reason string, err error) {
+	ns := restore.GetNamespace()
+	name := restore.GetName()
+	jobName := restore.GetRestoreJobName()
+
+	job, err := c.deps.JobLister.Jobs(ns).Get(jobName)
+	if err != nil && !errors.IsNotFound(err) {
+		klog.Errorf("Fail to get job %s for restore %s/%s, error %v ", jobName, ns, name, err)
+		return false, "", err
+	}
+	if job != nil {
+		for _, condition := range job.Status.Conditions {
+			if condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue {
+				reason = fmt.Sprintf("Job %s has failed: %s", jobName, condition.Reason)
+				return true, reason, nil
+			}
+		}
+	}
+	return false, "", nil
 }

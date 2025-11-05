@@ -16,10 +16,11 @@
 package fake
 
 import (
+	"context"
+
 	v1alpha1 "github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	labels "k8s.io/apimachinery/pkg/labels"
-	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
 	testing "k8s.io/client-go/testing"
@@ -31,12 +32,12 @@ type FakeBackupSchedules struct {
 	ns   string
 }
 
-var backupschedulesResource = schema.GroupVersionResource{Group: "pingcap.com", Version: "v1alpha1", Resource: "backupschedules"}
+var backupschedulesResource = v1alpha1.SchemeGroupVersion.WithResource("backupschedules")
 
-var backupschedulesKind = schema.GroupVersionKind{Group: "pingcap.com", Version: "v1alpha1", Kind: "BackupSchedule"}
+var backupschedulesKind = v1alpha1.SchemeGroupVersion.WithKind("BackupSchedule")
 
 // Get takes name of the backupSchedule, and returns the corresponding backupSchedule object, and an error if there is any.
-func (c *FakeBackupSchedules) Get(name string, options v1.GetOptions) (result *v1alpha1.BackupSchedule, err error) {
+func (c *FakeBackupSchedules) Get(ctx context.Context, name string, options v1.GetOptions) (result *v1alpha1.BackupSchedule, err error) {
 	obj, err := c.Fake.
 		Invokes(testing.NewGetAction(backupschedulesResource, c.ns, name), &v1alpha1.BackupSchedule{})
 
@@ -47,7 +48,7 @@ func (c *FakeBackupSchedules) Get(name string, options v1.GetOptions) (result *v
 }
 
 // List takes label and field selectors, and returns the list of BackupSchedules that match those selectors.
-func (c *FakeBackupSchedules) List(opts v1.ListOptions) (result *v1alpha1.BackupScheduleList, err error) {
+func (c *FakeBackupSchedules) List(ctx context.Context, opts v1.ListOptions) (result *v1alpha1.BackupScheduleList, err error) {
 	obj, err := c.Fake.
 		Invokes(testing.NewListAction(backupschedulesResource, backupschedulesKind, c.ns, opts), &v1alpha1.BackupScheduleList{})
 
@@ -69,14 +70,14 @@ func (c *FakeBackupSchedules) List(opts v1.ListOptions) (result *v1alpha1.Backup
 }
 
 // Watch returns a watch.Interface that watches the requested backupSchedules.
-func (c *FakeBackupSchedules) Watch(opts v1.ListOptions) (watch.Interface, error) {
+func (c *FakeBackupSchedules) Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error) {
 	return c.Fake.
 		InvokesWatch(testing.NewWatchAction(backupschedulesResource, c.ns, opts))
 
 }
 
 // Create takes the representation of a backupSchedule and creates it.  Returns the server's representation of the backupSchedule, and an error, if there is any.
-func (c *FakeBackupSchedules) Create(backupSchedule *v1alpha1.BackupSchedule) (result *v1alpha1.BackupSchedule, err error) {
+func (c *FakeBackupSchedules) Create(ctx context.Context, backupSchedule *v1alpha1.BackupSchedule, opts v1.CreateOptions) (result *v1alpha1.BackupSchedule, err error) {
 	obj, err := c.Fake.
 		Invokes(testing.NewCreateAction(backupschedulesResource, c.ns, backupSchedule), &v1alpha1.BackupSchedule{})
 
@@ -87,7 +88,7 @@ func (c *FakeBackupSchedules) Create(backupSchedule *v1alpha1.BackupSchedule) (r
 }
 
 // Update takes the representation of a backupSchedule and updates it. Returns the server's representation of the backupSchedule, and an error, if there is any.
-func (c *FakeBackupSchedules) Update(backupSchedule *v1alpha1.BackupSchedule) (result *v1alpha1.BackupSchedule, err error) {
+func (c *FakeBackupSchedules) Update(ctx context.Context, backupSchedule *v1alpha1.BackupSchedule, opts v1.UpdateOptions) (result *v1alpha1.BackupSchedule, err error) {
 	obj, err := c.Fake.
 		Invokes(testing.NewUpdateAction(backupschedulesResource, c.ns, backupSchedule), &v1alpha1.BackupSchedule{})
 
@@ -99,7 +100,7 @@ func (c *FakeBackupSchedules) Update(backupSchedule *v1alpha1.BackupSchedule) (r
 
 // UpdateStatus was generated because the type contains a Status member.
 // Add a +genclient:noStatus comment above the type to avoid generating UpdateStatus().
-func (c *FakeBackupSchedules) UpdateStatus(backupSchedule *v1alpha1.BackupSchedule) (*v1alpha1.BackupSchedule, error) {
+func (c *FakeBackupSchedules) UpdateStatus(ctx context.Context, backupSchedule *v1alpha1.BackupSchedule, opts v1.UpdateOptions) (*v1alpha1.BackupSchedule, error) {
 	obj, err := c.Fake.
 		Invokes(testing.NewUpdateSubresourceAction(backupschedulesResource, "status", c.ns, backupSchedule), &v1alpha1.BackupSchedule{})
 
@@ -110,23 +111,23 @@ func (c *FakeBackupSchedules) UpdateStatus(backupSchedule *v1alpha1.BackupSchedu
 }
 
 // Delete takes name of the backupSchedule and deletes it. Returns an error if one occurs.
-func (c *FakeBackupSchedules) Delete(name string, options *v1.DeleteOptions) error {
+func (c *FakeBackupSchedules) Delete(ctx context.Context, name string, opts v1.DeleteOptions) error {
 	_, err := c.Fake.
-		Invokes(testing.NewDeleteAction(backupschedulesResource, c.ns, name), &v1alpha1.BackupSchedule{})
+		Invokes(testing.NewDeleteActionWithOptions(backupschedulesResource, c.ns, name, opts), &v1alpha1.BackupSchedule{})
 
 	return err
 }
 
 // DeleteCollection deletes a collection of objects.
-func (c *FakeBackupSchedules) DeleteCollection(options *v1.DeleteOptions, listOptions v1.ListOptions) error {
-	action := testing.NewDeleteCollectionAction(backupschedulesResource, c.ns, listOptions)
+func (c *FakeBackupSchedules) DeleteCollection(ctx context.Context, opts v1.DeleteOptions, listOpts v1.ListOptions) error {
+	action := testing.NewDeleteCollectionAction(backupschedulesResource, c.ns, listOpts)
 
 	_, err := c.Fake.Invokes(action, &v1alpha1.BackupScheduleList{})
 	return err
 }
 
 // Patch applies the patch and returns the patched backupSchedule.
-func (c *FakeBackupSchedules) Patch(name string, pt types.PatchType, data []byte, subresources ...string) (result *v1alpha1.BackupSchedule, err error) {
+func (c *FakeBackupSchedules) Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *v1alpha1.BackupSchedule, err error) {
 	obj, err := c.Fake.
 		Invokes(testing.NewPatchSubresourceAction(backupschedulesResource, c.ns, name, pt, data, subresources...), &v1alpha1.BackupSchedule{})
 

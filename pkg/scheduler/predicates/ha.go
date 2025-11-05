@@ -14,6 +14,7 @@
 package predicates
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -22,9 +23,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned"
-	"github.com/pingcap/tidb-operator/pkg/label"
 	"github.com/pingcap/tidb-operator/pkg/util"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,7 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 type ha struct {
@@ -71,15 +72,15 @@ func (h *ha) Name() string {
 	return "HAScheduling"
 }
 
-// 1. return the node to kube-scheduler if there is only one feasible node and the pod's pvc is bound
-// 2. if there are more than two feasible nodes, we are trying to distribute TiKV/PD pods across the nodes for the best HA
-//  a) for PD (one raft group, copies of data equals to replicas), no more than majority of replicas pods on one node, otherwise majority of replicas may lose when a node is lost.
+//  1. return the node to kube-scheduler if there is only one feasible node and the pod's pvc is bound
+//  2. if there are more than two feasible nodes, we are trying to distribute TiKV/PD pods across the nodes for the best HA
+//     a) for PD (one raft group, copies of data equals to replicas), no more than majority of replicas pods on one node, otherwise majority of replicas may lose when a node is lost.
 //     e.g. when replicas is 3, we requires no more than 1 pods per node.
-//  b) for TiKV (multiple raft groups, in each raft group, copies of data is hard-coded to 3)
+//     b) for TiKV (multiple raft groups, in each raft group, copies of data is hard-coded to 3)
 //     when replicas is less than 3, no HA is forced because HA is impossible
 //     when replicas is equal or greater than 3, we require TiKV pods are running on more than 3 nodes and no more than ceil(replicas / 3) per node
-//  for PD/TiKV, we both try to balance the number of pods across the nodes
-// 3. let kube-scheduler to make the final decision
+//     for PD/TiKV, we both try to balance the number of pods across the nodes
+//  3. let kube-scheduler to make the final decision
 func (h *ha) Filter(instanceName string, pod *apiv1.Pod, nodes []apiv1.Node) ([]apiv1.Node, error) {
 	h.lock.Lock()
 	defer h.lock.Unlock()
@@ -341,18 +342,18 @@ func (h *ha) realAcquireLock(pod *apiv1.Pod) (*apiv1.PersistentVolumeClaim, *api
 
 func (h *ha) realPodListFn(ns, instanceName, component string) (*apiv1.PodList, error) {
 	selector := label.New().Instance(instanceName).Component(component).Labels()
-	return h.kubeCli.CoreV1().Pods(ns).List(metav1.ListOptions{
+	return h.kubeCli.CoreV1().Pods(ns).List(context.TODO(), metav1.ListOptions{
 		LabelSelector: labels.SelectorFromSet(selector).String(),
 	})
 }
 
 func (h *ha) realPodGetFn(ns, podName string) (*apiv1.Pod, error) {
-	return h.kubeCli.CoreV1().Pods(ns).Get(podName, metav1.GetOptions{})
+	return h.kubeCli.CoreV1().Pods(ns).Get(context.TODO(), podName, metav1.GetOptions{})
 }
 
 func (h *ha) realPVCListFn(ns, instanceName, component string) (*apiv1.PersistentVolumeClaimList, error) {
 	selector := label.New().Instance(instanceName).Component(component).Labels()
-	return h.kubeCli.CoreV1().PersistentVolumeClaims(ns).List(metav1.ListOptions{
+	return h.kubeCli.CoreV1().PersistentVolumeClaims(ns).List(context.TODO(), metav1.ListOptions{
 		LabelSelector: labels.SelectorFromSet(selector).String(),
 	})
 }
@@ -365,7 +366,7 @@ func (h *ha) realUpdatePVCFn(pvc *apiv1.PersistentVolumeClaim) error {
 	labels := pvc.GetLabels()
 	ann := pvc.GetAnnotations()
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		_, updateErr := h.kubeCli.CoreV1().PersistentVolumeClaims(ns).Update(pvc)
+		_, updateErr := h.kubeCli.CoreV1().PersistentVolumeClaims(ns).Update(context.TODO(), pvc, metav1.UpdateOptions{})
 		if updateErr == nil {
 			klog.Infof("update PVC: [%s/%s] successfully, TidbCluster: %s", ns, pvcName, tcName)
 			return nil
@@ -386,15 +387,15 @@ func (h *ha) realUpdatePVCFn(pvc *apiv1.PersistentVolumeClaim) error {
 }
 
 func (h *ha) realPVCGetFn(ns, pvcName string) (*apiv1.PersistentVolumeClaim, error) {
-	return h.kubeCli.CoreV1().PersistentVolumeClaims(ns).Get(pvcName, metav1.GetOptions{})
+	return h.kubeCli.CoreV1().PersistentVolumeClaims(ns).Get(context.TODO(), pvcName, metav1.GetOptions{})
 }
 
 func (h *ha) realTCGetFn(ns, tcName string) (*v1alpha1.TidbCluster, error) {
-	return h.cli.PingcapV1alpha1().TidbClusters(ns).Get(tcName, metav1.GetOptions{})
+	return h.cli.PingcapV1alpha1().TidbClusters(ns).Get(context.TODO(), tcName, metav1.GetOptions{})
 }
 
 func (h *ha) realScheduledNodeGetFn(nodeName string) (*apiv1.Node, error) {
-	return h.kubeCli.CoreV1().Nodes().Get(nodeName, metav1.GetOptions{})
+	return h.kubeCli.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
 }
 
 func (h *ha) setCurrentPodScheduling(pvc *apiv1.PersistentVolumeClaim) error {

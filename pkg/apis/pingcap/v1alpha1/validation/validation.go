@@ -25,8 +25,9 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
-	"github.com/pingcap/tidb-operator/pkg/label"
+	"github.com/prometheus/common/model"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
@@ -61,6 +62,32 @@ func ValidateDMCluster(dc *v1alpha1.DMCluster) field.ErrorList {
 	return allErrs
 }
 
+// ValidateTiDBNGMonitoring validates a TidbNGMonitoring
+func ValidateTiDBNGMonitoring(tngm *v1alpha1.TidbNGMonitoring) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	allErrs = append(allErrs, validateTidbNGMonitoringSpec(&tngm.Spec, field.NewPath("spec"))...)
+
+	return allErrs
+}
+
+// ValidateTiDBDashboard validates a TidbDashboard.
+func ValidateTiDBDashboard(td *v1alpha1.TidbDashboard) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	if len(td.Spec.Clusters) != 1 {
+		allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("clusters"), len(td.Spec.Clusters), "must have at exactly one item"))
+	}
+
+	allErrs = append(allErrs, validateComponentSpec(&td.Spec.ComponentSpec, field.NewPath("spec"))...)
+
+	if len(td.Spec.StorageVolumes) > 0 {
+		allErrs = append(allErrs, validateStorageVolumes(td.Spec.StorageVolumes, field.NewPath("spec").Child("storageVolumes"))...)
+	}
+
+	return allErrs
+}
+
 func ValidateTidbMonitor(monitor *v1alpha1.TidbMonitor) field.ErrorList {
 	allErrs := field.ErrorList{}
 	// validate monitor service
@@ -69,6 +96,7 @@ func ValidateTidbMonitor(monitor *v1alpha1.TidbMonitor) field.ErrorList {
 	}
 
 	allErrs = append(allErrs, validateService(&monitor.Spec.Prometheus.Service, field.NewPath("spec"))...)
+	allErrs = append(allErrs, validatePromDurationStr(monitor.Spec.Prometheus.RetentionTime, field.NewPath("spec"))...)
 	allErrs = append(allErrs, validateService(&monitor.Spec.Reloader.Service, field.NewPath("spec"))...)
 	if monitor.Spec.Persistent {
 		allErrs = append(allErrs, validateStorageInfo(monitor.Spec.Storage, field.NewPath("spec"))...)
@@ -79,7 +107,8 @@ func ValidateTidbMonitor(monitor *v1alpha1.TidbMonitor) field.ErrorList {
 func validateAnnotations(anns map[string]string, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, apivalidation.ValidateAnnotations(anns, fldPath)...)
-	for _, key := range []string{label.AnnPDDeleteSlots, label.AnnTiDBDeleteSlots, label.AnnTiKVDeleteSlots, label.AnnTiFlashDeleteSlots} {
+
+	for _, key := range []string{label.AnnPDDeleteSlots, label.AnnTiDBDeleteSlots, label.AnnTiKVDeleteSlots, label.AnnTiFlashDeleteSlots, label.AnnTiProxyDeleteSlots, label.AnnTiCDCDeleteSlots} {
 		allErrs = append(allErrs, validateDeleteSlots(anns, key, fldPath.Child(key))...)
 	}
 	return allErrs
@@ -96,8 +125,15 @@ func validateDMAnnotations(anns map[string]string, fldPath *field.Path) field.Er
 
 func validateTiDBClusterSpec(spec *v1alpha1.TidbClusterSpec, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
+
+	allErrs = append(allErrs, validateDiscoverySpec(spec.Discovery, fldPath.Child("discovery"))...)
 	if spec.PD != nil {
 		allErrs = append(allErrs, validatePDSpec(spec.PD, fldPath.Child("pd"))...)
+	}
+	if spec.PDMS != nil {
+		for _, comp := range spec.PDMS {
+			allErrs = append(allErrs, validatePDMSSpec(comp, fldPath.Child(comp.Name))...)
+		}
 	}
 	if spec.TiKV != nil {
 		allErrs = append(allErrs, validateTiKVSpec(spec.TiKV, fldPath.Child("tikv"))...)
@@ -117,6 +153,17 @@ func validateTiDBClusterSpec(spec *v1alpha1.TidbClusterSpec, fldPath *field.Path
 	if spec.PDAddresses != nil {
 		allErrs = append(allErrs, validatePDAddresses(spec.PDAddresses, fldPath.Child("pdAddresses"))...)
 	}
+	if spec.StartScriptV2FeatureFlags != nil {
+		allErrs = append(allErrs, validateStartScriptFeatureFlags(spec.StartScriptV2FeatureFlags, fldPath.Child("startScriptV2FeatureFlags"))...)
+	}
+	return allErrs
+}
+
+func validateDiscoverySpec(spec v1alpha1.DiscoverySpec, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if spec.ComponentSpec != nil {
+		allErrs = append(allErrs, validateComponentSpec(spec.ComponentSpec, fldPath)...)
+	}
 	return allErrs
 }
 
@@ -124,6 +171,18 @@ func validatePDSpec(spec *v1alpha1.PDSpec, fldPath *field.Path) field.ErrorList 
 	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, validateComponentSpec(&spec.ComponentSpec, fldPath)...)
 	allErrs = append(allErrs, validateRequestsStorage(spec.ResourceRequirements.Requests, fldPath)...)
+	if len(spec.StorageVolumes) > 0 {
+		allErrs = append(allErrs, validateStorageVolumes(spec.StorageVolumes, fldPath.Child("storageVolumes"))...)
+	}
+	if spec.Service != nil {
+		allErrs = append(allErrs, validateService(spec.Service, fldPath)...)
+	}
+	return allErrs
+}
+
+func validatePDMSSpec(spec *v1alpha1.PDMSSpec, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	allErrs = append(allErrs, validateComponentSpec(&spec.ComponentSpec, fldPath)...)
 	if len(spec.StorageVolumes) > 0 {
 		allErrs = append(allErrs, validateStorageVolumes(spec.StorageVolumes, fldPath.Child("storageVolumes"))...)
 	}
@@ -138,8 +197,20 @@ func validatePDAddresses(arrayOfAddresses []string, fldPath *field.Path) field.E
 		example := " PD address format example: http://{ADDRESS}:{PORT}"
 		if err != nil {
 			allErrs = append(allErrs, field.Invalid(idxPath, address, err.Error()+example))
-		} else if u.Scheme != "http" {
-			allErrs = append(allErrs, field.Invalid(idxPath, address, "Support 'http' scheme only."+example))
+		} else if u.Scheme != "http" && u.Scheme != "https" {
+			allErrs = append(allErrs, field.Invalid(idxPath, address, "Support 'http'/'https' scheme only."+example))
+		}
+	}
+	return allErrs
+}
+
+func validateStartScriptFeatureFlags(featureFlags []v1alpha1.StartScriptV2FeatureFlag, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	for i, ff := range featureFlags {
+		idxPath := fldPath.Index(i)
+		if ff != v1alpha1.StartScriptV2FeatureFlagWaitForDnsNameIpMatch &&
+			ff != v1alpha1.StartScriptV2FeatureFlagPreferPDAddressesOverDiscovery {
+			allErrs = append(allErrs, field.Invalid(idxPath, ff, "Invalid start script feature flag"))
 		}
 	}
 	return allErrs
@@ -149,11 +220,18 @@ func validateTiKVSpec(spec *v1alpha1.TiKVSpec, fldPath *field.Path) field.ErrorL
 	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, validateComponentSpec(&spec.ComponentSpec, fldPath)...)
 	allErrs = append(allErrs, validateRequestsStorage(spec.ResourceRequirements.Requests, fldPath)...)
+	allErrs = append(allErrs, validateScalePolicy(&spec.ScalePolicy, fldPath.Child("scalePolicy"))...)
 	if len(spec.DataSubDir) > 0 {
 		allErrs = append(allErrs, validateLocalDescendingPath(spec.DataSubDir, fldPath.Child("dataSubDir"))...)
 	}
 	if len(spec.StorageVolumes) > 0 {
 		allErrs = append(allErrs, validateStorageVolumes(spec.StorageVolumes, fldPath.Child("storageVolumes"))...)
+	}
+	if spec.ShouldSeparateRaftLog() && spec.RaftLogVolumeName != "" {
+		allErrs = append(allErrs, validateVolumeName(spec.RaftLogVolumeName, spec.StorageVolumes, spec.AdditionalVolumes, spec.AdditionalVolumeMounts, fldPath)...)
+	}
+	if spec.ShouldSeparateRocksDBLog() && spec.RocksDBLogVolumeName != "" {
+		allErrs = append(allErrs, validateVolumeName(spec.RocksDBLogVolumeName, spec.StorageVolumes, spec.AdditionalVolumes, spec.AdditionalVolumeMounts, fldPath)...)
 	}
 	allErrs = append(allErrs, validateTimeDurationStr(spec.EvictLeaderTimeout, fldPath.Child("evictLeaderTimeout"))...)
 	return allErrs
@@ -167,12 +245,24 @@ func validateTiFlashSpec(spec *v1alpha1.TiFlashSpec, fldPath *field.Path) field.
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("spec.StorageClaims"),
 			spec.StorageClaims, "storageClaims should be configured at least one item."))
 	}
+	allErrs = append(allErrs, validateScalePolicy(&spec.ScalePolicy, fldPath.Child("scalePolicy"))...)
+
+	// fix storageClaim
+	for _, storageClaim := range spec.StorageClaims {
+		if _, ok := storageClaim.Resources.Requests["storage"]; !ok {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("spec.StorageClaims.Resources.Requests"),
+				spec.StorageClaims, "spec.tiflash.storageClaims.resources[storage]: Required value."))
+		}
+	}
 	return allErrs
 }
 
 func validateTiCDCSpec(spec *v1alpha1.TiCDCSpec, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, validateComponentSpec(&spec.ComponentSpec, fldPath)...)
+	if len(spec.StorageVolumes) > 0 {
+		allErrs = append(allErrs, validateStorageVolumes(spec.StorageVolumes, fldPath.Child("storageVolumes"))...)
+	}
 	return allErrs
 }
 
@@ -230,6 +320,7 @@ func validateTiFlashConfig(config *v1alpha1.TiFlashConfigWraper, path *field.Pat
 func validateTiDBSpec(spec *v1alpha1.TiDBSpec, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, validateComponentSpec(&spec.ComponentSpec, fldPath)...)
+	allErrs = append(allErrs, validateScalePolicy(&spec.ScalePolicy, fldPath.Child("scalePolicy"))...)
 	if spec.Service != nil {
 		allErrs = append(allErrs, validateService(&spec.Service.ServiceSpec, fldPath)...)
 	}
@@ -237,7 +328,7 @@ func validateTiDBSpec(spec *v1alpha1.TiDBSpec, fldPath *field.Path) field.ErrorL
 		allErrs = append(allErrs, validateStorageVolumes(spec.StorageVolumes, fldPath.Child("storageVolumes"))...)
 	}
 	if spec.ShouldSeparateSlowLog() && spec.SlowLogVolumeName != "" {
-		allErrs = append(allErrs, validateSlowQueryLogVolume(spec.SlowLogVolumeName, spec.StorageVolumes, spec.AdditionalVolumes, spec.AdditionalVolumeMounts, fldPath)...)
+		allErrs = append(allErrs, validateVolumeName(spec.SlowLogVolumeName, spec.StorageVolumes, spec.AdditionalVolumes, spec.AdditionalVolumeMounts, fldPath)...)
 	}
 	return allErrs
 }
@@ -245,6 +336,11 @@ func validateTiDBSpec(spec *v1alpha1.TiDBSpec, fldPath *field.Path) field.ErrorL
 func validatePumpSpec(spec *v1alpha1.PumpSpec, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, validateComponentSpec(&spec.ComponentSpec, fldPath)...)
+	// fix pump spec
+	if _, ok := spec.ResourceRequirements.Requests["storage"]; !ok {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("spec.ResourceRequirements.Requests"),
+			spec.ResourceRequirements.Requests, "spec.ResourceRequirements.Requests[storage]: Required value."))
+	}
 	return allErrs
 }
 
@@ -256,9 +352,18 @@ func validateDMClusterSpec(spec *v1alpha1.DMClusterSpec, fldPath *field.Path) fi
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("version"), spec.Version, "dm cluster version can't set to v1.x.y"))
 		}
 	}
+	allErrs = append(allErrs, validateDMDiscoverySpec(spec.Discovery, fldPath.Child("discovery"))...)
 	allErrs = append(allErrs, validateMasterSpec(&spec.Master, fldPath.Child("master"))...)
 	if spec.Worker != nil {
 		allErrs = append(allErrs, validateWorkerSpec(spec.Worker, fldPath.Child("worker"))...)
+	}
+	return allErrs
+}
+
+func validateDMDiscoverySpec(spec v1alpha1.DMDiscoverySpec, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if spec.ComponentSpec != nil {
+		allErrs = append(allErrs, validateComponentSpec(spec.ComponentSpec, fldPath)...)
 	}
 	return allErrs
 }
@@ -279,6 +384,29 @@ func validateWorkerSpec(spec *v1alpha1.WorkerSpec, fldPath *field.Path) field.Er
 	return allErrs
 }
 
+func validateTidbNGMonitoringSpec(spec *v1alpha1.TidbNGMonitoringSpec, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	if len(spec.Clusters) < 1 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("clusters"), len(spec.Clusters), "must have at least one item"))
+	}
+	allErrs = append(allErrs, validateComponentSpec(&spec.ComponentSpec, fldPath)...)
+	allErrs = append(allErrs, validateNGMonitoringSpec(&spec.NGMonitoring, fldPath.Child("ngMonitoring"))...)
+
+	return allErrs
+}
+
+func validateNGMonitoringSpec(spec *v1alpha1.NGMonitoringSpec, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	allErrs = append(allErrs, validateComponentSpec(&spec.ComponentSpec, fldPath)...)
+	if len(spec.StorageVolumes) > 0 {
+		allErrs = append(allErrs, validateStorageVolumes(spec.StorageVolumes, fldPath.Child("storageVolumes"))...)
+	}
+
+	return allErrs
+}
+
 func validateComponentSpec(spec *v1alpha1.ComponentSpec, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	// TODO validate other fields
@@ -287,7 +415,7 @@ func validateComponentSpec(spec *v1alpha1.ComponentSpec, fldPath *field.Path) fi
 	return allErrs
 }
 
-//validateRequestsStorage validates resources requests storage
+// validateRequestsStorage validates resources requests storage
 func validateRequestsStorage(requests corev1.ResourceList, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if _, ok := requests[corev1.ResourceStorage]; !ok {
@@ -296,7 +424,7 @@ func validateRequestsStorage(requests corev1.ResourceList, fldPath *field.Path) 
 	return allErrs
 }
 
-//validateTiKVStorageSize validates resources requests storage
+// validateTiKVStorageSize validates resources requests storage
 func validateStorageVolumes(storageVolumes []v1alpha1.StorageVolume, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	for i, storageVolume := range storageVolumes {
@@ -311,31 +439,28 @@ func validateStorageVolumes(storageVolumes []v1alpha1.StorageVolume, fldPath *fi
 				Detail: `value of "storageSize" format not supported`,
 			})
 		}
-		if len(storageVolume.MountPath) == 0 {
-			allErrs = append(allErrs, field.Required(idxPath.Child("mountPath"), "mountPath must not be empty"))
-		}
 	}
 	return allErrs
 }
 
-func validateSlowQueryLogVolume(slowLogVolumeName string, storageVolumes []v1alpha1.StorageVolume, additionalVolumes []corev1.Volume, AdditionalVolumeMounts []corev1.VolumeMount, fldPath *field.Path) field.ErrorList {
+func validateVolumeName(volumeName string, storageVolumes []v1alpha1.StorageVolume, additionalVolumes []corev1.Volume, additionalVolumeMounts []corev1.VolumeMount, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	for _, volume := range storageVolumes {
-		if volume.Name == slowLogVolumeName {
+		if volume.Name == volumeName {
 			return allErrs
 		}
 	}
 	for _, volume := range additionalVolumes {
-		if volume.Name == slowLogVolumeName {
-			for _, volumeMount := range AdditionalVolumeMounts {
-				if volumeMount.Name == slowLogVolumeName {
+		if volume.Name == volumeName {
+			for _, volumeMount := range additionalVolumeMounts {
+				if volumeMount.Name == volumeName {
 					return allErrs
 				}
 			}
 		}
 	}
-	errMsg := fmt.Sprintf("Can not find slowLogVolume: %s in storageVolumes or additionalVolumes/additionalVolumeMounts", slowLogVolumeName)
-	allErrs = append(allErrs, field.Invalid(fldPath.Child("slowLogVolumeName"), slowLogVolumeName, errMsg))
+	errMsg := fmt.Sprintf("Can not find volumeName: %s in storageVolumes or additionalVolumes/additionalVolumeMounts", volumeName)
+	allErrs = append(allErrs, field.Invalid(fldPath.Child("volumeName"), volumeName, errMsg))
 	return allErrs
 }
 
@@ -449,7 +574,8 @@ func ValidateUpdateTidbCluster(old, tc *v1alpha1.TidbCluster) field.ErrorList {
 		allErrs = append(allErrs, field.Invalid(field.NewPath("labels"), tc.Labels,
 			"The instance must not be mutate or set value other than the cluster name"))
 	}
-	allErrs = append(allErrs, validateUpdatePDConfig(old.Spec.PD.Config, tc.Spec.PD.Config, field.NewPath("spec.pd.config"))...)
+	allErrs = append(allErrs, validateUpdatePDConfig(old.Spec.PD, tc.Spec.PD, field.NewPath("spec.pd.config"))...)
+	allErrs = append(allErrs, disallowMutateBootstrapSQLConfigMapName(old.Spec.TiDB, tc.Spec.TiDB, field.NewPath("spec.tidb.bootstrapSQLConfigMapName"))...)
 	allErrs = append(allErrs, disallowUsingLegacyAPIInNewCluster(old, tc)...)
 
 	return allErrs
@@ -459,25 +585,29 @@ func ValidateUpdateTidbCluster(old, tc *v1alpha1.TidbCluster) field.ErrorList {
 // TODO(aylei): call this in ValidateTidbCluster after we deprecated the old versions of helm chart officially
 func validateNewTidbClusterSpec(spec *v1alpha1.TidbClusterSpec, path *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
+	pdSpecified := spec.PD != nil
+	tidbSpecified := spec.TiDB != nil
+	tikvSpecified := spec.TiKV != nil
+
 	if spec.Version == "" {
 		allErrs = append(allErrs, field.Invalid(path.Child("version"), spec.Version, "version must not be empty"))
 	}
-	if spec.TiDB.BaseImage == "" {
+	if tidbSpecified && spec.TiDB.BaseImage == "" {
 		allErrs = append(allErrs, field.Invalid(path.Child("tidb.baseImage"), spec.TiDB.BaseImage, "baseImage of TiDB must not be empty"))
 	}
-	if spec.PD.BaseImage == "" {
+	if pdSpecified && spec.PD.BaseImage == "" {
 		allErrs = append(allErrs, field.Invalid(path.Child("pd.baseImage"), spec.PD.BaseImage, "baseImage of PD must not be empty"))
 	}
-	if spec.TiKV.BaseImage == "" {
+	if tikvSpecified && spec.TiKV.BaseImage == "" {
 		allErrs = append(allErrs, field.Invalid(path.Child("tikv.baseImage"), spec.TiKV.BaseImage, "baseImage of TiKV must not be empty"))
 	}
-	if spec.TiDB.Image != "" {
+	if tidbSpecified && spec.TiDB.Image != "" {
 		allErrs = append(allErrs, field.Invalid(path.Child("tidb.image"), spec.TiDB.Image, "image has been deprecated, use baseImage instead"))
 	}
-	if spec.TiKV.Image != "" {
+	if tikvSpecified && spec.TiKV.Image != "" {
 		allErrs = append(allErrs, field.Invalid(path.Child("tikv.image"), spec.TiKV.Image, "image has been deprecated, use baseImage instead"))
 	}
-	if spec.PD.Image != "" {
+	if pdSpecified && spec.PD.Image != "" {
 		allErrs = append(allErrs, field.Invalid(path.Child("pd.image"), spec.PD.Image, "image has been deprecated, use baseImage instead"))
 	}
 	return allErrs
@@ -488,32 +618,40 @@ func validateNewTidbClusterSpec(spec *v1alpha1.TidbClusterSpec, path *field.Path
 func disallowUsingLegacyAPIInNewCluster(old, tc *v1alpha1.TidbCluster) field.ErrorList {
 	allErrs := field.ErrorList{}
 	path := field.NewPath("spec")
+	pdSpecified := old.Spec.PD != nil && tc.Spec.PD != nil
+	tidbSpecified := old.Spec.TiDB != nil && tc.Spec.TiDB != nil
+	tikvSpecified := old.Spec.TiKV != nil && tc.Spec.TiKV != nil
+
 	if old.Spec.Version != "" && tc.Spec.Version == "" {
 		allErrs = append(allErrs, field.Invalid(path.Child("version"), tc.Spec.Version, "version must not be empty"))
 	}
-	if old.Spec.TiDB.BaseImage != "" && tc.Spec.TiDB.BaseImage == "" {
+	if tidbSpecified && old.Spec.TiDB.BaseImage != "" && tc.Spec.TiDB.BaseImage == "" {
 		allErrs = append(allErrs, field.Invalid(path.Child("tidb.baseImage"), tc.Spec.TiDB.BaseImage, "baseImage of TiDB must not be empty"))
 	}
-	if old.Spec.PD.BaseImage != "" && tc.Spec.PD.BaseImage == "" {
+	if pdSpecified && old.Spec.PD.BaseImage != "" && tc.Spec.PD.BaseImage == "" {
 		allErrs = append(allErrs, field.Invalid(path.Child("pd.baseImage"), tc.Spec.PD.BaseImage, "baseImage of PD must not be empty"))
 	}
-	if old.Spec.TiKV.BaseImage != "" && tc.Spec.TiKV.BaseImage == "" {
+	if tikvSpecified && old.Spec.TiKV.BaseImage != "" && tc.Spec.TiKV.BaseImage == "" {
 		allErrs = append(allErrs, field.Invalid(path.Child("tikv.baseImage"), tc.Spec.TiKV.BaseImage, "baseImage of TiKV must not be empty"))
 	}
-	if old.Spec.TiDB.Config != nil && tc.Spec.TiDB.Config == nil {
+	if tidbSpecified && old.Spec.TiDB.Config != nil && tc.Spec.TiDB.Config == nil {
 		allErrs = append(allErrs, field.Invalid(path.Child("tidb.config"), tc.Spec.TiDB.Config, "tidb.config must not be nil"))
 	}
-	if old.Spec.TiKV.Config != nil && tc.Spec.TiKV.Config == nil {
+	if tikvSpecified && old.Spec.TiKV.Config != nil && tc.Spec.TiKV.Config == nil {
 		allErrs = append(allErrs, field.Invalid(path.Child("tikv.config"), tc.Spec.TiKV.Config, "TiKV.config must not be nil"))
 	}
-	if old.Spec.PD.Config != nil && tc.Spec.PD.Config == nil {
+	if pdSpecified && old.Spec.PD.Config != nil && tc.Spec.PD.Config == nil {
 		allErrs = append(allErrs, field.Invalid(path.Child("pd.config"), tc.Spec.PD.Config, "PD.config must not be nil"))
 	}
 	return allErrs
 }
 
-func validateUpdatePDConfig(old, conf *v1alpha1.PDConfigWraper, path *field.Path) field.ErrorList {
+func validateUpdatePDConfig(oldPdSpec, pdSpec *v1alpha1.PDSpec, path *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
+	if oldPdSpec == nil || pdSpec == nil {
+		return allErrs
+	}
+	old, conf := oldPdSpec.Config, pdSpec.Config
 	// for newly created cluster, both old and new are non-nil, guaranteed by validation
 	if old == nil || conf == nil {
 		return allErrs
@@ -542,6 +680,23 @@ func validateUpdatePDConfig(old, conf *v1alpha1.PDConfigWraper, path *field.Path
 		allErrs = append(allErrs, field.Invalid(path.Child("replication"), newRepl.Interface(),
 			"PD Replication Config is immutable through CRD, please modify with pd-ctl instead."))
 	}
+	return allErrs
+}
+
+// disallowMutateBootstrapSQLConfigMapName checks if user mutate the bootstrapSQLConfigMapName field.
+// Only allow to update bootstrapSQLConfigMapName from non-nil to nil.
+func disallowMutateBootstrapSQLConfigMapName(old, new *v1alpha1.TiDBSpec, p *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if old == nil || new == nil {
+		return allErrs
+	}
+
+	bootstrapSQLSpecified := old.BootstrapSQLConfigMapName != nil && new.BootstrapSQLConfigMapName != nil
+	if (bootstrapSQLSpecified && *old.BootstrapSQLConfigMapName != *new.BootstrapSQLConfigMapName) ||
+		(!bootstrapSQLSpecified && new.BootstrapSQLConfigMapName != nil) {
+		return append(allErrs, field.Invalid(p, new.BootstrapSQLConfigMapName, "bootstrapSQLConfigMapName is immutable"))
+	}
+
 	return allErrs
 }
 
@@ -616,6 +771,17 @@ func validateTimeDurationStr(timeStr *string, fldPath *field.Path) field.ErrorLi
 	return allErrs
 }
 
+// validatePromDurationStr validate prometheus duration, Units Supported: y, w, d, h, m, s, ms.
+func validatePromDurationStr(timeStr *string, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if timeStr != nil {
+		if _, err := model.ParseDuration(*timeStr); err != nil {
+			allErrs = append(allErrs, field.Invalid(fldPath, timeStr, "mush be a valid Prom time duration string, e.g. 2h"))
+		}
+	}
+	return allErrs
+}
+
 // clusterVersionLessThan2 makes sure that deployed dm cluster version not to be v1.0.x
 func clusterVersionLessThan2(version string) (bool, error) {
 	v, err := semver.NewVersion(version)
@@ -653,5 +819,18 @@ func validateStorageInfo(storage string, fldPath *field.Path) field.ErrorList {
 		}
 	}
 
+	return allErrs
+}
+
+func validateScalePolicy(scalePolicy *v1alpha1.ScalePolicy, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if scalePolicy.ScaleInParallelism != nil && *scalePolicy.ScaleInParallelism <= 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("ScaleInParallelism"),
+			*scalePolicy.ScaleInParallelism, "ScaleInParallelism should be positive"))
+	}
+	if scalePolicy.ScaleOutParallelism != nil && *scalePolicy.ScaleOutParallelism <= 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("ScaleOutParallelism"),
+			*scalePolicy.ScaleOutParallelism, "ScaleOutParallelism should be positive"))
+	}
 	return allErrs
 }

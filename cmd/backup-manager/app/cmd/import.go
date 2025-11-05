@@ -25,7 +25,7 @@ import (
 	"github.com/pingcap/tidb-operator/pkg/controller"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 )
 
@@ -45,6 +45,7 @@ func NewImportCommand() *cobra.Command {
 	cmd.Flags().StringVar(&ro.Namespace, "namespace", "", "Restore CR's namespace")
 	cmd.Flags().StringVar(&ro.ResourceName, "restoreName", "", "Restore CRD object name")
 	cmd.Flags().BoolVar(&ro.TLSClient, "client-tls", false, "Whether client tls is enabled")
+	cmd.Flags().BoolVar(&ro.SkipClientCA, "skipClientCA", false, "Whether to skip tidb server's certificates validation")
 	cmd.Flags().StringVar(&ro.BackupPath, "backupPath", "", "The location of the backup")
 	return cmd
 }

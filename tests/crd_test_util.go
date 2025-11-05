@@ -14,21 +14,23 @@
 package tests
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os/exec"
 	"time"
 
 	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
 	asclientset "github.com/pingcap/advanced-statefulset/client/client/clientset/versioned"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/client/clientset/versioned"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
 	utilstatefulset "github.com/pingcap/tidb-operator/tests/e2e/util/statefulset"
 	"github.com/pingcap/tidb-operator/tests/slack"
+	"github.com/pingcap/tidb-operator/tests/third_party/k8s/log"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,8 +39,15 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	typedappsv1 "k8s.io/client-go/kubernetes/typed/apps/v1"
-	"k8s.io/kubernetes/test/e2e/framework/log"
 )
+
+type pumpStatus struct {
+	StatusMap map[string]*nodeStatus `json:"StatusMap"`
+}
+
+type nodeStatus struct {
+	State string `json:"state"`
+}
 
 type CrdTestUtil struct {
 	cli         versioned.Interface
@@ -57,7 +66,7 @@ func NewCrdTestUtil(cli versioned.Interface, kubeCli kubernetes.Interface, asCli
 }
 
 func (ctu *CrdTestUtil) GetTidbClusterOrDie(name, namespace string) *v1alpha1.TidbCluster {
-	tc, err := ctu.cli.PingcapV1alpha1().TidbClusters(namespace).Get(name, metav1.GetOptions{})
+	tc, err := ctu.cli.PingcapV1alpha1().TidbClusters(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 	if err != nil {
 		slack.NotifyAndPanic(err)
 	}
@@ -65,7 +74,7 @@ func (ctu *CrdTestUtil) GetTidbClusterOrDie(name, namespace string) *v1alpha1.Ti
 }
 
 func (ctu *CrdTestUtil) CreateTidbClusterOrDie(tc *v1alpha1.TidbCluster) {
-	_, err := ctu.cli.PingcapV1alpha1().TidbClusters(tc.Namespace).Create(tc)
+	_, err := ctu.cli.PingcapV1alpha1().TidbClusters(tc.Namespace).Create(context.TODO(), tc, metav1.CreateOptions{})
 	if err != nil {
 		slack.NotifyAndPanic(err)
 	}
@@ -73,12 +82,12 @@ func (ctu *CrdTestUtil) CreateTidbClusterOrDie(tc *v1alpha1.TidbCluster) {
 
 func (ctu *CrdTestUtil) UpdateTidbClusterOrDie(tc *v1alpha1.TidbCluster) {
 	err := wait.Poll(5*time.Second, 3*time.Minute, func() (done bool, err error) {
-		latestTC, err := ctu.cli.PingcapV1alpha1().TidbClusters(tc.Namespace).Get(tc.Name, metav1.GetOptions{})
+		latestTC, err := ctu.cli.PingcapV1alpha1().TidbClusters(tc.Namespace).Get(context.TODO(), tc.Name, metav1.GetOptions{})
 		if err != nil {
 			return false, nil
 		}
 		latestTC.Spec = tc.Spec
-		_, err = ctu.cli.PingcapV1alpha1().TidbClusters(tc.Namespace).Update(latestTC)
+		_, err = ctu.cli.PingcapV1alpha1().TidbClusters(tc.Namespace).Update(context.TODO(), latestTC, metav1.UpdateOptions{})
 		if err != nil {
 			return false, nil
 		}
@@ -97,7 +106,7 @@ func (ctu *CrdTestUtil) CheckDisasterToleranceOrDie(tc *v1alpha1.TidbCluster) {
 }
 
 func (ctu *CrdTestUtil) CheckDisasterTolerance(cluster *v1alpha1.TidbCluster) error {
-	pds, err := ctu.kubeCli.CoreV1().Pods(cluster.Namespace).List(
+	pds, err := ctu.kubeCli.CoreV1().Pods(cluster.Namespace).List(context.TODO(),
 		metav1.ListOptions{LabelSelector: labels.SelectorFromSet(
 			label.New().Instance(cluster.Name).PD().Labels(),
 		).String()})
@@ -109,7 +118,7 @@ func (ctu *CrdTestUtil) CheckDisasterTolerance(cluster *v1alpha1.TidbCluster) er
 		return err
 	}
 
-	tikvs, err := ctu.kubeCli.CoreV1().Pods(cluster.Namespace).List(
+	tikvs, err := ctu.kubeCli.CoreV1().Pods(cluster.Namespace).List(context.TODO(),
 		metav1.ListOptions{LabelSelector: labels.SelectorFromSet(
 			label.New().Instance(cluster.Name).TiKV().Labels(),
 		).String()})
@@ -121,7 +130,7 @@ func (ctu *CrdTestUtil) CheckDisasterTolerance(cluster *v1alpha1.TidbCluster) er
 		return err
 	}
 
-	tidbs, err := ctu.kubeCli.CoreV1().Pods(cluster.Namespace).List(
+	tidbs, err := ctu.kubeCli.CoreV1().Pods(cluster.Namespace).List(context.TODO(),
 		metav1.ListOptions{LabelSelector: labels.SelectorFromSet(
 			label.New().Instance(cluster.Name).TiDB().Labels(),
 		).String()})
@@ -152,7 +161,7 @@ func checkPodsAffinity(allPods []corev1.Pod) error {
 }
 
 func (ctu *CrdTestUtil) DeleteTidbClusterOrDie(tc *v1alpha1.TidbCluster) {
-	err := ctu.cli.PingcapV1alpha1().TidbClusters(tc.Namespace).Delete(tc.Name, &metav1.DeleteOptions{})
+	err := ctu.cli.PingcapV1alpha1().TidbClusters(tc.Namespace).Delete(context.TODO(), tc.Name, metav1.DeleteOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return
@@ -176,7 +185,7 @@ func (ctu *CrdTestUtil) WaitForTidbClusterReady(tc *v1alpha1.TidbCluster, timeou
 	return wait.PollImmediate(pollInterval, timeout, func() (bool, error) {
 		var local *v1alpha1.TidbCluster
 		var err error
-		if local, err = ctu.cli.PingcapV1alpha1().TidbClusters(tc.Namespace).Get(tc.Name, metav1.GetOptions{}); err != nil {
+		if local, err = ctu.cli.PingcapV1alpha1().TidbClusters(tc.Namespace).Get(context.TODO(), tc.Name, metav1.GetOptions{}); err != nil {
 			log.Logf("ERROR: failed to get tidbcluster: %s/%s, %v", tc.Namespace, tc.Name, err)
 			return false, nil
 		}
@@ -229,7 +238,7 @@ func (ctu *CrdTestUtil) pdMembersReadyFn(tc *v1alpha1.TidbCluster) (bool, error)
 	ns := tc.GetNamespace()
 	pdSetName := controller.PDMemberName(tcName)
 
-	pdSet, err := ctu.tcStsGetter.StatefulSets(ns).Get(pdSetName, metav1.GetOptions{})
+	pdSet, err := ctu.tcStsGetter.StatefulSets(ns).Get(context.TODO(), pdSetName, metav1.GetOptions{})
 	if err != nil {
 		log.Logf("ERROR: failed to get statefulset: %s/%s, %v", ns, pdSetName, err)
 		return false, nil
@@ -271,17 +280,20 @@ func (ctu *CrdTestUtil) pdMembersReadyFn(tc *v1alpha1.TidbCluster) (bool, error)
 		return false, nil
 	}
 
-	c, found := getMemberContainer(ctu.kubeCli, ctu.tcStsGetter, ns, tc.Name, label.PDLabelVal)
-	if !found {
+	expectedImage := tc.PDImage()
+	containers, err := utilstatefulset.GetMemberContainersFromSts(ctu.kubeCli, ctu.tcStsGetter, ns, pdSetName, v1alpha1.PDMemberType)
+	if err != nil {
 		log.Logf("statefulset: %s/%s not found containers[name=pd] or pod %s-0",
 			ns, pdSetName, pdSetName)
 		return false, nil
 	}
 
-	if tc.PDImage() != c.Image {
-		log.Logf("statefulset: %s/%s .spec.template.spec.containers[name=pd].image(%s) != %s",
-			ns, pdSetName, c.Image, tc.PDImage())
-		return false, nil
+	for _, container := range containers {
+		if container.Image != expectedImage {
+			log.Logf("statefulset: %s/%s .spec.template.spec.containers[name=pd].image(%s) != %s",
+				ns, pdSetName, container.Image, tc.PDImage())
+			return false, nil
+		}
 	}
 
 	for _, member := range tc.Status.PD.Members {
@@ -294,11 +306,11 @@ func (ctu *CrdTestUtil) pdMembersReadyFn(tc *v1alpha1.TidbCluster) (bool, error)
 
 	pdServiceName := controller.PDMemberName(tcName)
 	pdPeerServiceName := controller.PDPeerMemberName(tcName)
-	if _, err := ctu.kubeCli.CoreV1().Services(ns).Get(pdServiceName, metav1.GetOptions{}); err != nil {
+	if _, err := ctu.kubeCli.CoreV1().Services(ns).Get(context.TODO(), pdServiceName, metav1.GetOptions{}); err != nil {
 		log.Logf("ERROR: failed to get service: %s/%s", ns, pdServiceName)
 		return false, nil
 	}
-	if _, err := ctu.kubeCli.CoreV1().Services(ns).Get(pdPeerServiceName, metav1.GetOptions{}); err != nil {
+	if _, err := ctu.kubeCli.CoreV1().Services(ns).Get(context.TODO(), pdPeerServiceName, metav1.GetOptions{}); err != nil {
 		log.Logf("ERROR: failed to get peer service: %s/%s", ns, pdPeerServiceName)
 		return false, nil
 	}
@@ -320,7 +332,7 @@ func (ctu *CrdTestUtil) tikvMembersReadyFn(obj runtime.Object) (bool, error) {
 		return false, fmt.Errorf("failed to parse obj to TidbCluster")
 	}
 
-	tikvSet, err := ctu.tcStsGetter.StatefulSets(ns).Get(tikvSetName, metav1.GetOptions{})
+	tikvSet, err := ctu.tcStsGetter.StatefulSets(ns).Get(context.TODO(), tikvSetName, metav1.GetOptions{})
 	if err != nil {
 		log.Logf("ERROR: failed to get statefulset: %s/%s, %v", ns, tikvSetName, err)
 		return false, nil
@@ -374,17 +386,20 @@ func (ctu *CrdTestUtil) tikvMembersReadyFn(obj runtime.Object) (bool, error) {
 		return false, nil
 	}
 
-	c, found := getStsContainer(ctu.kubeCli, tikvSet, label.TiKVLabelVal)
-	if !found {
+	expectedImage := image
+	containers, err := utilstatefulset.GetMemberContainersFromSts(ctu.kubeCli, ctu.tcStsGetter, ns, tikvSetName, v1alpha1.TiKVMemberType)
+	if err != nil {
 		log.Logf("statefulset: %s/%s not found containers[name=tikv] or pod %s-0",
 			ns, tikvSetName, tikvSetName)
 		return false, nil
 	}
 
-	if image != c.Image {
-		log.Logf("statefulset: %s/%s .spec.template.spec.containers[name=tikv].image(%s) != %s",
-			ns, tikvSetName, c.Image, image)
-		return false, nil
+	for _, container := range containers {
+		if container.Image != expectedImage {
+			log.Logf("statefulset: %s/%s .spec.template.spec.containers[name=tikv].image(%s) != %s",
+				ns, tikvSetName, container.Image, image)
+			return false, nil
+		}
 	}
 
 	for _, store := range stores {
@@ -393,7 +408,7 @@ func (ctu *CrdTestUtil) tikvMembersReadyFn(obj runtime.Object) (bool, error) {
 			return false, nil
 		}
 	}
-	if _, err := ctu.kubeCli.CoreV1().Services(ns).Get(tikvPeerServiceName, metav1.GetOptions{}); err != nil {
+	if _, err := ctu.kubeCli.CoreV1().Services(ns).Get(context.TODO(), tikvPeerServiceName, metav1.GetOptions{}); err != nil {
 		log.Logf("ERROR: failed to get peer service: %s/%s", ns, tikvPeerServiceName)
 		return false, nil
 	}
@@ -405,7 +420,7 @@ func (ctu *CrdTestUtil) tidbMembersReadyFn(tc *v1alpha1.TidbCluster) (bool, erro
 	ns := tc.GetNamespace()
 	tidbSetName := controller.TiDBMemberName(tcName)
 
-	tidbSet, err := ctu.tcStsGetter.StatefulSets(ns).Get(tidbSetName, metav1.GetOptions{})
+	tidbSet, err := ctu.tcStsGetter.StatefulSets(ns).Get(context.TODO(), tidbSetName, metav1.GetOptions{})
 	if err != nil {
 		log.Logf("ERROR: failed to get statefulset: %s/%s, %v", ns, tidbSetName, err)
 		return false, nil
@@ -447,25 +462,28 @@ func (ctu *CrdTestUtil) tidbMembersReadyFn(tc *v1alpha1.TidbCluster) (bool, erro
 		return false, nil
 	}
 
-	c, found := getMemberContainer(ctu.kubeCli, ctu.tcStsGetter, ns, tc.Name, label.TiDBLabelVal)
-	if !found {
+	expectedImage := tc.TiDBImage()
+	containers, err := utilstatefulset.GetMemberContainersFromSts(ctu.kubeCli, ctu.tcStsGetter, ns, tidbSetName, v1alpha1.TiDBMemberType)
+	if err != nil {
 		log.Logf("statefulset: %s/%s not found containers[name=tidb] or pod %s-0",
 			ns, tidbSetName, tidbSetName)
 		return false, nil
 	}
 
-	if tc.TiDBImage() != c.Image {
-		log.Logf("statefulset: %s/%s .spec.template.spec.containers[name=tidb].image(%s) != %s",
-			ns, tidbSetName, c.Image, tc.TiDBImage())
-		return false, nil
+	for _, container := range containers {
+		if container.Image != expectedImage {
+			log.Logf("statefulset: %s/%s .spec.template.spec.containers[name=tidb].image(%s) != %s",
+				ns, tidbSetName, container.Image, tc.TiDBImage())
+			return false, nil
+		}
 	}
 
-	_, err = ctu.kubeCli.CoreV1().Services(ns).Get(tidbSetName, metav1.GetOptions{})
+	_, err = ctu.kubeCli.CoreV1().Services(ns).Get(context.TODO(), tidbSetName, metav1.GetOptions{})
 	if err != nil {
 		log.Logf("ERROR: failed to get service: %s/%s", ns, tidbSetName)
 		return false, nil
 	}
-	_, err = ctu.kubeCli.CoreV1().Services(ns).Get(controller.TiDBPeerMemberName(tcName), metav1.GetOptions{})
+	_, err = ctu.kubeCli.CoreV1().Services(ns).Get(context.TODO(), controller.TiDBPeerMemberName(tcName), metav1.GetOptions{})
 	if err != nil {
 		log.Logf("ERROR: failed to get peer service: %s/%s", ns, controller.TiDBPeerMemberName(tcName))
 		return false, nil
@@ -479,7 +497,7 @@ func (ctu *CrdTestUtil) tiflashMembersReadyFn(tc *v1alpha1.TidbCluster) (bool, e
 	ns := tc.GetNamespace()
 	tiflashSetName := controller.TiFlashMemberName(tcName)
 
-	tiflashSet, err := ctu.tcStsGetter.StatefulSets(ns).Get(tiflashSetName, metav1.GetOptions{})
+	tiflashSet, err := ctu.tcStsGetter.StatefulSets(ns).Get(context.TODO(), tiflashSetName, metav1.GetOptions{})
 	if err != nil {
 		log.Logf("ERROR: failed to get statefulset: %s/%s, %v", ns, tiflashSetName, err)
 		return false, nil
@@ -520,18 +538,20 @@ func (ctu *CrdTestUtil) tiflashMembersReadyFn(tc *v1alpha1.TidbCluster) (bool, e
 			ns, tiflashSetName, tiflashSet.Status.ReadyReplicas, tiflashSet.Status.Replicas)
 		return false, nil
 	}
-
-	c, found := getMemberContainer(ctu.kubeCli, ctu.tcStsGetter, ns, tc.Name, label.TiFlashLabelVal)
-	if !found {
+	expectedImage := tc.TiFlashImage()
+	containers, err := utilstatefulset.GetMemberContainersFromSts(ctu.kubeCli, ctu.tcStsGetter, ns, tiflashSetName, v1alpha1.TiFlashMemberType)
+	if err != nil {
 		log.Logf("statefulset: %s/%s not found containers[name=tiflash] or pod %s-0",
 			ns, tiflashSetName, tiflashSetName)
 		return false, nil
 	}
 
-	if tc.TiFlashImage() != c.Image {
-		log.Logf("statefulset: %s/%s .spec.template.spec.containers[name=tiflash].image(%s) != %s",
-			ns, tiflashSetName, c.Image, tc.TiFlashImage())
-		return false, nil
+	for _, container := range containers {
+		if container.Image != expectedImage {
+			log.Logf("statefulset: %s/%s .spec.template.spec.containers[name=tiflash].image(%s) != %s",
+				ns, tiflashSetName, container.Image, tc.TiFlashImage())
+			return false, nil
+		}
 	}
 
 	for _, store := range tc.Status.TiFlash.Stores {
@@ -542,7 +562,7 @@ func (ctu *CrdTestUtil) tiflashMembersReadyFn(tc *v1alpha1.TidbCluster) (bool, e
 	}
 
 	tiflashPeerServiceName := controller.TiFlashPeerMemberName(tcName)
-	if _, err := ctu.kubeCli.CoreV1().Services(ns).Get(tiflashPeerServiceName, metav1.GetOptions{}); err != nil {
+	if _, err := ctu.kubeCli.CoreV1().Services(ns).Get(context.TODO(), tiflashPeerServiceName, metav1.GetOptions{}); err != nil {
 		log.Logf("ERROR: failed to get peer service: %s/%s", ns, tiflashPeerServiceName)
 		return false, nil
 	}
@@ -554,7 +574,7 @@ func (ctu *CrdTestUtil) pumpMembersReadyFn(tc *v1alpha1.TidbCluster) (bool, erro
 	log.Logf("begin to check incremental backup cluster[%s] namespace[%s]", tc.Name, tc.Namespace)
 	pumpStatefulSetName := fmt.Sprintf("%s-pump", tc.Name)
 
-	pumpStatefulSet, err := ctu.kubeCli.AppsV1().StatefulSets(tc.Namespace).Get(pumpStatefulSetName, metav1.GetOptions{})
+	pumpStatefulSet, err := ctu.kubeCli.AppsV1().StatefulSets(tc.Namespace).Get(context.TODO(), pumpStatefulSetName, metav1.GetOptions{})
 	if err != nil {
 		log.Logf("ERROR: failed to get jobs %s ,%v", pumpStatefulSetName, err)
 		return false, nil
@@ -574,7 +594,7 @@ func (ctu *CrdTestUtil) pumpMembersReadyFn(tc *v1alpha1.TidbCluster) (bool, erro
 		).String(),
 	}
 
-	pods, err := ctu.kubeCli.CoreV1().Pods(tc.Namespace).List(listOps)
+	pods, err := ctu.kubeCli.CoreV1().Pods(tc.Namespace).List(context.TODO(), listOps)
 	if err != nil {
 		log.Logf("ERROR: failed to get pods via pump labels %s ,%v", pumpStatefulSetName, err)
 		return false, nil
@@ -606,7 +626,7 @@ func (ctu *CrdTestUtil) pumpMembersReadyFn(tc *v1alpha1.TidbCluster) (bool, erro
 }
 
 func (ctu *CrdTestUtil) pumpHealth(tc *v1alpha1.TidbCluster, podName string) bool {
-	addr := fmt.Sprintf("%s.%s-pump.%s:8250", podName, tc.Name, tc.Namespace)
+	addr := fmt.Sprintf("%s.%s-pump.%s:%d", podName, tc.Name, tc.Namespace, v1alpha1.DefaultPumpPort)
 	pumpHealthURL := fmt.Sprintf("http://%s/status", addr)
 	res, err := http.Get(pumpHealthURL)
 	if err != nil {
@@ -617,7 +637,7 @@ func (ctu *CrdTestUtil) pumpHealth(tc *v1alpha1.TidbCluster, podName string) boo
 		log.Logf("ERROR: Error response %v", res.StatusCode)
 		return false
 	}
-	body, err := ioutil.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		log.Logf("ERROR: cluster:[%s] read response body failed,error:%v", tc.Name, err)
 		return false
@@ -647,7 +667,7 @@ func (ctu *CrdTestUtil) CleanResourcesOrDie(resource, namespace string) {
 }
 
 func (ctu *CrdTestUtil) CreateSecretOrDie(secret *corev1.Secret) {
-	_, err := ctu.kubeCli.CoreV1().Secrets(secret.Namespace).Create(secret)
+	_, err := ctu.kubeCli.CoreV1().Secrets(secret.Namespace).Create(context.TODO(), secret, metav1.CreateOptions{})
 	if err != nil {
 		slack.NotifyAndPanic(err)
 	}

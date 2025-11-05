@@ -21,12 +21,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agiledragon/gomonkey/v2"
 	"github.com/google/go-cmp/cmp"
 	. "github.com/onsi/gomega"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
+	"github.com/pingcap/tidb-operator/pkg/apis/util/toml"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
-	"github.com/pingcap/tidb-operator/pkg/util/toml"
+	"github.com/pingcap/tidb-operator/pkg/manager/suspender"
+	mngerutils "github.com/pingcap/tidb-operator/pkg/manager/utils"
+	"github.com/pingcap/tidb-operator/pkg/manager/volumes"
+	"github.com/pingcap/tidb-operator/pkg/pdapi"
+	"github.com/pingcap/tidb-operator/pkg/util"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
@@ -46,6 +52,7 @@ func TestTiDBMemberManagerSyncCreate(t *testing.T) {
 		name                     string
 		prepare                  func(cluster *v1alpha1.TidbCluster)
 		errWhenCreateStatefulSet bool
+		suspendComponent         func() (bool, error)
 		err                      bool
 		setCreated               bool
 		tls                      bool
@@ -74,6 +81,11 @@ func TestTiDBMemberManagerSyncCreate(t *testing.T) {
 
 		if test.errWhenCreateStatefulSet {
 			fakeSetControl.SetCreateStatefulSetError(errors.NewInternalError(fmt.Errorf("API server failed")), 0)
+		}
+		if test.suspendComponent != nil {
+			tmm.suspender.(*suspender.FakeSuspender).SuspendComponentFunc = func(c v1alpha1.Cluster, mt v1alpha1.MemberType) (bool, error) {
+				return test.suspendComponent()
+			}
 		}
 
 		err := tmm.Sync(tc)
@@ -126,6 +138,14 @@ func TestTiDBMemberManagerSyncCreate(t *testing.T) {
 			err:                      true,
 			setCreated:               false,
 		},
+		{
+			name:                     "skip create when suspend",
+			suspendComponent:         func() (bool, error) { return true, nil },
+			prepare:                  nil,
+			errWhenCreateStatefulSet: true,
+			err:                      false,
+			setCreated:               false,
+		},
 	}
 
 	for i := range tests {
@@ -157,6 +177,13 @@ func TestTiDBMemberManagerSyncUpdate(t *testing.T) {
 		tcName := tc.GetName()
 
 		tmm, fakeSetControl, _, _ := newFakeTiDBMemberManager()
+		pdControl := tmm.deps.PDControl.(*pdapi.FakePDControl)
+		pdClient := controller.NewFakePDClient(pdControl, tc)
+		pdClient.AddReaction(pdapi.GetConfigActionType, func(action *pdapi.Action) (interface{}, error) {
+			return &pdapi.PDConfigFromAPI{
+				Replication: &pdapi.PDReplicationConfig{},
+			}, nil
+		})
 
 		if test.statusChange == nil {
 			fakeSetControl.SetStatusChange(func(set *apps.StatefulSet) {
@@ -209,7 +236,7 @@ func TestTiDBMemberManagerSyncUpdate(t *testing.T) {
 			err:                      false,
 			expectStatefulSetFn: func(g *GomegaWithT, set *apps.StatefulSet, err error) {
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(int(*set.Spec.Replicas)).To(Equal(5))
+				g.Expect(int(*set.Spec.Replicas)).To(Equal(4)) // scale out one-by-one now
 			},
 		},
 		{
@@ -552,6 +579,18 @@ func TestTiDBMemberManagerSyncTidbClusterStatus(t *testing.T) {
 	}
 }
 
+func TestSyncRecoveryForTidbCluster(t *testing.T) {
+	g := NewGomegaWithT(t)
+	tc := newTidbClusterForTiDB()
+	tmm, _, _, _ := newFakeTiDBMemberManager()
+	err := tmm.syncRecoveryForTidbCluster(tc)
+	g.Expect(err).To(BeNil())
+
+	tc.Spec.RecoveryMode = true
+	err = tmm.syncRecoveryForTidbCluster(tc)
+	g.Expect(err).NotTo(BeNil())
+}
+
 func TestTiDBMemberManagerSyncTidbService(t *testing.T) {
 	g := NewGomegaWithT(t)
 	type testcase struct {
@@ -634,7 +673,7 @@ func TestTiDBMemberManagerSyncTidbService(t *testing.T) {
 			expectFn: func(g *GomegaWithT, err error, svc *corev1.Service) {
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(svc.Annotations).To(HaveKeyWithValue("lb-type", "new-lb"), "Expected updating service will reconcile annotations")
-				g.Expect(svc.Annotations).To(HaveKeyWithValue("k", "v"), "Expected updating service will not affect additional annotations")
+				g.Expect(svc.Annotations).NotTo(HaveKey("k"), "Expected updating service will reconcile annotations")
 			},
 		},
 		{
@@ -802,15 +841,19 @@ type fakeIndexers struct {
 	set    cache.Indexer
 	job    cache.Indexer
 	ti     cache.Indexer
+	node   cache.Indexer
 }
 
 func newFakeTiDBMemberManager() (*tidbMemberManager, *controller.FakeStatefulSetControl, *controller.FakeTiDBControl, *fakeIndexers) {
 	fakeDeps := controller.NewFakeDependencies()
 	tmm := &tidbMemberManager{
 		deps:                         fakeDeps,
+		scaler:                       NewTiDBScaler(fakeDeps),
 		tidbUpgrader:                 NewFakeTiDBUpgrader(),
 		tidbFailover:                 NewFakeTiDBFailover(),
 		tidbStatefulSetIsUpgradingFn: tidbStatefulSetIsUpgrading,
+		suspender:                    suspender.NewFakeSuspender(),
+		podVolumeModifier:            &volumes.FakePodVolumeModifier{},
 	}
 	indexers := &fakeIndexers{
 		pod:    fakeDeps.KubeInformerFactory.Core().V1().Pods().Informer().GetIndexer(),
@@ -819,6 +862,7 @@ func newFakeTiDBMemberManager() (*tidbMemberManager, *controller.FakeStatefulSet
 		eps:    fakeDeps.KubeInformerFactory.Core().V1().Endpoints().Informer().GetIndexer(),
 		secret: fakeDeps.KubeInformerFactory.Core().V1().Secrets().Informer().GetIndexer(),
 		set:    fakeDeps.KubeInformerFactory.Apps().V1().StatefulSets().Informer().GetIndexer(),
+		node:   fakeDeps.KubeInformerFactory.Core().V1().Nodes().Informer().GetIndexer(),
 	}
 	setControl := fakeDeps.StatefulSetControl.(*controller.FakeStatefulSetControl)
 	tidbControl := fakeDeps.TiDBControl.(*controller.FakeTiDBControl)
@@ -875,8 +919,8 @@ func TestGetNewTiDBHeadlessServiceForTidbCluster(t *testing.T) {
 					Ports: []corev1.ServicePort{
 						{
 							Name:       "status",
-							Port:       10080,
-							TargetPort: intstr.FromInt(10080),
+							Port:       v1alpha1.DefaultTiDBStatusPort,
+							TargetPort: intstr.FromInt(int(v1alpha1.DefaultTiDBStatusPort)),
 							Protocol:   corev1.ProtocolTCP,
 						},
 					},
@@ -892,7 +936,8 @@ func TestGetNewTiDBHeadlessServiceForTidbCluster(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
+	for i := range tests {
+		tt := tests[i]
 		t.Run(tt.name, func(t *testing.T) {
 			svc := getNewTiDBHeadlessServiceForTidbCluster(&tt.tc)
 			if diff := cmp.Diff(tt.expected, *svc); diff != "" {
@@ -1008,7 +1053,7 @@ func TestGetNewTiDBSetForTidbCluster(t *testing.T) {
 				},
 			},
 			testSts: func(sts *apps.StatefulSet) {
-				cmName := FindConfigMapVolume(&sts.Spec.Template.Spec, func(name string) bool {
+				cmName := mngerutils.FindConfigMapVolume(&sts.Spec.Template.Spec, func(name string) bool {
 					return strings.HasPrefix(name, controller.TiDBMemberName("tc"))
 				})
 				g := NewGomegaWithT(t)
@@ -1193,15 +1238,118 @@ func TestGetNewTiDBSetForTidbCluster(t *testing.T) {
 				}))
 			},
 		},
+		{
+			name: "tidb spec initialDelaySeconds, periodSeconds",
+			tc: v1alpha1.TidbCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tc",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.TidbClusterSpec{
+					PD: &v1alpha1.PDSpec{},
+
+					TiDB: &v1alpha1.TiDBSpec{
+						ComponentSpec: v1alpha1.ComponentSpec{
+							ReadinessProbe: &v1alpha1.Probe{
+								InitialDelaySeconds: pointer.Int32Ptr(5),
+								PeriodSeconds:       pointer.Int32Ptr(2),
+							},
+						},
+					},
+					TiKV: &v1alpha1.TiKVSpec{},
+				},
+			},
+			testSts: func(sts *apps.StatefulSet) {
+				g := NewGomegaWithT(t)
+				g.Expect(sts.Spec.Template.Spec.Containers[1].ReadinessProbe.InitialDelaySeconds).To(Equal(int32(5)))
+				g.Expect(sts.Spec.Template.Spec.Containers[1].ReadinessProbe.PeriodSeconds).To(Equal(int32(2)))
+			},
+		},
+		{
+			name: "Use customized readiness probe",
+			tc: v1alpha1.TidbCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tc",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.TidbClusterSpec{
+					PD: &v1alpha1.PDSpec{},
+					TiDB: &v1alpha1.TiDBSpec{
+						CustomizedStartupProbe: &v1alpha1.CustomizedProbe{
+							Image:            "probe:latest",
+							BinaryName:       "probe",
+							Args:             []string{"--enabledTLS=false"},
+							PeriodSeconds:    pointer.Int32(15),
+							TimeoutSeconds:   pointer.Int32(2),
+							SuccessThreshold: pointer.Int32(3),
+							FailureThreshold: pointer.Int32(60),
+						},
+					},
+					TiKV: &v1alpha1.TiKVSpec{},
+				},
+			},
+			testSts: func(sts *apps.StatefulSet) {
+				g := NewGomegaWithT(t)
+
+				probe := &corev1.Probe{
+					ProbeHandler: v1.ProbeHandler{
+						Exec: &v1.ExecAction{
+							Command: []string{
+								fmt.Sprintf("%s/%s", customizedStartupProbePath, "probe"),
+								"--enabledTLS=false",
+							},
+						},
+					},
+					PeriodSeconds:    15,
+					TimeoutSeconds:   2,
+					SuccessThreshold: 1,
+					FailureThreshold: 60,
+				}
+				checkCustomizedStartupProbeEnabled(g, sts.Spec.Template.Spec, probe)
+			},
+		},
 		// TODO add more tests
 	}
 
-	for _, tt := range tests {
+	for i := range tests {
+		tt := tests[i]
 		t.Run(tt.name, func(t *testing.T) {
 			sts, _ := getNewTiDBSetForTidbCluster(&tt.tc, tt.cm)
 			tt.testSts(sts)
 		})
 	}
+}
+
+func checkCustomizedStartupProbeEnabled(g *WithT, spec v1.PodSpec, expectedProbe *corev1.Probe) {
+	var hasInitContianer, hasTiDBContainer bool
+	for _, container := range spec.InitContainers {
+		if container.Name == "probe" {
+			hasInitContianer = true
+			g.Expect(container.Image).Should(Equal("probe:latest"))
+		}
+	}
+	g.Expect(hasInitContianer).To(BeTrue())
+
+	for _, container := range spec.Containers {
+		if container.Name == v1alpha1.TiDBMemberType.String() {
+			hasTiDBContainer = true
+
+			g.Expect(container.StartupProbe).Should(Equal(expectedProbe))
+			g.Expect(container.VolumeMounts).Should(ContainElement(corev1.VolumeMount{
+				Name:      "probe",
+				ReadOnly:  false,
+				MountPath: customizedStartupProbePath,
+			}))
+		}
+	}
+	g.Expect(hasTiDBContainer).To(BeTrue())
+
+	g.Expect(spec.Volumes).Should(ContainElement(corev1.Volume{
+		Name: "probe",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	}))
 }
 
 func TestTiDBInitContainers(t *testing.T) {
@@ -1528,9 +1676,44 @@ func TestTiDBInitContainers(t *testing.T) {
 				Sysctls:      []corev1.Sysctl{},
 			},
 		},
+		{
+			name: "customize readiness probe with init container",
+			tc: v1alpha1.TidbCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tc",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.TidbClusterSpec{
+					TiDB: &v1alpha1.TiDBSpec{
+						CustomizedStartupProbe: &v1alpha1.CustomizedProbe{
+							Image:      "probe:latest",
+							BinaryName: "probe",
+						}},
+					PD:   &v1alpha1.PDSpec{},
+					TiKV: &v1alpha1.TiKVSpec{},
+				},
+			},
+			expectedInit: []corev1.Container{
+				{
+					Name:            "probe",
+					Image:           "probe:latest",
+					ImagePullPolicy: corev1.PullIfNotPresent,
+					Command:         []string{"/bin/sh", "-c"},
+					Args:            []string{fmt.Sprintf("cp /probe %s/probe; echo 'probe copy finished'", customizedStartupProbePath)},
+					VolumeMounts: []corev1.VolumeMount{
+						{
+							Name:      "probe",
+							ReadOnly:  false,
+							MountPath: customizedStartupProbePath,
+						},
+					},
+				},
+			},
+		},
 	}
 
-	for _, tt := range tests {
+	for i := range tests {
+		tt := tests[i]
 		t.Run(tt.name, func(t *testing.T) {
 			sts, _ := getNewTiDBSetForTidbCluster(&tt.tc, nil)
 			if diff := cmp.Diff(tt.expectedInit, sts.Spec.Template.Spec.InitContainers); diff != "" {
@@ -1556,6 +1739,7 @@ func TestGetNewTiDBService(t *testing.T) {
 		"10.0.0.0/8",
 		"130.211.204.1/32",
 	}
+	loadBalancerClass := "service.k8s.aws/nlb"
 	testCases := []struct {
 		name     string
 		tc       v1alpha1.TidbCluster
@@ -1623,8 +1807,8 @@ func TestGetNewTiDBService(t *testing.T) {
 					Ports: []corev1.ServicePort{
 						{
 							Name:       "mysql-client",
-							Port:       4000,
-							TargetPort: intstr.FromInt(4000),
+							Port:       v1alpha1.DefaultTiDBServerPort,
+							TargetPort: intstr.FromInt(int(v1alpha1.DefaultTiDBServerPort)),
 							Protocol:   corev1.ProtocolTCP,
 						},
 					},
@@ -1684,14 +1868,14 @@ func TestGetNewTiDBService(t *testing.T) {
 					Ports: []corev1.ServicePort{
 						{
 							Name:       "mysql-client",
-							Port:       4000,
-							TargetPort: intstr.FromInt(4000),
+							Port:       v1alpha1.DefaultTiDBServerPort,
+							TargetPort: intstr.FromInt(int(v1alpha1.DefaultTiDBServerPort)),
 							Protocol:   corev1.ProtocolTCP,
 						},
 						{
 							Name:       "status",
-							Port:       10080,
-							TargetPort: intstr.FromInt(10080),
+							Port:       v1alpha1.DefaultTiDBStatusPort,
+							TargetPort: intstr.FromInt(int(v1alpha1.DefaultTiDBStatusPort)),
 							Protocol:   corev1.ProtocolTCP,
 						},
 					},
@@ -1720,6 +1904,7 @@ func TestGetNewTiDBService(t *testing.T) {
 									"lb-type": "testlb",
 								},
 								LoadBalancerSourceRanges: loadBalancerSourceRanges,
+								LoadBalancerClass:        &loadBalancerClass,
 							},
 							ExternalTrafficPolicy: &trafficPolicy,
 							ExposeStatus:          pointer.BoolPtr(true),
@@ -1765,17 +1950,88 @@ func TestGetNewTiDBService(t *testing.T) {
 						"10.0.0.0/8",
 						"130.211.204.1/32",
 					},
+					LoadBalancerClass: &loadBalancerClass,
 					Ports: []corev1.ServicePort{
 						{
 							Name:       "mysql-client",
-							Port:       4000,
-							TargetPort: intstr.FromInt(4000),
+							Port:       v1alpha1.DefaultTiDBServerPort,
+							TargetPort: intstr.FromInt(int(v1alpha1.DefaultTiDBServerPort)),
 							Protocol:   corev1.ProtocolTCP,
 						},
 						{
 							Name:       "status",
-							Port:       10080,
-							TargetPort: intstr.FromInt(10080),
+							Port:       v1alpha1.DefaultTiDBStatusPort,
+							TargetPort: intstr.FromInt(int(v1alpha1.DefaultTiDBStatusPort)),
+							Protocol:   corev1.ProtocolTCP,
+						},
+					},
+					Selector: map[string]string{
+						"app.kubernetes.io/name":       "tidb-cluster",
+						"app.kubernetes.io/managed-by": "tidb-operator",
+						"app.kubernetes.io/instance":   "foo",
+						"app.kubernetes.io/component":  "tidb",
+					},
+				},
+			},
+		},
+		{
+			name: "customize service port",
+			tc: v1alpha1.TidbCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "foo",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.TidbClusterSpec{
+					TiDB: &v1alpha1.TiDBSpec{
+						Service: &v1alpha1.TiDBServiceSpec{
+							ServiceSpec: v1alpha1.ServiceSpec{
+								Port: pointer.Int32Ptr(5000),
+							},
+							ExposeStatus: pointer.BoolPtr(true),
+						},
+					},
+					PD:   &v1alpha1.PDSpec{},
+					TiKV: &v1alpha1.TiKVSpec{},
+				},
+			},
+			expected: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "foo-tidb",
+					Namespace: "ns",
+					Labels: map[string]string{
+						"app.kubernetes.io/name":       "tidb-cluster",
+						"app.kubernetes.io/managed-by": "tidb-operator",
+						"app.kubernetes.io/instance":   "foo",
+						"app.kubernetes.io/component":  "tidb",
+						"app.kubernetes.io/used-by":    "end-user",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "pingcap.com/v1alpha1",
+							Kind:       "TidbCluster",
+							Name:       "foo",
+							UID:        "",
+							Controller: func(b bool) *bool {
+								return &b
+							}(true),
+							BlockOwnerDeletion: func(b bool) *bool {
+								return &b
+							}(true),
+						},
+					},
+				},
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{
+							Name:       "mysql-client",
+							Port:       5000,
+							TargetPort: intstr.FromInt(int(v1alpha1.DefaultTiDBServerPort)),
+							Protocol:   corev1.ProtocolTCP,
+						},
+						{
+							Name:       "status",
+							Port:       v1alpha1.DefaultTiDBStatusPort,
+							TargetPort: intstr.FromInt(int(v1alpha1.DefaultTiDBStatusPort)),
 							Protocol:   corev1.ProtocolTCP,
 						},
 					},
@@ -1790,7 +2046,8 @@ func TestGetNewTiDBService(t *testing.T) {
 		},
 	}
 
-	for _, tt := range testCases {
+	for i := range testCases {
+		tt := testCases[i]
 		t.Run(tt.name, func(t *testing.T) {
 			svc := getNewTiDBServiceOrNil(&tt.tc)
 			if tt.expected == nil {
@@ -1937,9 +2194,70 @@ func TestGetTiDBConfigMap(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "TiDB config with tls enabled and client auth disabled",
+			tc: v1alpha1.TidbCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "foo",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.TidbClusterSpec{
+					TLSCluster: &v1alpha1.TLSCluster{Enabled: true},
+					TiDB: &v1alpha1.TiDBSpec{
+						ComponentSpec: v1alpha1.ComponentSpec{
+							ConfigUpdateStrategy: &updateStrategy,
+						},
+						TLSClient: &v1alpha1.TiDBTLSClient{
+							Enabled:            true,
+							DisableClientAuthn: true,
+						},
+						Config: v1alpha1.NewTiDBConfig(),
+					},
+					PD:   &v1alpha1.PDSpec{},
+					TiKV: &v1alpha1.TiKVSpec{},
+				},
+			},
+			expected: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "foo-tidb",
+					Namespace: "ns",
+					Labels: map[string]string{
+						"app.kubernetes.io/name":       "tidb-cluster",
+						"app.kubernetes.io/managed-by": "tidb-operator",
+						"app.kubernetes.io/instance":   "foo",
+						"app.kubernetes.io/component":  "tidb",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "pingcap.com/v1alpha1",
+							Kind:       "TidbCluster",
+							Name:       "foo",
+							UID:        "",
+							Controller: func(b bool) *bool {
+								return &b
+							}(true),
+							BlockOwnerDeletion: func(b bool) *bool {
+								return &b
+							}(true),
+						},
+					},
+				},
+				Data: map[string]string{
+					"startup-script": "",
+					"config-file": `[security]
+  cluster-ssl-ca = "/var/lib/tidb-tls/ca.crt"
+  cluster-ssl-cert = "/var/lib/tidb-tls/tls.crt"
+  cluster-ssl-key = "/var/lib/tidb-tls/tls.key"
+  ssl-cert = "/var/lib/tidb-server-tls/tls.crt"
+  ssl-key = "/var/lib/tidb-server-tls/tls.key"
+`,
+				},
+			},
+		},
 	}
 
-	for _, tt := range testCases {
+	for i := range testCases {
+		tt := testCases[i]
 		t.Run(tt.name, func(t *testing.T) {
 			cm, err := getTiDBConfigMap(&tt.tc)
 			g.Expect(err).To(Succeed())
@@ -1993,10 +2311,29 @@ func TestTiDBMemberManagerScaleToZeroReplica(t *testing.T) {
 		ns := tc.GetNamespace()
 		tcName := tc.GetName()
 
-		tmm, fakeSetControl, _, _ := newFakeTiDBMemberManager()
+		tmm, fakeSetControl, _, indexer := newFakeTiDBMemberManager()
+		pdControl := tmm.deps.PDControl.(*pdapi.FakePDControl)
+		pdClient := controller.NewFakePDClient(pdControl, tc)
+		pdClient.AddReaction(pdapi.GetConfigActionType, func(action *pdapi.Action) (interface{}, error) {
+			return &pdapi.PDConfigFromAPI{
+				Replication: &pdapi.PDReplicationConfig{},
+			}, nil
+		})
 
 		err := tmm.Sync(tc)
 		g.Expect(err).NotTo(HaveOccurred())
+
+		for i := int32(0); i < 5; i++ {
+			// add all 5 (3 + 2 failure) pods
+			indexer.pod.Add(&corev1.Pod{
+				TypeMeta: metav1.TypeMeta{Kind: "Pod", APIVersion: "v1"},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              tidbPodName(tc.GetName(), i),
+					Namespace:         corev1.NamespaceDefault,
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(-1 * time.Hour)},
+				},
+			})
+		}
 
 		g.Expect(err).NotTo(HaveOccurred())
 		_, err = tmm.deps.StatefulSetLister.StatefulSets(ns).Get(controller.TiDBMemberName(tcName))
@@ -2009,8 +2346,9 @@ func TestTiDBMemberManagerScaleToZeroReplica(t *testing.T) {
 		if test.errWhenUpdateStatefulSet {
 			fakeSetControl.SetUpdateStatefulSetError(errors.NewInternalError(fmt.Errorf("API server failed")), 0)
 		}
-		syncTiDBCluster(tmm, tc1, test)
-		syncTiDBCluster(tmm, tc1, test)
+		for i := 0; i < 5; i++ { // scale in 5 members
+			syncTiDBCluster(tmm, tc1, test)
+		}
 
 		if test.expectStatefulSetFn != nil {
 			set, err := tmm.deps.StatefulSetLister.StatefulSets(ns).Get(controller.TiDBMemberName(tcName))
@@ -2242,7 +2580,7 @@ func TestTiDBShouldRecover(t *testing.T) {
 			defer cancel()
 			fakeDeps := controller.NewFakeDependencies()
 			for _, pod := range tt.pods {
-				fakeDeps.KubeClientset.CoreV1().Pods(pod.Namespace).Create(pod)
+				fakeDeps.KubeClientset.CoreV1().Pods(pod.Namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
 			}
 			kubeInformerFactory := fakeDeps.KubeInformerFactory
 			kubeInformerFactory.Start(ctx.Done())
@@ -2259,28 +2597,28 @@ func TestTiDBShouldRecover(t *testing.T) {
 func TestBuildTiDBProbeHandler(t *testing.T) {
 	g := NewGomegaWithT(t)
 
-	defaultHandler := corev1.Handler{
+	defaultHandler := corev1.ProbeHandler{
 		TCPSocket: &corev1.TCPSocketAction{
-			Port: intstr.FromInt(4000),
+			Port: intstr.FromInt(int(v1alpha1.DefaultTiDBServerPort)),
 		},
 	}
 
-	execHandler := corev1.Handler{
+	execHandler := corev1.ProbeHandler{
 		Exec: &corev1.ExecAction{
 			Command: []string{
 				"curl",
-				"http://127.0.0.1:10080/status",
+				fmt.Sprintf("http://127.0.0.1:%d/status", v1alpha1.DefaultTiDBStatusPort),
 				"--fail",
 				"--location",
 			},
 		},
 	}
 
-	sslExecHandler := corev1.Handler{
+	sslExecHandler := corev1.ProbeHandler{
 		Exec: &corev1.ExecAction{
 			Command: []string{
 				"curl",
-				"https://127.0.0.1:10080/status",
+				fmt.Sprintf("https://127.0.0.1:%d/status", v1alpha1.DefaultTiDBStatusPort),
 				"--fail",
 				"--location",
 				"--cacert", path.Join(clusterCertPath, tlsSecretRootCAKey),
@@ -2301,7 +2639,7 @@ func TestBuildTiDBProbeHandler(t *testing.T) {
 	g.Expect(get).Should(Equal(defaultHandler))
 
 	// test set command type & not tls
-	tc.Spec.TiDB.ReadinessProbe = &v1alpha1.TiDBProbe{
+	tc.Spec.TiDB.ReadinessProbe = &v1alpha1.Probe{
 		Type: pointer.StringPtr(v1alpha1.CommandProbeType),
 	}
 	get = buildTiDBReadinessProbHandler(tc)
@@ -2315,7 +2653,7 @@ func TestBuildTiDBProbeHandler(t *testing.T) {
 	g.Expect(get).Should(Equal(sslExecHandler))
 
 	// test tcp type
-	tc.Spec.TiDB.ReadinessProbe = &v1alpha1.TiDBProbe{
+	tc.Spec.TiDB.ReadinessProbe = &v1alpha1.Probe{
 		Type: pointer.StringPtr(v1alpha1.TCPProbeType),
 	}
 	get = buildTiDBReadinessProbHandler(tc)
@@ -2362,4 +2700,238 @@ func mustTiDBConfig(x interface{}) *v1alpha1.TiDBConfigWraper {
 	c.UnmarshalTOML(data)
 
 	return c
+}
+
+func TestBuildRandomPasswordSecret(t *testing.T) {
+	g := NewGomegaWithT(t)
+	patch := gomonkey.ApplyFunc(util.FixedLengthRandomPasswordBytes, func() []byte {
+		return []byte("1234") // return the invalid string firstly
+	})
+	defer patch.Reset()
+
+	tc := &v1alpha1.TidbCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "basic",
+		},
+	}
+	tmm, _, _, _ := newFakeTiDBMemberManager()
+	_, password := tmm.BuildRandomPasswordSecret(tc)
+	g.Expect(!strings.Contains(password, "\\")).Should(BeTrue())
+
+}
+
+func TestTiDBMemberManagerSetServerLabels(t *testing.T) {
+	g := NewGomegaWithT(t)
+	type Member struct {
+		name       string
+		node       string
+		nodeLabels map[string]string
+		unHealth   bool
+	}
+
+	type testcase struct {
+		name           string
+		tidbVersion    string
+		members        []Member
+		missingNodes   map[string]struct{}
+		labels         []string
+		errExpectFn    func(*GomegaWithT, error)
+		setCount       int
+		labelSetFailed bool
+		getConfigErr   error
+	}
+	testFn := func(test *testcase, t *testing.T) {
+		tc := newTidbClusterForPD()
+		if test.tidbVersion == "" {
+			test.tidbVersion = tidbSupportLabelsMinVersin
+		}
+		tc.Spec.TiDB.Version = &test.tidbVersion
+		tc.Spec.TiDB.BaseImage = "pingcap/tidb"
+		pmm, _, tidbCtl, indexers := newFakeTiDBMemberManager()
+		pdControl := pmm.deps.PDControl.(*pdapi.FakePDControl)
+		pdClient := controller.NewFakePDClient(pdControl, tc)
+		tc.Status.TiDB.Members = make(map[string]v1alpha1.TiDBMember)
+		nodes := make(map[string]struct{})
+		for i, m := range test.members {
+			name := m.name
+			if len(name) == 0 {
+				name = fmt.Sprintf("test-tidb-%d", i)
+			}
+			tc.Status.TiDB.Members[name] = v1alpha1.TiDBMember{
+				Name:     name,
+				Health:   !m.unHealth,
+				NodeName: m.node,
+			}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name,
+					Namespace: metav1.NamespaceDefault,
+				},
+				Spec: corev1.PodSpec{
+					NodeName: m.node,
+				},
+			}
+			indexers.pod.Add(pod)
+
+			if _, ok := nodes[m.node]; !ok {
+				if _, ok := test.missingNodes[m.node]; !ok {
+					if len(m.nodeLabels) == 0 {
+						m.nodeLabels = map[string]string{
+							"region":                      "region",
+							"topology.kubernetes.io/zone": "zone",
+							"rack":                        "rack",
+							corev1.LabelHostname:          "host",
+						}
+					}
+					node := &corev1.Node{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:   m.node,
+							Labels: m.nodeLabels,
+						},
+					}
+					indexers.node.Add(node)
+				}
+			}
+		}
+		if test.getConfigErr != nil {
+			pdClient.AddReaction(pdapi.GetConfigActionType, func(action *pdapi.Action) (interface{}, error) {
+				return nil, test.getConfigErr
+			})
+		} else {
+			pdClient.AddReaction(pdapi.GetConfigActionType, func(action *pdapi.Action) (interface{}, error) {
+				labels := test.labels
+				if len(labels) == 0 {
+					labels = []string{"topology.kubernetes.io/zone", corev1.LabelHostname}
+				}
+				return &pdapi.PDConfigFromAPI{
+					Replication: &pdapi.PDReplicationConfig{
+						LocationLabels: labels,
+					},
+				}, nil
+			})
+		}
+
+		if test.labelSetFailed {
+			tidbCtl.SetLabelsErr(fmt.Errorf("mock label set failed"))
+		}
+
+		setCount, err := pmm.setServerLabels(tc)
+		if test.errExpectFn != nil {
+			test.errExpectFn(g, err)
+		} else {
+			g.Expect(err).To(BeNil())
+			g.Expect(setCount).To(Equal(test.setCount))
+		}
+	}
+	tests := []testcase{
+		{
+			name:         "get pd config return error",
+			getConfigErr: fmt.Errorf("failed to get pd config"),
+			errExpectFn: func(g *GomegaWithT, err error) {
+				g.Expect(err).To(HaveOccurred())
+				g.Expect(strings.Contains(err.Error(), "failed to get pd config")).To(BeTrue())
+			},
+		},
+		{
+			name:     "zone labels not found",
+			labels:   []string{"unknown"},
+			setCount: 0,
+		},
+		{
+			name: "all members not health",
+			members: []Member{
+				{
+					node:     "node-1",
+					unHealth: true,
+				},
+				{
+					node:     "node-2",
+					unHealth: true,
+				},
+			},
+			setCount: 0,
+		},
+		{
+			name: "illegal pod ordinal",
+			members: []Member{
+				{
+					name: "arbitrary-name",
+					node: "node-1",
+				},
+			},
+			errExpectFn: func(g *GomegaWithT, err error) {
+				g.Expect(err).To(HaveOccurred())
+				g.Expect(strings.Contains(err.Error(), "parse ordinal from pod name 'arbitrary-name' failed")).To(BeTrue())
+			},
+		},
+		{
+			name: "don't have node",
+			members: []Member{
+				{
+					name: "test-tidb-0",
+					node: "node-1",
+				},
+			},
+			missingNodes: map[string]struct{}{
+				"node-1": {},
+			},
+			setCount: 0,
+		},
+		{
+			name: "node label don't match",
+			members: []Member{
+				{
+					name: "test-tidb-0",
+					node: "node-1",
+					nodeLabels: map[string]string{
+						"test": "123",
+					},
+				},
+			},
+			setCount: 0,
+		},
+		{
+			name: "set server labels failed",
+			members: []Member{
+				{
+					node: "node-1",
+				},
+				{
+					node: "node-2",
+				},
+			},
+			setCount: 2,
+		},
+		{
+			name:        "skip old version tidb",
+			tidbVersion: "v6.2.9",
+			members: []Member{
+				{
+					node: "node-1",
+				},
+				{
+					node: "node-2",
+				},
+			},
+			setCount: 0,
+		},
+		{
+			name: "skip unhealthy pods",
+			members: []Member{
+				{
+					node: "node-1",
+				},
+				{
+					node:     "node-2",
+					unHealth: true,
+				},
+			},
+			setCount: 1,
+		},
+	}
+
+	for i := range tests {
+		t.Logf(tests[i].name)
+		testFn(&tests[i], t)
+	}
 }

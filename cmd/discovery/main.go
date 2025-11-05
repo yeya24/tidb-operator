@@ -31,10 +31,15 @@ import (
 	"github.com/pingcap/tidb-operator/pkg/pdapi"
 	"github.com/pingcap/tidb-operator/pkg/version"
 	"k8s.io/apimachinery/pkg/util/wait"
+	kubeinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/component-base/logs"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+
+	// Enable FIPS when necessary
+	_ "github.com/pingcap/tidb-operator/pkg/fips"
 )
 
 var (
@@ -44,6 +49,7 @@ var (
 )
 
 func init() {
+	klog.InitFlags(nil)
 	flag.BoolVar(&printVersion, "V", false, "Show version and quit")
 	flag.BoolVar(&printVersion, "version", false, "Show version and quit")
 	flag.IntVar(&port, "port", 10261, "The port that the tidb discovery's http service runs on (default 10261)")
@@ -87,11 +93,26 @@ func main() {
 	if tlsEnabled == strconv.FormatBool(true) {
 		tcTls = true
 	}
+	// informers
+	options := []kubeinformers.SharedInformerOption{
+		kubeinformers.WithNamespace(os.Getenv("MY_POD_NAMESPACE")),
+	}
+
+	kubeInformerFactory := kubeinformers.NewSharedInformerFactoryWithOptions(kubeCli, 30*time.Minute, options...)
+	secretInformer := kubeInformerFactory.Core().V1().Secrets().Informer()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	kubeInformerFactory.Start(ctx.Done())
+
+	// waiting for the shared informer's store has synced.
+	cache.WaitForCacheSync(ctx.Done(), secretInformer.HasSynced)
 
 	go wait.Forever(func() {
 		addr := fmt.Sprintf("0.0.0.0:%d", port)
 		klog.Infof("starting TiDB Discovery server, listening on %s", addr)
-		discoveryServer := server.NewServer(pdapi.NewDefaultPDControl(kubeCli), dmapi.NewDefaultMasterControl(kubeCli), cli, kubeCli)
+		lister := kubeInformerFactory.Core().V1().Secrets().Lister()
+		discoveryServer := server.NewServer(pdapi.NewDefaultPDControl(lister), dmapi.NewDefaultMasterControl(lister), cli, kubeCli)
 		discoveryServer.ListenAndServe(addr)
 	}, 5*time.Second)
 	go wait.Forever(func() {

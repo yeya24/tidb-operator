@@ -16,11 +16,14 @@ package member
 import (
 	"fmt"
 
-	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
+	mngerutils "github.com/pingcap/tidb-operator/pkg/manager/utils"
+	"github.com/pingcap/tidb-operator/pkg/third_party/k8s"
+
+	"github.com/pingcap/advanced-statefulset/client/apis/apps/v1/helper"
 	apps "k8s.io/api/apps/v1"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 type ticdcUpgrader struct {
@@ -44,12 +47,27 @@ func (u *ticdcUpgrader) Upgrade(tc *v1alpha1.TidbCluster, oldSet *apps.StatefulS
 	ns := tc.GetNamespace()
 	tcName := tc.GetName()
 
-	tc.Status.TiCDC.Phase = v1alpha1.UpgradePhase
-	if !templateEqual(newSet, oldSet) {
+	if tc.Status.PD.Phase == v1alpha1.UpgradePhase || tc.Status.PD.Phase == v1alpha1.ScalePhase ||
+		tc.Status.TiKV.Phase == v1alpha1.UpgradePhase || tc.Status.TiKV.Phase == v1alpha1.ScalePhase ||
+		tc.Status.TiFlash.Phase == v1alpha1.UpgradePhase || tc.Status.TiFlash.Phase == v1alpha1.ScalePhase ||
+		tc.Status.Pump.Phase == v1alpha1.UpgradePhase || tc.Status.Pump.Phase == v1alpha1.ScalePhase ||
+		tc.Status.TiDB.Phase == v1alpha1.UpgradePhase || tc.Status.TiDB.Phase == v1alpha1.ScalePhase {
+		klog.Infof("TidbCluster: [%s/%s]'s pd status is %s, "+
+			"tikv status is %s, tiflash status is %s, pump status is %s, "+
+			"tidb status is %s, can not upgrade ticdc",
+			ns, tcName,
+			tc.Status.PD.Phase, tc.Status.TiKV.Phase, tc.Status.TiFlash.Phase,
+			tc.Status.Pump.Phase, tc.Status.TiDB.Phase)
+		_, podSpec, err := GetLastAppliedConfig(oldSet)
+		if err != nil {
+			return err
+		}
+		newSet.Spec.Template.Spec = *podSpec
 		return nil
 	}
 
-	if tc.Status.TiCDC.StatefulSet.UpdateRevision == tc.Status.TiCDC.StatefulSet.CurrentRevision {
+	tc.Status.TiCDC.Phase = v1alpha1.UpgradePhase
+	if !templateEqual(newSet, oldSet) {
 		return nil
 	}
 
@@ -63,11 +81,11 @@ func (u *ticdcUpgrader) Upgrade(tc *v1alpha1.TidbCluster, oldSet *apps.StatefulS
 		return nil
 	}
 
-	setUpgradePartition(newSet, *oldSet.Spec.UpdateStrategy.RollingUpdate.Partition)
+	mngerutils.SetUpgradePartition(newSet, *oldSet.Spec.UpdateStrategy.RollingUpdate.Partition)
 	podOrdinals := helper.GetPodOrdinals(*oldSet.Spec.Replicas, oldSet).List()
-	for _i := len(podOrdinals) - 1; _i >= 0; _i-- {
-		i := podOrdinals[_i]
-		podName := ticdcPodName(tcName, i)
+	for i := len(podOrdinals) - 1; i >= 0; i-- {
+		ordinal := podOrdinals[i]
+		podName := ticdcPodName(tcName, ordinal)
 		pod, err := u.deps.PodLister.Pods(ns).Get(podName)
 		if err != nil {
 			return fmt.Errorf("ticdcUpgrader.Upgrade: failed to get pod %s for cluster %s/%s, error: %s", podName, ns, tcName, err)
@@ -78,12 +96,43 @@ func (u *ticdcUpgrader) Upgrade(tc *v1alpha1.TidbCluster, oldSet *apps.StatefulS
 		}
 
 		if revision == tc.Status.TiCDC.StatefulSet.UpdateRevision {
+			if !k8s.IsPodReady(pod) {
+				return controller.RequeueErrorf("tidbcluster: [%s/%s]'s upgraded ticdc pod: [%s] is not ready", ns, tcName, podName)
+			}
 			if _, exist := tc.Status.TiCDC.Captures[podName]; !exist {
 				return controller.RequeueErrorf("tidbcluster: [%s/%s]'s ticdc upgraded pod: [%s] is not ready", ns, tcName, podName)
 			}
 			continue
 		}
-		setUpgradePartition(newSet, i)
+
+		support, err := isTiCDCPodSupportGracefulUpgrade(tc, u.deps.CDCControl, u.deps.PodControl, pod, ordinal, "Upgrade")
+		if err != nil {
+			return err
+		}
+		if support {
+			err = gracefulDrainTiCDC(tc, u.deps.CDCControl, u.deps.PodControl, pod, ordinal, "Upgrade")
+			if err != nil {
+				return err
+			}
+			klog.Infof("ticdcUpgrade.Upgrade: %s graceful drain TiCDC complete in cluster %s/%s", podName, tc.GetNamespace(), tc.GetName())
+			// To prevent TiCDC service disruption, we need to resign owner
+			// gracefully from the next pod that is going to be upgraded.
+			// If the current pod is the last one to upgrade, skip resign owner.
+			hasNext := i-1 >= 0
+			if hasNext {
+				nextOrd := podOrdinals[i-1]
+				nextPodName := ticdcPodName(tcName, nextOrd)
+				klog.Infof("ticdcUpgrade.Upgrade: try to graceful resign owner from the next ticdc pod %s in cluster %s/%s", nextPodName, tc.GetNamespace(), tc.GetName())
+				err = gracefulResignOwnerTiCDC(tc, u.deps.CDCControl, u.deps.PodControl, pod, nextPodName, nextOrd, "Upgrade")
+				if err != nil {
+					return err
+				}
+				klog.Infof("ticdcUpgrade.Upgrade: %s graceful resign owner complete in cluster %s/%s", nextPodName, tc.GetNamespace(), tc.GetName())
+			}
+			klog.Infof("ticdcUpgrade.Upgrade: %s graceful shutdown complete in cluster %s/%s", podName, tc.GetNamespace(), tc.GetName())
+		}
+
+		mngerutils.SetUpgradePartition(newSet, ordinal)
 		return nil
 	}
 

@@ -14,18 +14,24 @@
 package member
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"regexp"
 	"strings"
 
-	"github.com/pingcap/kvproto/pkg/metapb"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
 	"github.com/pingcap/tidb-operator/pkg/controller"
-	"github.com/pingcap/tidb-operator/pkg/label"
 	"github.com/pingcap/tidb-operator/pkg/manager"
+	"github.com/pingcap/tidb-operator/pkg/manager/member/startscript"
+	"github.com/pingcap/tidb-operator/pkg/manager/suspender"
+	mngerutils "github.com/pingcap/tidb-operator/pkg/manager/utils"
+	"github.com/pingcap/tidb-operator/pkg/manager/volumes"
 	"github.com/pingcap/tidb-operator/pkg/pdapi"
 	"github.com/pingcap/tidb-operator/pkg/util"
+
+	"github.com/pingcap/kvproto/pkg/metapb"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -33,12 +39,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	corelisters "k8s.io/client-go/listers/core/v1"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/pointer"
 )
 
 const (
-	//find a better way to manage store only managed by tiflash in Operator
+	// find a better way to manage store only managed by tiflash in Operator
 	tiflashStoreLimitPattern = `%s-tiflash-\d+\.%s-tiflash-peer\.%s\.svc%s:\d+`
 	tiflashCertPath          = "/var/lib/tiflash-tls"
 	tiflashCertVolumeName    = "tiflash-tls"
@@ -50,16 +56,20 @@ type tiflashMemberManager struct {
 	failover                 Failover
 	scaler                   Scaler
 	upgrader                 Upgrader
+	suspender                suspender.Suspender
+	podVolumeModifier        volumes.PodVolumeModifier
 	statefulSetIsUpgradingFn func(corelisters.PodLister, pdapi.PDControlInterface, *apps.StatefulSet, *v1alpha1.TidbCluster) (bool, error)
 }
 
 // NewTiFlashMemberManager returns a *tiflashMemberManager
-func NewTiFlashMemberManager(deps *controller.Dependencies, tiflashFailover Failover, tiflashScaler Scaler, tiflashUpgrader Upgrader) manager.Manager {
+func NewTiFlashMemberManager(deps *controller.Dependencies, tiflashFailover Failover, tiflashScaler Scaler, tiflashUpgrader Upgrader, spder suspender.Suspender, pvm volumes.PodVolumeModifier) manager.Manager {
 	m := tiflashMemberManager{
-		deps:     deps,
-		failover: tiflashFailover,
-		scaler:   tiflashScaler,
-		upgrader: tiflashUpgrader,
+		deps:              deps,
+		failover:          tiflashFailover,
+		scaler:            tiflashScaler,
+		upgrader:          tiflashUpgrader,
+		suspender:         spder,
+		podVolumeModifier: pvm,
 	}
 	m.statefulSetIsUpgradingFn = tiflashStatefulSetIsUpgrading
 	return &m
@@ -71,7 +81,23 @@ func (m *tiflashMemberManager) Sync(tc *v1alpha1.TidbCluster) error {
 		return nil
 	}
 
-	err := m.enablePlacementRules(tc)
+	// skip sync if tiflash is suspended
+	component := v1alpha1.TiFlashMemberType
+	needSuspend, err := m.suspender.SuspendComponent(tc, component)
+	if err != nil {
+		return fmt.Errorf("suspend %s failed: %v", component, err)
+	}
+	if needSuspend {
+		klog.Infof("component %s for cluster %s/%s is suspended, skip syncing", component, tc.GetNamespace(), tc.GetName())
+		return nil
+	}
+
+	if err := m.syncRecoveryForTiFlash(tc); err != nil {
+		klog.Info("sync recovery for TiFlash", err.Error())
+		return nil
+	}
+
+	err = m.enablePlacementRules(tc)
 	if err != nil {
 		klog.Errorf("Enable placement rules failed, error: %v", err)
 		// No need to return err here, just continue to sync tiflash
@@ -82,6 +108,40 @@ func (m *tiflashMemberManager) Sync(tc *v1alpha1.TidbCluster) error {
 	}
 
 	return m.syncStatefulSet(tc)
+}
+
+func (m *tiflashMemberManager) syncRecoveryForTiFlash(tc *v1alpha1.TidbCluster) error {
+	// Check whether the cluster is in recovery mode
+	// and whether the volumes have been restored for TiKV
+	if !tc.Spec.RecoveryMode {
+		return nil
+	}
+
+	ns := tc.GetNamespace()
+	tcName := tc.GetName()
+	anns := tc.GetAnnotations()
+	if _, ok := anns[label.AnnTiKVVolumesReadyKey]; !ok {
+		return controller.RequeueErrorf("TidbCluster: [%s/%s], TiFlash is waiting for TiKV volumes ready", ns, tcName)
+	}
+
+	if mark, _ := m.checkRecoveringMark(tc); mark {
+		return controller.RequeueErrorf("TidbCluster: [%s/%s], TiFlash is waiting for recovery mode unmask", ns, tcName)
+	}
+
+	return nil
+}
+
+// check the recovering mark from pd
+// volume-snapshot restore requires pd allocate id set done and then start tiflash. the purpose is to solve tiflash store id conflict with tikvs'
+// pd recovering mark indicates the pd allcate id had been set properly.
+func (m *tiflashMemberManager) checkRecoveringMark(tc *v1alpha1.TidbCluster) (bool, error) {
+	pdCli := controller.GetPDClient(m.deps.PDControl, tc)
+	mark, err := pdCli.GetRecoveringMark()
+	if err != nil {
+		return false, err
+	}
+
+	return mark, nil
 }
 
 func (m *tiflashMemberManager) enablePlacementRules(tc *v1alpha1.TidbCluster) error {
@@ -125,18 +185,12 @@ func (m *tiflashMemberManager) syncHeadlessService(tc *v1alpha1.TidbCluster) err
 
 	oldSvc := oldSvcTmp.DeepCopy()
 
-	equal, err := controller.ServiceEqual(newSvc, oldSvc)
+	_, err = m.deps.ServiceControl.SyncComponentService(
+		tc,
+		newSvc,
+		oldSvc,
+		false)
 	if err != nil {
-		return err
-	}
-	if !equal {
-		svc := *oldSvc
-		svc.Spec = newSvc.Spec
-		err = controller.SetServiceLastAppliedConfigAnnotation(&svc)
-		if err != nil {
-			return err
-		}
-		_, err = m.deps.ServiceControl.UpdateService(tc, &svc)
 		return err
 	}
 
@@ -152,6 +206,15 @@ func (m *tiflashMemberManager) syncStatefulSet(tc *v1alpha1.TidbCluster) error {
 		return fmt.Errorf("syncStatefulSet: fail to get sts %s for cluster %s/%s, error: %s", controller.TiFlashMemberName(tcName), ns, tcName, err)
 	}
 	setNotExist := errors.IsNotFound(err)
+
+	// if TiFlash is scale from 0 and with previous StatefulSet, we delete the previous StatefulSet first
+	// to avoid some fileds (e.g storage request) reused and cause unexpected behavior (e.g scale down).
+	if oldSetTmp != nil && *oldSetTmp.Spec.Replicas == 0 && oldSetTmp.Status.UpdatedReplicas == 0 && tc.Spec.TiFlash.Replicas > 0 {
+		if err := m.deps.StatefulSetControl.DeleteStatefulSet(tc, oldSetTmp, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("syncStatefulSet: fail to delete sts %s for cluster %s/%s, error: %s", controller.TiFlashMemberName(tcName), ns, tcName, err)
+		}
+		return controller.RequeueErrorf("wait for previous sts %s for cluster %s/%s to be deleted", controller.TiFlashMemberName(tcName), ns, tcName)
+	}
 
 	oldSet := oldSetTmp.DeepCopy()
 
@@ -174,7 +237,7 @@ func (m *tiflashMemberManager) syncStatefulSet(tc *v1alpha1.TidbCluster) error {
 		m.failover.RemoveUndesiredFailures(tc)
 	}
 	if len(tc.Status.TiFlash.FailureStores) > 0 &&
-		tc.Spec.TiFlash.RecoverFailover &&
+		(tc.Spec.TiFlash.RecoverFailover || tc.Status.TiFlash.FailoverUID == tc.Spec.TiFlash.GetRecoverByUID()) &&
 		shouldRecover(tc, label.TiFlashLabelVal, m.deps.PodLister) {
 		m.failover.Recover(tc)
 	}
@@ -188,7 +251,7 @@ func (m *tiflashMemberManager) syncStatefulSet(tc *v1alpha1.TidbCluster) error {
 			klog.Infof("TidbCluster: %s/%s, waiting for PD cluster running", ns, tcName)
 			return nil
 		}
-		err = SetStatefulSetLastAppliedConfigAnnotation(newSet)
+		err = mngerutils.SetStatefulSetLastAppliedConfigAnnotation(newSet)
 		if err != nil {
 			return err
 		}
@@ -227,7 +290,7 @@ func (m *tiflashMemberManager) syncStatefulSet(tc *v1alpha1.TidbCluster) error {
 		}
 	}
 
-	return UpdateStatefulSet(m.deps.StatefulSetControl, tc, newSet, oldSet)
+	return mngerutils.UpdateStatefulSetWithPrecheck(m.deps, tc, "FailedUpdateTiFlashSTS", newSet, oldSet)
 }
 
 func (m *tiflashMemberManager) syncConfigMap(tc *v1alpha1.TidbCluster, set *apps.StatefulSet) (*corev1.ConfigMap, error) {
@@ -238,12 +301,17 @@ func (m *tiflashMemberManager) syncConfigMap(tc *v1alpha1.TidbCluster, set *apps
 
 	var inUseName string
 	if set != nil {
-		inUseName = FindConfigMapVolume(&set.Spec.Template.Spec, func(name string) bool {
+		inUseName = mngerutils.FindConfigMapVolume(&set.Spec.Template.Spec, func(name string) bool {
 			return strings.HasPrefix(name, controller.TiFlashMemberName(tc.Name))
 		})
+	} else {
+		inUseName, err = mngerutils.FindConfigMapNameFromTCAnno(context.Background(), m.deps.ConfigMapLister, tc, v1alpha1.TiFlashMemberType, newCm)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	err = updateConfigMapIfNeed(m.deps.ConfigMapLister, tc.BaseTiFlashSpec().ConfigUpdateStrategy(), inUseName, newCm)
+	err = mngerutils.UpdateConfigMapIfNeed(m.deps.ConfigMapLister, tc.BaseTiFlashSpec().ConfigUpdateStrategy(), inUseName, newCm)
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +325,7 @@ func getNewHeadlessService(tc *v1alpha1.TidbCluster) *corev1.Service {
 	svcName := controller.TiFlashPeerMemberName(tcName)
 	svcLabel := label.New().Instance(instanceName).TiFlash().Labels()
 
-	svc := corev1.Service{
+	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            svcName,
 			Namespace:       ns,
@@ -269,14 +337,27 @@ func getNewHeadlessService(tc *v1alpha1.TidbCluster) *corev1.Service {
 			Ports: []corev1.ServicePort{
 				{
 					Name:       "tiflash",
-					Port:       3930,
-					TargetPort: intstr.FromInt(int(3930)),
+					Port:       v1alpha1.DefaultTiFlashFlashPort,
+					TargetPort: intstr.FromInt(int(v1alpha1.DefaultTiFlashFlashPort)),
 					Protocol:   corev1.ProtocolTCP,
 				},
 				{
 					Name:       "proxy",
-					Port:       20170,
-					TargetPort: intstr.FromInt(int(20170)),
+					Port:       v1alpha1.DefaultTiFlashProxyPort,
+					TargetPort: intstr.FromInt(int(v1alpha1.DefaultTiFlashProxyPort)),
+					Protocol:   corev1.ProtocolTCP,
+				},
+				{
+					Name:       "metrics",
+					Port:       v1alpha1.DefaultTiFlashMetricsPort,
+					TargetPort: intstr.FromInt(int(v1alpha1.DefaultTiFlashMetricsPort)),
+					Protocol:   corev1.ProtocolTCP,
+				},
+
+				{
+					Name:       "proxy-metrics",
+					Port:       v1alpha1.DefaultTiFlashProxyStatusPort,
+					TargetPort: intstr.FromInt(int(v1alpha1.DefaultTiFlashProxyStatusPort)),
 					Protocol:   corev1.ProtocolTCP,
 				},
 			},
@@ -284,7 +365,12 @@ func getNewHeadlessService(tc *v1alpha1.TidbCluster) *corev1.Service {
 			PublishNotReadyAddresses: true,
 		},
 	}
-	return &svc
+
+	if tc.Spec.PreferIPv6 {
+		SetServiceWhenPreferIPv6(svc)
+	}
+
+	return svc
 }
 
 func getNewStatefulSet(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (*apps.StatefulSet, error) {
@@ -292,6 +378,7 @@ func getNewStatefulSet(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (*apps.St
 	tcName := tc.GetName()
 	baseTiFlashSpec := tc.BaseTiFlashSpec()
 	spec := tc.Spec.TiFlash
+	mountCMInTiflashContainer := spec.DoesMountCMInTiflashContainer()
 
 	tiflashConfigMap := controller.MemberConfigMapName(tc, v1alpha1.TiFlashMemberType)
 	if cm != nil {
@@ -312,7 +399,8 @@ func getNewStatefulSet(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (*apps.St
 	}
 	for k := range spec.StorageClaims {
 		volMounts = append(volMounts, corev1.VolumeMount{
-			Name: fmt.Sprintf("data%d", k), MountPath: fmt.Sprintf("/data%d", k)})
+			Name: fmt.Sprintf("data%d", k), MountPath: fmt.Sprintf("/data%d", k),
+		})
 	}
 	volMounts = append(volMounts, tc.Spec.TiFlash.AdditionalVolumeMounts...)
 
@@ -321,15 +409,24 @@ func getNewStatefulSet(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (*apps.St
 			Name: tiflashCertVolumeName, ReadOnly: true, MountPath: tiflashCertPath,
 		})
 	}
+	// with mountCMInTiflashContainer enabled, the tiflash container should directly read config from `/etc/tiflash/xxx.toml` mounted from ConfigMap
+	// rather than `/data0/xxx.toml` created by initContainer.
+	if mountCMInTiflashContainer {
+		volMounts = append(volMounts, corev1.VolumeMount{
+			Name: "config", ReadOnly: true, MountPath: "/etc/tiflash",
+		})
+	}
 
 	vols := []corev1.Volume{
 		annoVolume,
-		{Name: "config", VolumeSource: corev1.VolumeSource{
-			ConfigMap: &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: tiflashConfigMap,
+		{
+			Name: "config", VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: tiflashConfigMap,
+					},
 				},
-			}},
+			},
 		},
 	}
 
@@ -354,7 +451,7 @@ func getNewStatefulSet(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (*apps.St
 				}
 				privileged := true
 				initContainers = append(initContainers, corev1.Container{
-					Name:  "init",
+					Name:  "sysctl",
 					Image: tc.HelperImage(),
 					Command: []string{
 						"sh",
@@ -382,37 +479,54 @@ func getNewStatefulSet(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (*apps.St
 		podSecurityContext.Sysctls = []corev1.Sysctl{}
 	}
 
-	// Append init container for config files initialization
-	initVolMounts := []corev1.VolumeMount{
-		{Name: "data0", MountPath: "/data0"},
-		{Name: "config", ReadOnly: true, MountPath: "/etc/tiflash"},
-	}
-	initEnv := []corev1.EnvVar{
-		{
-			Name: "POD_NAME",
-			ValueFrom: &corev1.EnvVarSource{
-				FieldRef: &corev1.ObjectFieldSelector{
-					FieldPath: "metadata.name",
+	// the work of initContainer is substituted by new start scripts which moves the configuration items depending on running env
+	// to command args.
+	if !mountCMInTiflashContainer {
+		// Append init container for config files initialization
+		initVolMounts := []corev1.VolumeMount{
+			{Name: "data0", MountPath: "/data0"},
+			{Name: "config", ReadOnly: true, MountPath: "/etc/tiflash"},
+		}
+		initEnv := []corev1.EnvVar{
+			{
+				Name: "POD_NAME",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						FieldPath: "metadata.name",
+					},
 				},
 			},
-		},
-	}
-	initContainers = append(initContainers, corev1.Container{
-		Name:  "init",
-		Image: tc.HelperImage(),
-		Command: []string{
-			"sh",
-			"-c",
-			"set -ex;ordinal=`echo ${POD_NAME} | awk -F- '{print $NF}'`;sed s/POD_NUM/${ordinal}/g /etc/tiflash/config_templ.toml > /data0/config.toml;sed s/POD_NUM/${ordinal}/g /etc/tiflash/proxy_templ.toml > /data0/proxy.toml",
-		},
-		Env:          initEnv,
-		VolumeMounts: initVolMounts,
-	})
+		}
 
-	tiflashLabel := labelTiFlash(tc)
+		// NOTE: the config content should respect the init script
+		initScript, err := startscript.RenderTiFlashInitScript(tc)
+		if err != nil {
+			return nil, fmt.Errorf("render start-script for tc %s/%s failed: %v", tc.Namespace, tc.Name, err)
+		}
+
+		initializer := corev1.Container{
+			Name:  "init",
+			Image: tc.HelperImage(),
+			Command: []string{
+				"sh",
+				"-c",
+				initScript,
+			},
+			Env:          initEnv,
+			VolumeMounts: initVolMounts,
+		}
+		if spec.Initializer != nil {
+			initializer.Resources = controller.ContainerResource(spec.Initializer.ResourceRequirements)
+			initializer.SecurityContext = spec.Initializer.SecurityContext
+		}
+		initContainers = append(initContainers, initializer)
+	}
+
+	stsLabels := labelTiFlash(tc)
 	setName := controller.TiFlashMemberName(tcName)
-	podAnnotations := CombineAnnotations(controller.AnnProm(8234), baseTiFlashSpec.Annotations())
-	podAnnotations = CombineAnnotations(controller.AnnAdditionalProm("tiflash.proxy", 20292), podAnnotations)
+	podLabels := util.CombineStringMap(stsLabels, baseTiFlashSpec.Labels())
+	podAnnotations := util.CombineStringMap(baseTiFlashSpec.Annotations(), controller.AnnProm(v1alpha1.DefaultTiFlashMetricsPort, "/metrics"))
+	podAnnotations = util.CombineStringMap(controller.AnnAdditionalProm("tiflash.proxy", v1alpha1.DefaultTiFlashProxyStatusPort), podAnnotations)
 	stsAnnotations := getStsAnnotations(tc.Annotations, label.TiFlashLabelVal)
 	capacity := controller.TiKVCapacity(tc.Spec.TiFlash.Limits)
 	headlessSvcName := controller.TiFlashPeerMemberName(tcName)
@@ -448,43 +562,56 @@ func getNewStatefulSet(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (*apps.St
 			Value: tc.Timezone(),
 		},
 	}
+
+	startScript, err := startscript.RenderTiFlashStartScript(tc)
+	if err != nil {
+		return nil, fmt.Errorf("render start-script for tc %s/%s failed: %v", tc.Namespace, tc.Name, err)
+	}
+
+	// Get SecurityContext with backward compatibility support
+	securityContext := baseTiFlashSpec.SecurityContext()
+	if securityContext == nil {
+		// For backward compatibility, use the Privileged field if SecurityContext is not set
+		securityContext = &corev1.SecurityContext{
+			Privileged: tc.TiFlashContainerPrivilege(),
+		}
+	}
+
 	tiflashContainer := corev1.Container{
 		Name:            v1alpha1.TiFlashMemberType.String(),
 		Image:           tc.TiFlashImage(),
 		ImagePullPolicy: baseTiFlashSpec.ImagePullPolicy(),
-		Command:         []string{"/bin/sh", "-c", "/tiflash/tiflash server --config-file /data0/config.toml"},
-		SecurityContext: &corev1.SecurityContext{
-			Privileged: tc.TiFlashContainerPrivilege(),
-		},
+		Command:         []string{"/bin/sh", "-c", startScript},
+		SecurityContext: securityContext,
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "tiflash",
-				ContainerPort: int32(3930),
+				ContainerPort: v1alpha1.DefaultTiFlashFlashPort,
 				Protocol:      corev1.ProtocolTCP,
 			},
 			{
 				Name:          "proxy",
-				ContainerPort: int32(20170),
+				ContainerPort: v1alpha1.DefaultTiFlashProxyPort,
 				Protocol:      corev1.ProtocolTCP,
 			},
 			{
 				Name:          "tcp",
-				ContainerPort: int32(9000),
+				ContainerPort: v1alpha1.DefaultTiFlashTcpPort,
 				Protocol:      corev1.ProtocolTCP,
 			},
 			{
 				Name:          "http",
-				ContainerPort: int32(8123),
+				ContainerPort: v1alpha1.DefaultTiFlashHttpPort,
 				Protocol:      corev1.ProtocolTCP,
 			},
 			{
 				Name:          "internal",
-				ContainerPort: int32(9009),
+				ContainerPort: v1alpha1.DefaultTiFlashInternalPort,
 				Protocol:      corev1.ProtocolTCP,
 			},
 			{
 				Name:          "metrics",
-				ContainerPort: int32(8234),
+				ContainerPort: v1alpha1.DefaultTiFlashMetricsPort,
 				Protocol:      corev1.ProtocolTCP,
 			},
 		},
@@ -493,7 +620,6 @@ func getNewStatefulSet(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (*apps.St
 	}
 	podSpec := baseTiFlashSpec.BuildPodSpec()
 	if baseTiFlashSpec.HostNetwork() {
-		podSpec.DNSPolicy = corev1.DNSClusterFirstWithHostNet
 		env = append(env, corev1.EnvVar{
 			Name: "POD_NAME",
 			ValueFrom: &corev1.EnvVarSource{
@@ -504,6 +630,7 @@ func getNewStatefulSet(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (*apps.St
 		})
 	}
 	tiflashContainer.Env = util.AppendEnv(env, baseTiFlashSpec.Env())
+	tiflashContainer.EnvFrom = baseTiFlashSpec.EnvFrom()
 	podSpec.Volumes = append(vols, baseTiFlashSpec.AdditionalVolumes()...)
 	podSpec.SecurityContext = podSecurityContext
 	podSpec.InitContainers = append(initContainers, baseTiFlashSpec.InitContainers()...)
@@ -511,8 +638,20 @@ func getNewStatefulSet(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (*apps.St
 	if err != nil {
 		return nil, err
 	}
-	podSpec.Containers = append([]corev1.Container{tiflashContainer}, containers...)
-	podSpec.Containers = append(podSpec.Containers, baseTiFlashSpec.AdditionalContainers()...)
+
+	podSpec.Containers = append(podSpec.Containers, tiflashContainer)
+
+	if tc.Spec.TiFlash.LogTailer != nil && tc.Spec.TiFlash.LogTailer.UseSidecar {
+		podSpec.InitContainers = append(podSpec.InitContainers, containers...)
+	} else {
+		podSpec.Containers = append(podSpec.Containers, containers...)
+	}
+
+	podSpec.Containers, err = MergePatchContainers(podSpec.Containers, baseTiFlashSpec.AdditionalContainers())
+	if err != nil {
+		return nil, fmt.Errorf("failed to merge containers spec for TiFlash of [%s/%s], err: %v", ns, tcName, err)
+	}
+
 	podSpec.ServiceAccountName = tc.Spec.TiFlash.ServiceAccount
 	if podSpec.ServiceAccountName == "" {
 		podSpec.ServiceAccountName = tc.Spec.ServiceAccount
@@ -532,23 +671,23 @@ func getNewStatefulSet(tc *v1alpha1.TidbCluster, cm *corev1.ConfigMap) (*apps.St
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            setName,
 			Namespace:       ns,
-			Labels:          tiflashLabel.Labels(),
+			Labels:          stsLabels.Labels(),
 			Annotations:     stsAnnotations,
 			OwnerReferences: []metav1.OwnerReference{controller.GetOwnerRef(tc)},
 		},
 		Spec: apps.StatefulSetSpec{
 			Replicas: pointer.Int32Ptr(tc.TiFlashStsDesiredReplicas()),
-			Selector: tiflashLabel.LabelSelector(),
+			Selector: stsLabels.LabelSelector(),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels:      tiflashLabel.Labels(),
+					Labels:      podLabels,
 					Annotations: podAnnotations,
 				},
 				Spec: podSpec,
 			},
 			VolumeClaimTemplates: pvcs,
 			ServiceName:          headlessSvcName,
-			PodManagementPolicy:  apps.ParallelPodManagement,
+			PodManagementPolicy:  baseTiFlashSpec.PodManagementPolicy(),
 			UpdateStrategy:       updateStrategy,
 		},
 	}
@@ -563,7 +702,7 @@ func flashVolumeClaimTemplate(storageClaims []v1alpha1.StorageClaim) ([]corev1.P
 			return nil, err
 		}
 		pvcs = append(pvcs, corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("data%d", k)},
+			ObjectMeta: metav1.ObjectMeta{Name: string(v1alpha1.GetStorageVolumeNameForTiFlash(k))},
 			Spec: corev1.PersistentVolumeClaimSpec{
 				AccessModes: []corev1.PersistentVolumeAccessMode{
 					corev1.ReadWriteOnce,
@@ -577,7 +716,7 @@ func flashVolumeClaimTemplate(storageClaims []v1alpha1.StorageClaim) ([]corev1.P
 }
 
 func getTiFlashConfigMap(tc *v1alpha1.TidbCluster) (*corev1.ConfigMap, error) {
-	config := getTiFlashConfig(tc)
+	config := GetTiFlashConfig(tc)
 
 	configText, err := config.Common.MarshalTOML()
 	if err != nil {
@@ -631,6 +770,7 @@ func (m *tiflashMemberManager) syncTidbClusterStatus(tc *v1alpha1.TidbCluster, s
 
 	previousStores := tc.Status.TiFlash.Stores
 	previousPeerStores := tc.Status.TiFlash.PeerStores
+	previousTombstoneStores := tc.Status.TiFlash.TombstoneStores
 	stores := map[string]v1alpha1.TiKVStore{}
 	peerStores := map[string]v1alpha1.TiKVStore{}
 	tombstoneStores := map[string]v1alpha1.TiKVStore{}
@@ -640,7 +780,7 @@ func (m *tiflashMemberManager) syncTidbClusterStatus(tc *v1alpha1.TidbCluster, s
 	storesInfo, err := pdCli.GetStores()
 	if err != nil {
 		tc.Status.TiFlash.Synced = false
-		klog.Warningf("Fail to GetStores for TidbCluster %s/%s", tc.Namespace, tc.Name)
+		klog.Warningf("Fail to GetStores for TidbCluster %s/%s: %s", tc.Namespace, tc.Name, err)
 		return err
 	}
 
@@ -673,7 +813,7 @@ func (m *tiflashMemberManager) syncTidbClusterStatus(tc *v1alpha1.TidbCluster, s
 		}
 	}
 
-	//this returns all tombstone stores
+	// this returns all tombstone stores
 	tombstoneStoresInfo, err := pdCli.GetTombStoneStores()
 	if err != nil {
 		tc.Status.TiFlash.Synced = false
@@ -688,6 +828,12 @@ func (m *tiflashMemberManager) syncTidbClusterStatus(tc *v1alpha1.TidbCluster, s
 		if status == nil {
 			continue
 		}
+
+		oldStore, exist := previousTombstoneStores[status.ID]
+		status.LastTransitionTime = metav1.Now()
+		if exist && status.State == oldStore.State {
+			status.LastTransitionTime = oldStore.LastTransitionTime
+		}
 		tombstoneStores[status.ID] = *status
 	}
 
@@ -700,6 +846,12 @@ func (m *tiflashMemberManager) syncTidbClusterStatus(tc *v1alpha1.TidbCluster, s
 	if c != nil {
 		tc.Status.TiFlash.Image = c.Image
 	}
+
+	err = volumes.SyncVolumeStatus(m.podVolumeModifier, m.deps.PodLister, tc, v1alpha1.TiFlashMemberType)
+	if err != nil {
+		return fmt.Errorf("failed to sync volume status for tiflash: %v", err)
+	}
+
 	return nil
 }
 
@@ -770,7 +922,7 @@ func (m *tiflashMemberManager) setStoreLabelsForTiFlash(tc *v1alpha1.TidbCluster
 		nodeName := pod.Spec.NodeName
 		ls, err := getNodeLabels(m.deps.NodeLister, nodeName, locationLabels)
 		if err != nil || len(ls) == 0 {
-			klog.Warningf("node: [%s] has no node labels, skipping set store labels for Pod: [%s/%s]", nodeName, ns, podName)
+			klog.Warningf("node: [%s] has no node labels %v, skipping set store labels for Pod: [%s/%s]", nodeName, locationLabels, ns, podName)
 			continue
 		}
 
@@ -805,7 +957,7 @@ func (m *tiflashMemberManager) storeLabelsEqualNodeLabels(storeLabels []*metapb.
 }
 
 func tiflashStatefulSetIsUpgrading(podLister corelisters.PodLister, pdControl pdapi.PDControlInterface, set *apps.StatefulSet, tc *v1alpha1.TidbCluster) (bool, error) {
-	if statefulSetIsUpgrading(set) {
+	if mngerutils.StatefulSetIsUpgrading(set) {
 		return true, nil
 	}
 	instanceName := tc.GetInstanceName()

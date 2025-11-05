@@ -36,8 +36,12 @@ const (
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
-// +k8s:openapi-gen=true
 // TidbInitializer is a TiDB cluster initializing job
+//
+// +k8s:openapi-gen=true
+// +kubebuilder:resource:shortName="ti"
+// +kubebuilder:printcolums:name="Phase",type=string,JSONPath=`.status.phase`,description="The current phase of initialization",priority=1
+// +kubebuilder:printcolums:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type TidbInitializer struct {
 	metav1.TypeMeta `json:",inline"`
 	// +k8s:openapi-gen=false
@@ -48,7 +52,7 @@ type TidbInitializer struct {
 
 	// +k8s:openapi-gen=false
 	// Most recently observed status of the TidbInitializer
-	Status TidbInitializerStatus `json:"status"`
+	Status TidbInitializerStatus `json:"status,omitempty"`
 }
 
 // +k8s:openapi-gen=true
@@ -81,6 +85,7 @@ type TidbInitializerSpec struct {
 	// +optional
 	InitSqlConfigMap *string `json:"initSqlConfigMap,omitempty"`
 
+	// passwordSecret is the name of the Kubernetes secret that is used to initialize the cluster.
 	// +optional
 	PasswordSecret *string `json:"passwordSecret,omitempty"`
 
@@ -95,6 +100,14 @@ type TidbInitializerSpec struct {
 	// Optional: Defaults to nil
 	// +optional
 	TLSClientSecretName *string `json:"tlsClientSecretName,omitempty"`
+
+	// Tolerations of the TiDB initializer Pod
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// Node selectors of TiDB initializer Pod
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 }
 
 // +k8s:openapi-gen=true

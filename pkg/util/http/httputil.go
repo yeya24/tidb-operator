@@ -14,12 +14,12 @@
 package httputil
 
 import (
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // DeferClose captures and prints the error from closing (if an error occurs).
@@ -33,11 +33,11 @@ func DeferClose(c io.Closer) {
 // ReadErrorBody in the error case ready the body message.
 // But return it as an error (or return an error from reading the body).
 func ReadErrorBody(body io.Reader) (err error) {
-	bodyBytes, err := ioutil.ReadAll(body)
+	bodyBytes, err := io.ReadAll(body)
 	if err != nil {
 		return err
 	}
-	return fmt.Errorf(string(bodyBytes))
+	return errors.New(string(bodyBytes))
 }
 
 // GetBodyOK returns the body or an error if the response is not okay
@@ -71,7 +71,7 @@ func DoBodyOK(httpClient *http.Client, apiURL, method string, reqBody io.Reader)
 		return nil, err
 	}
 	defer DeferClose(res.Body)
-	body, err := ioutil.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		return nil, err
 	}

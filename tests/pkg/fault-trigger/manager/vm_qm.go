@@ -18,7 +18,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"k8s.io/kubernetes/test/e2e/framework/log"
+	"github.com/pingcap/tidb-operator/tests/third_party/k8s/log"
 )
 
 type QMVMManager struct {
@@ -70,7 +70,7 @@ func (qm *QMVMManager) StopVM(vm *VM) error {
 // example input:
 // VMID NAME                 STATUS     MEM(MB)    BOOTDISK(GB) PID
 // 101 CentOS7600           stopped    1024              32.00 0
-// 104 to20190915-tongmu    running    8192             500.00 34863``
+// 104 to20190915-tongmu    running    8192             500.00 34863“
 func (qm *QMVMManager) parserVMs(data string) []*VM {
 	vms := []*VM{}
 	data = stripEmpty(data)

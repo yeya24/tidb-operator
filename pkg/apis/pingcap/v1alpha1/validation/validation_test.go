@@ -18,8 +18,8 @@ import (
 	"testing"
 
 	. "github.com/onsi/gomega"
+	"github.com/pingcap/tidb-operator/pkg/apis/label"
 	"github.com/pingcap/tidb-operator/pkg/apis/pingcap/v1alpha1"
-	"github.com/pingcap/tidb-operator/pkg/label"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,6 +40,7 @@ func TestValidateAnnotations(t *testing.T) {
 					Annotations: map[string]string{
 						label.AnnTiKVDeleteSlots:    "[1,2]",
 						label.AnnTiFlashDeleteSlots: "[1]",
+						label.AnnTiCDCDeleteSlots:   "[1,2]",
 					},
 				},
 				Spec: v1alpha1.TidbClusterSpec{
@@ -105,6 +106,7 @@ func TestValidateAnnotations(t *testing.T) {
 					Annotations: map[string]string{
 						label.AnnTiKVDeleteSlots:    "",
 						label.AnnTiFlashDeleteSlots: "",
+						label.AnnTiCDCDeleteSlots:   "",
 					},
 				},
 				Spec: v1alpha1.TidbClusterSpec{
@@ -131,6 +133,10 @@ func TestValidateAnnotations(t *testing.T) {
 				{
 					Type:   field.ErrorTypeInvalid,
 					Detail: `value of "tiflash.tidb.pingcap.com/delete-slots" annotation must be a JSON list of int32`,
+				},
+				{
+					Type:   field.ErrorTypeInvalid,
+					Detail: `value of "ticdc.tidb.pingcap.com/delete-slots" annotation must be a JSON list of int32`,
 				},
 			},
 		},
@@ -209,11 +215,11 @@ func TestValidateDMAnnotations(t *testing.T) {
 					Version: "v2.0.0-rc.1",
 					Master: v1alpha1.MasterSpec{
 						BaseImage: "pingcap/dm",
-						Config:    &v1alpha1.MasterConfig{},
+						Config:    v1alpha1.NewMasterConfig(),
 					},
 					Worker: &v1alpha1.WorkerSpec{
 						BaseImage: "pingcap/dm",
-						Config:    &v1alpha1.WorkerConfig{},
+						Config:    v1alpha1.NewWorkerConfig(),
 					},
 				},
 			},
@@ -229,11 +235,11 @@ func TestValidateDMAnnotations(t *testing.T) {
 					Version: "v2.0.0-rc.1",
 					Master: v1alpha1.MasterSpec{
 						BaseImage: "pingcap/dm",
-						Config:    &v1alpha1.MasterConfig{},
+						Config:    v1alpha1.NewMasterConfig(),
 					},
 					Worker: &v1alpha1.WorkerSpec{
 						BaseImage: "pingcap/dm",
-						Config:    &v1alpha1.WorkerConfig{},
+						Config:    v1alpha1.NewWorkerConfig(),
 					},
 				},
 			},
@@ -266,11 +272,11 @@ func TestValidateDMAnnotations(t *testing.T) {
 					Version: "v2.0.0-rc.1",
 					Master: v1alpha1.MasterSpec{
 						BaseImage: "pingcap/dm",
-						Config:    &v1alpha1.MasterConfig{},
+						Config:    v1alpha1.NewMasterConfig(),
 					},
 					Worker: &v1alpha1.WorkerSpec{
 						BaseImage: "pingcap/dm",
-						Config:    &v1alpha1.WorkerConfig{},
+						Config:    v1alpha1.NewWorkerConfig(),
 					},
 				},
 			},
@@ -298,11 +304,11 @@ func TestValidateDMAnnotations(t *testing.T) {
 					Version: "v2.0.0-rc.1",
 					Master: v1alpha1.MasterSpec{
 						BaseImage: "pingcap/dm",
-						Config:    &v1alpha1.MasterConfig{},
+						Config:    v1alpha1.NewMasterConfig(),
 					},
 					Worker: &v1alpha1.WorkerSpec{
 						BaseImage: "pingcap/dm",
-						Config:    &v1alpha1.WorkerConfig{},
+						Config:    v1alpha1.NewWorkerConfig(),
 					},
 				},
 			},
@@ -334,6 +340,44 @@ func TestValidateDMAnnotations(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestValidatePumpSpec(t *testing.T) {
+	g := NewGomegaWithT(t)
+	tests := []struct {
+		name                 string
+		replicas             int32
+		expectedErrors       int
+		resourceRequirements corev1.ResourceRequirements
+	}{
+		{
+			name:           "has storage request",
+			replicas:       1,
+			expectedErrors: 0,
+			resourceRequirements: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("10G"),
+				},
+			},
+		},
+		{
+			name:           "no storage request",
+			replicas:       1,
+			expectedErrors: 1,
+			resourceRequirements: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tc := newTidbClusterWithPump()
+			tc.Spec.Pump.ResourceRequirements = tt.resourceRequirements
+			err := validatePumpSpec(tc.Spec.Pump, field.NewPath("spec", "pump"))
+			r := len(err)
+			g.Expect(r).Should(Equal(tt.expectedErrors))
+		})
 	}
 }
 
@@ -497,6 +541,7 @@ func newTidbCluster() *v1alpha1.TidbCluster {
 			PD:   &v1alpha1.PDSpec{},
 			TiKV: &v1alpha1.TiKVSpec{},
 			TiDB: &v1alpha1.TiDBSpec{},
+			PDMS: []*v1alpha1.PDMSSpec{},
 		},
 	}
 	tc.Name = "test-validate-requests-storage"
@@ -520,6 +565,14 @@ func newTidbMonitor() *v1alpha1.TidbMonitor {
 	return monitor
 }
 
+func newTidbClusterWithPump() *v1alpha1.TidbCluster {
+	tc := newTidbCluster()
+	tc.Spec.Pump = &v1alpha1.PumpSpec{
+		Replicas: 1,
+	}
+	return tc
+}
+
 func newDMCluster() *v1alpha1.DMCluster {
 	dc := &v1alpha1.DMCluster{
 		Spec: v1alpha1.DMClusterSpec{
@@ -531,6 +584,14 @@ func newDMCluster() *v1alpha1.DMCluster {
 	dc.Name = "test-validate-dm-cluster"
 	dc.Namespace = "default"
 	return dc
+}
+
+func newTidbClusterWithTiflash() *v1alpha1.TidbCluster {
+	tc := newTidbCluster()
+	tc.Spec.TiFlash = &v1alpha1.TiFlashSpec{
+		Replicas: 1,
+	}
+	return tc
 }
 
 func TestValidateLocalDescendingPath(t *testing.T) {
@@ -587,12 +648,52 @@ func TestValidateEvictLeaderTimeout(t *testing.T) {
 	}
 }
 
+func TestValidatePromDurationStr(t *testing.T) {
+	successCases := []*string{
+		nil,
+		pointer.StringPtr("2h"),
+		pointer.StringPtr("0d"),
+		pointer.StringPtr("2d"),
+		pointer.StringPtr("2w"),
+		pointer.StringPtr("2y"),
+	}
+
+	for _, c := range successCases {
+		errs := validatePromDurationStr(c, field.NewPath("PromDuration"))
+		if len(errs) > 0 {
+			t.Errorf("expected success: %v", errs)
+		}
+	}
+
+	errorCases := []*string{
+		pointer.StringPtr(""),
+		pointer.StringPtr("prom"),
+		pointer.StringPtr("-2h"),
+		pointer.StringPtr("2ns"),
+		pointer.StringPtr("-5m30s"),
+	}
+
+	for _, c := range errorCases {
+		errs := validatePromDurationStr(c, field.NewPath("PromDuration"))
+		if len(errs) == 0 {
+			t.Errorf("expected failure for %s", *c)
+		}
+	}
+}
+
 func TestValidatePDAddresses(t *testing.T) {
 	successCases := [][]string{
 		{
 			"http://1.2.3.4:2379",
 			"http://test-pd-0.test-pd-peer.default.svc:2380",
 			"http://test:2379",
+		},
+		{
+			"https://1.2.3.4:2379",
+		},
+		{
+			"http://1.2.3.4:2380",
+			"https://1.2.3.4:2379",
 		},
 	}
 
@@ -605,13 +706,6 @@ func TestValidatePDAddresses(t *testing.T) {
 
 	errorCases := [][]string{
 		{
-			"https://1.2.3.4:2379",
-		},
-		{
-			"http://1.2.3.4:2380",
-			"https://1.2.3.4:2379",
-		},
-		{
 			"test-pd-0.test-pd-peer.default.svc:2380",
 		},
 	}
@@ -621,5 +715,210 @@ func TestValidatePDAddresses(t *testing.T) {
 		if len(errs) == 0 {
 			t.Errorf("expected failure for %s", c)
 		}
+	}
+}
+
+func TestValidateStartScriptFeatureFlags(t *testing.T) {
+	successCases := [][]v1alpha1.StartScriptV2FeatureFlag{
+		{
+			v1alpha1.StartScriptV2FeatureFlagWaitForDnsNameIpMatch,
+			v1alpha1.StartScriptV2FeatureFlagPreferPDAddressesOverDiscovery,
+		},
+		{}, //empty
+	}
+
+	for _, c := range successCases {
+		errs := validateStartScriptFeatureFlags(c, field.NewPath("startScriptFeatureFlags"))
+		if len(errs) > 0 {
+			t.Errorf("expected success: %v", errs)
+		}
+	}
+
+	errorCases := [][]v1alpha1.StartScriptV2FeatureFlag{
+		{
+			v1alpha1.StartScriptV2FeatureFlagWaitForDnsNameIpMatch,
+			"wrong",
+		},
+	}
+
+	for _, c := range errorCases {
+		errs := validateStartScriptFeatureFlags(c, field.NewPath("startScriptFeatureFlags"))
+		if len(errs) != 1 {
+			t.Errorf("expected 1 failure for %s but there was %d", c, len(errs))
+		}
+	}
+}
+
+func TestValidatePDSpec(t *testing.T) {
+	g := NewGomegaWithT(t)
+	tests := []struct {
+		name                     string
+		LoadBalancerSourceRanges []string
+		resourceRequirements     corev1.ResourceRequirements
+		expectedErrors           int
+	}{
+		{
+			name: "has valid LoadBalancerSourceRanges",
+			LoadBalancerSourceRanges: []string{
+				"10.0.0.0/8",
+			},
+			resourceRequirements: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("10G"),
+				},
+			},
+			expectedErrors: 0,
+		},
+		{
+			name: "has invalid LoadBalancerSourceRanges",
+			LoadBalancerSourceRanges: []string{
+				"invalidIP",
+			},
+			resourceRequirements: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("10G"),
+				},
+			},
+			expectedErrors: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tc := newTidbCluster()
+			tc.Spec.PD.ResourceRequirements = tt.resourceRequirements
+			tc.Spec.PD.Service = &v1alpha1.ServiceSpec{
+				LoadBalancerSourceRanges: tt.LoadBalancerSourceRanges,
+			}
+			err := validatePDSpec(tc.Spec.PD, field.NewPath("pd"))
+			r := len(err)
+			g.Expect(r).Should(Equal(tt.expectedErrors))
+		})
+	}
+}
+
+func TestValidateTiFlashSpec(t *testing.T) {
+	g := NewGomegaWithT(t)
+	tests := []struct {
+		name           string
+		replicas       int32
+		expectedErrors int
+		storageClaims  []v1alpha1.StorageClaim
+	}{
+		{
+			name:           "has valid storage",
+			replicas:       1,
+			expectedErrors: 0,
+			storageClaims: []v1alpha1.StorageClaim{
+				{
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("2G"),
+						},
+					},
+				},
+			},
+		},
+		{
+			name:           "no storage",
+			replicas:       1,
+			expectedErrors: 3,
+			storageClaims: []v1alpha1.StorageClaim{
+				{
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{},
+					},
+				},
+				{
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{},
+					},
+				},
+				{
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{},
+					},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tc := newTidbClusterWithTiflash()
+			tc.Spec.TiFlash.StorageClaims = tt.storageClaims
+			err := validateTiFlashSpec(tc.Spec.TiFlash, field.NewPath("spec", "tiflash"))
+			r := len(err)
+			g.Expect(r).Should(Equal(tt.expectedErrors))
+		})
+	}
+}
+
+func Test_disallowMutateBootstrapSQLConfigMapName(t *testing.T) {
+	g := NewGomegaWithT(t)
+	tests := []struct {
+		name      string
+		old       *v1alpha1.TiDBSpec
+		new       *v1alpha1.TiDBSpec
+		wantError bool
+	}{
+		{
+			name: "no change, both nil",
+			old: &v1alpha1.TiDBSpec{
+				BootstrapSQLConfigMapName: nil,
+			},
+			new: &v1alpha1.TiDBSpec{
+				BootstrapSQLConfigMapName: nil,
+			},
+			wantError: false,
+		},
+		{
+			name: "no change, both non-nil",
+			old: &v1alpha1.TiDBSpec{
+				BootstrapSQLConfigMapName: pointer.StringPtr("old"),
+			},
+			new: &v1alpha1.TiDBSpec{
+				BootstrapSQLConfigMapName: pointer.StringPtr("old"),
+			},
+			wantError: false,
+		},
+		{
+			name: "mutate from non-nil to nil",
+			old: &v1alpha1.TiDBSpec{
+				BootstrapSQLConfigMapName: pointer.StringPtr("old"),
+			},
+			new: &v1alpha1.TiDBSpec{
+				BootstrapSQLConfigMapName: nil,
+			},
+			wantError: false,
+		},
+		{
+			name: "mutate from nil to non-nil",
+			old: &v1alpha1.TiDBSpec{
+				BootstrapSQLConfigMapName: nil,
+			},
+			new: &v1alpha1.TiDBSpec{
+				BootstrapSQLConfigMapName: pointer.StringPtr("new"),
+			},
+			wantError: true,
+		},
+		{
+			name: "mutate from non-nil to non-nil",
+			old: &v1alpha1.TiDBSpec{
+				BootstrapSQLConfigMapName: pointer.StringPtr("old"),
+			},
+			new: &v1alpha1.TiDBSpec{
+				BootstrapSQLConfigMapName: pointer.StringPtr("new"),
+			},
+			wantError: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := disallowMutateBootstrapSQLConfigMapName(tt.old, tt.new, field.NewPath("spec.tidb.bootstrapSQLConfigMapName"))
+			if tt.wantError {
+				g.Expect(len(errs)).NotTo(Equal(0))
+			} else {
+				g.Expect(len(errs)).To(Equal(0))
+			}
+		})
 	}
 }

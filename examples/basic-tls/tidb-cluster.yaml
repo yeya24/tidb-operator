@@ -8,33 +8,41 @@ metadata:
 spec:
   tlsCluster:
     enabled: true
-  version: v5.0.0
+  version: v8.5.3
   timezone: UTC
   pvReclaimPolicy: Delete
   enableDynamicConfiguration: true
   configUpdateStrategy: RollingUpdate
   discovery: {}
-
+  helper:
+    image: alpine:3.16.0
   pd:
     baseImage: pingcap/pd
+    maxFailoverCount: 0
     replicas: 1
     requests:
-      storage: "1Gi"
+      storage: "10Gi"
     config: |
       [security]
         cert-allowed-cn = [ "TiDB" ]
 
   tikv:
     baseImage: pingcap/tikv
+    maxFailoverCount: 0
+    # If only 1 TiKV is deployed, the TiKV region leader 
+    # cannot be transferred during upgrade, so we have
+    # to configure a short timeout
+    evictLeaderTimeout: 1m
     replicas: 1
     requests:
-      storage: "1Gi"
+      storage: "100Gi"
     config: |
       [security]
         cert-allowed-cn = [ "TiDB" ]
 
   tidb:
     baseImage: pingcap/tidb
+    maxFailoverCount: 0
     replicas: 1
     service:
       type: NodePort
